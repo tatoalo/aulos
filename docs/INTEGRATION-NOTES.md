@@ -2098,6 +2098,13 @@ real network — YouTube is reachable from here (HTTP 200):
 | restart mid-download resumes | ✅ `handing interrupted downloads back … count=1` → `boot recovery … scheduled=1` → `downloading \| Interrupted by shutdown` |
 | `SIGTERM` exits 0, in ~2.7 s | ✅ |
 | the legacy importer on a first start | ✅ (`tests/cli.rs`, `bootstrap::tests`, over WP-04's fixtures) |
+| profile B in full, against WP-04's real `state/v2` corpus | ✅ `import-report.errors = []`, one warning, `.aulos-imported` written, and `dQw4w9WgXcQ` + `aBcDeF12345` in `GET history` with their legacy ids preserved |
+| `HTTPS=true` with a self-signed certificate | ✅ `axum-server` + `rustls` served `https://…/healthz`, and the `healthcheck` subcommand reached it over TLS |
+
+Writing profile B by hand is what caught the second real bug in this harness: the legacy format is
+`{schema_version, kind, items: [{key, info}]}`, not `{schema_version, data: {url: info}}`, so a
+plausible-looking seed would have tested the importer's *error* path and passed for the wrong
+reason. It now copies `crates/aulos-store/tests/fixtures/state/v2/` verbatim.
 
 Unverified, and only a container can verify them: the image build itself, the entrypoint's
 `PUID`/`PGID`/`UMASK`/`CHOWN_DIRS`, the `HEALTHCHECK` wiring, `bgutil-pot` being supervised for

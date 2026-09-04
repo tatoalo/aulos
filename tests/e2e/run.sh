@@ -242,7 +242,8 @@ size="$(printf '%s' "$item" | jget size)"
 ok "filename=$filename size=$size"
 
 # In the volume, owned by PUID:PGID.
-if docker exec "$NAME" sh -c "[ -f '/downloads/${filename}' ]"; then
+# `test -f` through `docker exec`'s argv, not a shell string: a video title may contain a quote.
+if docker exec "$NAME" test -f "/downloads/${filename}"; then
   owner="$(docker exec "$NAME" stat -c '%u:%g' "/downloads/${filename}")"
   ok "the file is in the volume, owned by ${owner}"
   [ "$owner" = "1000:1000" ] || fail "PUID/PGID were not applied (owner=$owner)"
@@ -353,42 +354,13 @@ docker volume rm -f "$VOLUME" >/dev/null
 log "profile B: importing a legacy STATE_DIR"
 SEED="$(mktemp -d)"
 mkdir -p "${SEED}/.metube"
-cat > "${SEED}/.metube/queue.json" <<'JSON'
-{
-  "schema_version": 2,
-  "data": {
-    "https://www.youtube.com/watch?v=e2eSeed1": {
-      "id": "e2eSeed1",
-      "title": "A seeded pending item",
-      "url": "https://www.youtube.com/watch?v=e2eSeed1",
-      "status": "pending",
-      "quality": "best",
-      "format": "mp4",
-      "folder": "",
-      "percent": 0
-    }
-  }
-}
-JSON
-cat > "${SEED}/.metube/completed.json" <<'JSON'
-{
-  "schema_version": 2,
-  "data": {
-    "https://www.youtube.com/watch?v=e2eSeed2": {
-      "id": "e2eSeed2",
-      "title": "A seeded finished item",
-      "url": "https://www.youtube.com/watch?v=e2eSeed2",
-      "status": "finished",
-      "quality": "best",
-      "format": "mp4",
-      "folder": "",
-      "filename": "A seeded finished item.mp4",
-      "size": 1024,
-      "percent": 100
-    }
-  }
-}
-JSON
+# WP-04's checked-in corpus, not a hand-written file: the legacy format is
+# `{schema_version, kind, items: [{key, info}]}`, and a plausible-looking approximation would test
+# the importer's error path instead of its happy one.
+FIXTURE="${ROOT}/crates/aulos-store/tests/fixtures/state/v2"
+[ -d "$FIXTURE" ] || die "the legacy fixture is missing: $FIXTURE"
+cp "${FIXTURE}"/*.json "${SEED}/.metube/"
+ok "seeded $(ls "${SEED}/.metube" | tr '\n' ' ')"
 
 docker run -d --name "$NAME" \
   -p "127.0.0.1:${PORT}:8081" \
@@ -406,29 +378,44 @@ done
 
 report="$(req "${BASE}/api/v2/import-report")"
 errors="$(printf '%s' "$report" | jget errors)"
-if [ "$errors" = "[]" ] || [ "$errors" = "0" ]; then
+if [ "$errors" = "[]" ]; then
   ok "the import report has zero errors"
 else
   printf '%s\n' "$report"
   fail "the import report has errors: $errors"
 fi
 
+# The v1 `id` of an imported row is the provider's `media_id`, which is what the legacy client
+# keys its list by (DESIGN §11.4). These two come straight out of the fixture.
 seeded="$(req "${BASE}/history" | python3 -c '
 import json,sys
 doc = json.load(sys.stdin)
 ids = [row.get("id") for key in ("queue","pending","done") for row in doc.get(key, [])]
 print(",".join(str(i) for i in ids))
 ')"
-printf '%s' "$seeded" | grep -q 'e2eSeed1' \
-  && ok "the pending legacy row was imported (v1 id preserved)" \
-  || fail "e2eSeed1 is missing from history: $seeded"
-printf '%s' "$seeded" | grep -q 'e2eSeed2' \
-  && ok "the finished legacy row was imported" \
-  || fail "e2eSeed2 is missing from history: $seeded"
+for want in dQw4w9WgXcQ aBcDeF12345; do
+  printf '%s' "$seeded" | grep -q "$want" \
+    && ok "the legacy row ${want} was imported with its id preserved" \
+    || fail "${want} is missing from history: $seeded"
+done
 
 [ -f "${SEED}/.metube/.aulos-imported" ] \
   && ok "the marker file was written" \
   || fail "no .aulos-imported marker"
+
+# A second start must not import again: that is what stops it resurrecting deleted rows.
+docker restart -t 25 "$NAME" >/dev/null || die "profile B restart failed"
+for _ in $(seq 1 60); do
+  health="$(docker inspect -f '{{.State.Health.Status}}' "$NAME" 2>/dev/null || echo starting)"
+  [ "$health" = "healthy" ] && break
+  sleep 2
+done
+[ "$health" = "healthy" ] || die "profile B unhealthy after the restart"
+again="$(req "${BASE}/api/v2/import-report" | jget imported_at)"
+first="$(printf '%s' "$report" | jget imported_at)"
+[ "$again" = "$first" ] \
+  && ok "the second start did not re-import (imported_at is unchanged)" \
+  || fail "imported_at moved from $first to $again -- the importer ran twice"
 
 docker rm -f "$NAME" >/dev/null
 rm -rf "$SEED"
