@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="it">
+<head><meta charset="utf-8"><title>vixcloud</title></head>
+<body>
+<div class="jw-wrapper"></div>
+<script>
+    window.video = {"id":98765,"name":"Una Serie Qualunque","filename":"una-serie-s02e03.mp4","quality":1080};
+    window.streams = [{"name":"Server 1","active":false,"url":"https://vixcloud.co/playlist/98765?ub=1&ab=1"},{"name":"Server 2","active":true,"url":"https://vixcloud.co/playlist/98765?b=1"}];
+    window.masterPlaylist = {
+        params: {
+            'token': 'tok3n-value',
+            'expires': '1759000000',
+        },
+        url: 'https://vixcloud.co/playlist/98765',
+    }
+    window.canPlayFHD = false;
+</script>
+<script src="/js/jwplayer.js"></script>
+</body>
+</html>

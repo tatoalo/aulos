@@ -1,0 +1,54 @@
+{
+  "component": "Titles/Show",
+  "props": {
+    "title": {
+      "id": 9,
+      "slug": "una-serie",
+      "name": "Una Serie Qualunque",
+      "type": "tv",
+      "seasons_count": 2,
+      "plot": "Una serie con due stagioni.",
+      "seasons": [
+        {
+          "id": 401,
+          "number": 1,
+          "name": null,
+          "episodes_count": 3
+        },
+        {
+          "id": 402,
+          "number": 2,
+          "name": null,
+          "episodes_count": 20
+        }
+      ]
+    },
+    "loadedSeason": {
+      "id": 401,
+      "number": 1,
+      "title_id": 9,
+      "episodes": [
+        {
+          "id": 900,
+          "number": 1,
+          "name": "",
+          "duration": 44
+        },
+        {
+          "id": 901,
+          "number": 2,
+          "name": "Con nome",
+          "duration": 44
+        },
+        {
+          "number": 3,
+          "name": "Senza id",
+          "duration": 44
+        }
+      ]
+    },
+    "locale": "it"
+  },
+  "url": "/it/titles/9-una-serie/season-1",
+  "version": "d41d8cd98f00b204e9800998ecf8427e"
+}

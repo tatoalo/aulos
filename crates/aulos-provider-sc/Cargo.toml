@@ -28,8 +28,8 @@ aulos-core = { workspace = true }
 aulos-provider = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "fs"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
-reqwest = { workspace = true }
-wreq = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["cookies"] }
+wreq = { workspace = true, optional = true, features = ["cookies"] }
 scraper = { workspace = true }
 regex = { workspace = true }
 strip-ansi-escapes = { workspace = true }
@@ -39,4 +39,4 @@ futures-util = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 wiremock = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

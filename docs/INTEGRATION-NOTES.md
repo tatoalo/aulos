@@ -400,3 +400,90 @@ with your WP id.
   graph. WP-04's own lock delta is three dev-dependency rows on `aulos-store`
   (`insta`, `proptest`, `url`), all already pinned in `[workspace.dependencies]`; any `cargo`
   invocation regenerates it.
+
+## WP-08 — `aulos-provider-sc`: HTTP client, scrape pipeline, entries
+
+- **`wreq` 6.0.0-rc.31 compiles and links on the pinned 1.95 toolchain**, so the BRIEF's
+  plain-`reqwest` escape hatch was **not** taken and `sc-impersonate` stays the default. No
+  `docs/DESIGN.md §10.1` edit is needed for that. `cargo clippy/test -p aulos-provider-sc` is green
+  with the feature on *and* with `--no-default-features` (88 unit + 5 integration tests in both
+  combinations). WP-01's `cmake clang libclang-dev` installs in the Dockerfile builder and in CI
+  must stay.
+- **`wreq-util` is missing from DESIGN §18.6 and that costs the real Chrome fingerprint preset.**
+  `wreq` itself ships only `Emulation`/`EmulationBuilder`; the named browser profiles (`Chrome131`
+  and friends, i.e. the actual JA3/JA4 + HTTP/2 fingerprint tables) live in the separate
+  `wreq-util` crate. Since §18.6 does not list it and WP-08 may not add an unlisted workspace
+  dependency, `http::impersonate` hand-builds the profile from the `curl-impersonate` `chrome`
+  target's cipher list, curve list and sigalg list plus Chrome's four HTTP/2 SETTINGS values. That
+  is BoringSSL with a Chrome-shaped ClientHello — much closer than rustls, but **not** a
+  byte-exact JA3/JA4 match, and the HTTP/2 pseudo-header and SETTINGS *order* are `wreq`'s
+  defaults rather than Chrome's. **Recommended integrator action:** add
+  `wreq-util = "3"` to `[workspace.dependencies]` and to the `aulos-provider-sc` row of DESIGN §3 /
+  the `arch.rs` budget, then replace `chrome_emulation()`'s body with the crate's Chrome preset —
+  it is a ~10-line change in one function, and `the_chrome_profile_is_accepted_by_boringssl`
+  already guards it.
+  `ClientBuilder::build()` constructs the BoringSSL connector eagerly, so `WreqClient::new()`
+  catches a rejected cipher/curve string at boot and falls back to `wreq`'s default TLS options
+  with a WARN and `impersonating() == false` — a bad profile can never become a silent
+  per-download failure.
+- **`ScHttp` has a third method, `cookie_header()`, with a default implementation.** DESIGN §10.1
+  and PLAN WP-08 list only `get` and `impersonating`, but `jit::fresh_stream` has to hand
+  `N_m3u8DL-RE`/ffmpeg the session jar as one `Cookie:` header (legacy read it off `curl_cffi`'s
+  session, `streamingcommunity.py:442`). The default returns `""`, so the design signature is
+  still all an implementor must provide.
+- **CI does not exercise the `plain` client.** PLAN WP-08 requires "CI runs both feature
+  combinations" and `ci.yml` currently runs default features only (plus `--all-features` for
+  clippy), so the `reqwest` path — the one that will actually run wherever BoringSSL is
+  unavailable — is untested there. WP-08 does not own `.github/`; the fix is one line in the
+  `test` job of `.github/workflows/ci.yml`:
+  `- run: cargo test -p aulos-provider-sc --no-default-features --locked`.
+- **`crates/aulos-provider-sc/src/engines.rs` is the seam WP-09 must fill.**
+  `ScProvider::download` delegates to `engines::download(&self, ctx, sink)`, which currently logs
+  an ERROR and returns `ProviderError::ToolMissing("N_m3u8DL-RE")` — deliberately a loud failure
+  rather than `Ok(Outcome::default())`, so an SC item can never be marked `finished` with nothing
+  on disk. WP-09 replaces that function and adds `nm3u8dl`, `ffmpeg`, `mux` and `progress`
+  alongside it. Everything WP-09 needs is already public: `jit::fresh_stream` →
+  `StreamTarget { m3u8, headers, cookies }`, `ScProvider::http()`, `ScProvider::base_of()`,
+  `ScState::from_json` (the persisted `base_url`/`title_id`/`episode_id`) and
+  `ScState::to_legacy_info_json` (the **legacy flat** sidecar of DESIGN §10.3 note 2, key order
+  matching the Python dict literal). `own_slots()` already returns
+  `SC_MAX_CONCURRENT_DOWNLOADS`.
+- **`indexmap` was wanted and dropped.** The DESIGN §3 row for this crate does not budget it and
+  `tests/arch.rs` enforces the row, so the two insertion-ordered maps (the cookie jar and the
+  vixcloud query string) are `Vec<(String, String)>` with a linear scan. Both hold a handful of
+  entries; no behaviour differs. Nothing to do — recorded only so the next person does not
+  re-add it.
+- **`reqwest`'s `cookies` feature is now enabled for this crate** (member-level, not workspace),
+  which is what pulls `cookie`, `cookie_store`, `publicsuffix` and `psl-types` into `Cargo.lock`.
+  The session must send back the `cf_clearance`/`sid` cookies the site sets, exactly as
+  `curl_cffi`'s `Session` did.
+- **Two deliberate behaviour differences from DESIGN, both narrower than they look.**
+  1. A single `/watch/` URL **still performs the S3/S4 embed and stream hops** during resolution.
+     DESIGN §10.4 removes them only from *season* resolution, and legacy used them as the validity
+     probe that decided between "queue this" and "hand the URL back to yt-dlp"; keeping them is
+     what makes an unplayable watch page fail with `Unsupported` (→ the §6.4 runner-up retry)
+     instead of queueing an item that can never download. Cost: 2 extra requests per single add.
+     Season and title resolution do **zero** embed/stream requests, as designed, and
+     `a_twenty_episode_season_resolves_in_exactly_two_requests` asserts the count.
+  2. `resolve()` for a flattened multi-season title **re-stamps `playlist_index`/`playlist_count`
+     as one global `1..=N` run** rather than restarting per season, so a group's child counters and
+     the output template see one sequence. Legacy had no such field.
+- **The SC catalog is one advisory `mp4`/`best` entry labelled "Source"** with
+  `naming: "provider"`, `flags.advisory = true`, `flags.requires_ffmpeg = true` and an explanatory
+  `notice` on both the format and the quality (DESIGN §6.6, PLAN WP-08). Its `options` array is
+  **empty**: `NamingPolicy::Provider` means this provider names and places the file, so
+  advertising `folder`/`custom_name_prefix`/`chapter_template` would be a lie. WP-14 should note
+  that a v1 client posting `{video, any, 1080}` for an SC URL passes the legacy pre-check and then
+  finds no such format in this catalog — the v1 shim needs to map any legacy video selection onto
+  `mp4`/`best` for a provider whose catalog is advisory, or catalog validation will reject a
+  request legacy accepted.
+- **Scrape failures carry a stable `provider_code`.** `ScErrorCode` (`sc_version_unreadable`,
+  `sc_version_rejected`, `sc_no_embed_url`, `sc_no_iframe`, `sc_no_stream`, `sc_nothing_resolved`,
+  …) is what tells an operator "the site rotated its Inertia version" from "Cloudflare blocked us"
+  from "the vixcloud page changed shape". WP-12/WP-14 should pass it as
+  `ProviderError::to_wire(&id, Some(code.as_str()))`; `ScError::code()` is public for that.
+- **`ScState` is the §7.6.3a target shape.** WP-05's importer should build its translated blob with
+  `ScState { base_url, title_id, episode_id, needs_m3u8_extraction, season_number, episode_number,
+  episode, series, ext, extractor, extractor_key, legacy }` and `ScState::to_json()`; `legacy` is
+  `#[serde(default, skip_serializing_if = "Map::is_empty")]`, and `from_json` tolerates a blob
+  missing every optional field, so a row whose ids could not be derived still round-trips.

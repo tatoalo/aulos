@@ -1,0 +1,19 @@
+{
+  "component": "Titles/Show",
+  "props": {
+    "title": {
+      "id": 123,
+      "slug": "il-ladro-di-giorni",
+      "name": "Il Ladro di Giorni",
+      "type": "movie",
+      "runtime": 105,
+      "release_date": "2019-01-01",
+      "quality": "FHD",
+      "plot": "Un padre torna a prendere il figlio.",
+      "seasons": []
+    },
+    "locale": "it"
+  },
+  "url": "/it/titles/123-il-ladro-di-giorni",
+  "version": "d41d8cd98f00b204e9800998ecf8427e"
+}
