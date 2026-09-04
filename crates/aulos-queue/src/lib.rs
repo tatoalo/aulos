@@ -50,6 +50,10 @@
 //! | `CLEAR_COMPLETED_AFTER` | [`clear`] |
 //! | the stall / hard-timeout watchdogs | [`watchdog`] |
 //! | the `HookStore` port implementation | [`hookstore`] |
+//! | the delta aggregator, the generated diff, the flush order | [`aggregator`] |
+//! | frames, the replay ring and the resume merge | [`ring`] |
+//! | `seq`, serialise-once, broadcast, `resume()` | [`hub`] |
+//! | the lock-free published snapshot | [`publish`] |
 //!
 //! # BRIEF scope trims applied here
 //!
@@ -57,10 +61,16 @@
 //! [`EngineCmd`] has no `Watch`, `Unwatch` or `ConnClosed` variant and there is no
 //! connection→groups map anywhere in the process. The snapshot carries every non-terminal item,
 //! children included (DESIGN §8.6's `children_inline` is always `true`).
+//!
+//! The client → server `ack` frame is **CUT** too, so nothing here takes a client cursor: the
+//! replay ring's `floor` is advanced solely by its frame and byte bounds, which is what makes
+//! "one client's cursor can never shorten another client's `?since=` window" (DESIGN §15.3,
+//! PROTOCOL §5.11) structural rather than a discipline.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod add;
+pub mod aggregator;
 pub mod cancel;
 pub mod clear;
 pub mod cmd;
@@ -69,13 +79,17 @@ pub mod engine;
 pub mod entry;
 pub mod groups;
 pub mod hookstore;
+pub mod hub;
 pub mod priority;
+pub mod publish;
 pub mod recovery;
 pub mod resolve;
+pub mod ring;
 pub mod run;
 pub mod slots;
 pub mod watchdog;
 
+pub use aggregator::{Aggregator, DIFF_FIELDS, diff, is_urgent, protocol_block, text_changed};
 pub use cmd::{
     AckActions, Action, ActionsResult, AddError, AddOutcome, CancelScope, Duplicate, EngineCmd,
     EngineError, EngineHandle, HookWrite, ResolveReport, SkipReason, Skipped,
@@ -85,7 +99,13 @@ pub use engine::{Engine, NoPreTerminalHooks, PreTerminalHooks};
 pub use entry::{compact_entry, rebuild_entry};
 pub use groups::GroupAcc;
 pub use hookstore::EngineHookStore;
+pub use hub::{BROADCAST_CAPACITY, EventHub, Resume};
 pub use priority::Priority;
+pub use publish::{Published, StateView, StatusCounts, Truncated};
 pub use recovery::RecoveryReport;
+pub use ring::{
+    DeltaBatch, DeltaItem, Fold, FrameBody, FrameKind, MergeCounts, REASON_ORDER, Ring, RingEntry,
+    WireFrame,
+};
 pub use slots::Slots;
 pub use watchdog::{Heartbeats, JobBeat};

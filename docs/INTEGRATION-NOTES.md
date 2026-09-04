@@ -1166,3 +1166,124 @@ All of these are addressed to packages that do not exist yet. None of them block
   directory scan; the `fake` provider spawns no process, so there is nothing to scan for, and the
   process-group kill itself is `aulos_provider::proc`'s own tested surface (WP-03). The directory
   scan is asserted, on both a `.part` and a `.ytdl` file.
+
+## WP-13 — `aulos-queue`: aggregator, event hub, replay ring, published snapshot
+
+- **`WireFrame.text` is `bytes::Bytes`, not `axum::extract::ws::Utf8Bytes`.** DESIGN §15.3 names
+  the axum type, which would make `aulos-queue` depend on `axum` and invert the §3 dependency
+  direction (`tests/arch.rs` would fail). `bytes` is in §18.6 for exactly this job ("pre-serialised
+  WS frames shared across clients without copies"). **WP-14 converts once per frame** with
+  `Utf8Bytes::try_from(frame.text.clone())` (or `Message::Text`), which is a refcount bump plus a
+  UTF-8 scan; `WireFrame::as_str()` is there if a `&str` is easier.
+- **`EventHub` is `Clone` over an `Arc<Inner>`.** DESIGN §15.3 writes `ring: Mutex<Ring>` inline in
+  the struct, but the aggregator task owns one hub and every HTTP handler needs another. Nothing
+  else about the shape changed. `publish_frame` holds the ring lock across
+  allocate → serialise → record → broadcast on purpose: a frame's `seq`, its ring position and its
+  bus position are one fact, and two publishers that allocated first and locked second could
+  interleave them. The lock is never held across an `await`.
+- **`EventHub::publish_frame(FrameBody)` is the aggregator's entry point, additional to DESIGN's
+  `publish(kind, body: impl Serialize)`.** `publish` is kept verbatim and is what the passthrough
+  kinds (`subscription`, `subscription_removed`, `ytdl_options`, `providers`, `notice`, `health`)
+  use; the four item kinds must go through `publish_frame`, because a `serde_json::Value` cannot be
+  folded by the resume merge. `publish` refuses a non-replayable kind (`snapshot`, `resume`,
+  `pong`, `error`) with an ERROR log and no frame: those are per-connection and **WP-14 builds them
+  itself** from `StateView::load()` and `EventHub::resume()`, using `published.seq` for a snapshot
+  and `hub.head()` for a `pong`/`error`.
+- **`RingEntry` carries a `FrameBody`, not DESIGN §15.3's `batch: Option<Arc<DeltaBatch>>`.** The
+  §15.3 merge table has a rule for `added`, `completed` and `removed` too, and folding those out of
+  the serialised text would mean re-parsing JSON the server had just produced. `FrameBody::Delta`
+  is the design's `batch`; the other four variants are what make the rest of the table expressible.
+- **`Resume::Merged` carries a fourth field, `merged: MergeCounts`.** PROTOCOL §6.3's `resume`
+  frame has to state `{added, completed, removed, delta_items}`, and WP-14 cannot recover those
+  from a `Vec<Arc<WireFrame>>` without parsing them back. `merged.removed` is a **total id count**
+  across the reason groups, as PROTOCOL says.
+- **Every merged frame carries `seq = fold.to`.** A fold replays a window rather than issuing new
+  frames, and PROTOCOL §6.3 tells the client its cursor is `to` once it has applied them all;
+  minting fresh sequences per resuming client would consume `seq` and desynchronise `to`. So the
+  "strictly increasing `seq`" rule holds for the live bus but a resume burst is flat — WP-14 should
+  emit the `resume` envelope with `seq = to` as well.
+- **The merge is "last word wins", which is stronger than the DESIGN §15.3 table and is what makes
+  it equal to a replay.** The table says a `removed` drops an earlier `added`; the proptest in
+  `tests/realtime.rs` found two more cases the fixed emission order needs: a **later**
+  `added`/`completed` must drop an **earlier** `removed` (a delete racing a terminal write would
+  otherwise fold into "create it, then delete it" and lose a row), and an `added` and a `completed`
+  for the same id must keep only whichever came last (`completed` is emitted after `added`, so
+  keeping both would always let the terminal object win). Both are implemented and tested; DESIGN
+  §15.3's table could be amended with the symmetry.
+- **`Aggregator::with_done_total(u64)` is additive and WP-17 must call it** with
+  `RecoveryReport::terminal_total`. DESIGN §15.2 annotates `Published::done_total` "from SQLite",
+  but the aggregator holds no `Store` — that is what makes "500 items with zero database round
+  trips" structural rather than a discipline — and `Engine::recover` publishes only the bounded done
+  *window*. Without the seed a restart reports `done_total` as the window length and every client
+  believes its history was truncated to 500 rows. After the seed the counter moves on its own: `+1`
+  when a known non-terminal row becomes terminal, `-1` when a terminal row is removed or retried,
+  and unchanged when one is evicted from the window or first appears already terminal.
+- **`RemoveReason`'s wire strings differ from PROTOCOL §5.7.** PROTOCOL and DESIGN §15.1 spell the
+  four reasons `deleted`, `cleared`, `auto_cleared`, `group_cascade`; `aulos_core::RemoveReason`
+  (WP-02) names the last two `Expired` and `Replaced`, so the frames say `"expired"` and
+  `"replaced"`. The **order** is the same, and `aulos_queue::REASON_ORDER` is the single source of
+  it for both the live flush and the resume fold. Fixing the wire strings is a two-line
+  `#[serde(rename = …)]` plus `as_str` change in `aulos-core::event`, which is not this package's
+  file; either that or PROTOCOL §5.7 should be amended. **Decide before the iOS client ships.**
+- **The aggregator keeps its own `GroupAcc` per group, and it is the one that reaches the wire.**
+  The WP-12 note assigns `downloaded`, `speed` and `active_percent` to WP-13, but the engine owns
+  the `GroupAcc` instances and there is no aggregator → engine group-progress message, so the
+  aggregator mirrors the whole accumulator from the child views it already sees (folded in O(1) per
+  child change, with a five-minute recompute for float drift) and writes its
+  `percent`/`speed`/`eta` onto the group row. The engine stays authoritative for
+  `children_total`/`_done`/`_error`/`_active`, which the aggregator never touches. The one input
+  this loses is a **queued** child's `filesize_approx`, which lives in the entry blob and not on the
+  wire: before any child starts, both accumulators say 0 %, and once every child has finished (real
+  `size`) or started (`total_bytes` from its first progress frame) the mirror is byte-weighted and
+  strictly better than the engine's, because it includes the in-flight bytes the engine
+  structurally cannot see. In between, a group with some still-queued children falls back to the
+  documented count-weighted percent. Closing the gap properly means either an additive
+  `EngineCmd::GroupProgress { group, downloaded, speed, active_percent }` (a WP-12 file change) or
+  moving `GroupAcc` ownership into the aggregator; both are out of this package's lane.
+- **The aggregator forwards `Stage`/`File` with `EngineHandle::stage`/`file`, which `await` an
+  `EngineCmd` send.** There is a theoretical cycle — engine → `DomainEvent` (4 096) → router →
+  aggregator inbox (1 024, `Block`) → aggregator → `EngineCmd` (1 024) → engine — that could
+  deadlock if all three channels filled at once. DESIGN §15.1 asks for exactly this forward and the
+  harness pump WP-12's tests use does the same. If it ever bites, the fix is a one-task forwarder
+  owning the `EngineHandle` and fed by its own bounded channel, so the aggregator never awaits the
+  engine.
+- **A flush emits up to four `delta` frames, then leaves the rest dirty.** DESIGN §15.1's worked
+  example ("1 000 dirty items produce 5 frames of 200 … every item within 4 ticks") only closes if
+  a flush may emit several consecutive frames, so `MAX_DELTA_FRAMES_PER_FLUSH = 4`: 1 000 dirty ids
+  become four frames on one tick and one on the next. The `dirty` set is an `IndexSet` drained from
+  the front and re-dirtied at the back, which **is** the "persistent round-robin cursor" — there is
+  no separate index. `added`/`completed` are chunked at `AULOS_WS_MAX_DELTAS_PER_FRAME` too, so
+  `Engine::recover`'s single 1 000-view `Added` event cannot produce one enormous frame.
+- **A dirty id with no `last_sent` baseline is promoted to an `added` upsert, not dropped.** A
+  `delta` may never introduce a record (PROTOCOL §5.4), so a `StatusChanged` that arrives without a
+  preceding `Added` — which should not happen, but would be an invisible lost row if it did —
+  becomes a full object in the `added` position instead.
+- **The urgency classifier is generated from the same field list as the diff**, with the nine
+  numeric progress fields marked `num` and everything else urgent. DESIGN §15.1 states it as "text
+  is urgent" (`msg`, `title`, `phase`); implementing it as "everything except the numbers" also
+  covers `status`, `error`, `filename`, `size` and the group counters, which a client wants
+  promptly for the same reason and which the design's own table lists as urgent under `Stage` /
+  `Added` / `Completed`. `aulos_queue::text_changed` exposes the narrower rule PROTOCOL §5.4 states
+  to client authors. The generated `DIFF_FIELDS` is declared with length `ItemView::FIELDS.len()`,
+  so adding a field to `ItemView` without classifying it here is a **compile error**.
+- **`aulos_queue::protocol_block(&Config)` is the `snapshot`'s `protocol` object** (PROTOCOL §5.3),
+  ready for WP-14 to inline into both the WS `snapshot` and `GET api/v2/state`.
+- **`Published.truncated.groups` is always empty and `by_id` indexes the concatenation.** The BRIEF
+  CUTs group collapsing, so every non-terminal child ships inline; `by_id[id]` is a position in
+  `items`, or `items.len() + i` for the `i`-th entry of `done`, and `Published::get` / `all()` hide
+  that. `by_id` is pointer-equal across a tick with no membership change, which is the DESIGN §15.2
+  reuse optimisation.
+- **`ViewExtras.download_url` is still `None` in the published snapshot.** The aggregator only
+  merges progress over what the engine gave it, so WP-14 must apply
+  `PUBLIC_HOST_URL`/`PUBLIC_HOST_AUDIO_URL` plus percent-encoding when it serves an `ItemView` —
+  including views taken straight out of `StateView::load()` and out of the `added`/`completed`
+  frames' JSON. Note that this means a frame's `download_url` is currently `null` on the wire:
+  either WP-14 fills it before the view reaches the aggregator (the engine's `ViewExtras` is the
+  natural place, via a wiring-time formatter) or the field has to be filled by the client from
+  `filename`. **This needs a decision at integration time**; the cleanest fix is an additive
+  formatter passed to `Engine::new`, which is a WP-12 file change.
+- **The `ack` frame is CUT (BRIEF), so nothing takes a client cursor.** The PLAN's `ack` acceptance
+  bullet is covered by its substance instead: `hub::tests::one_client_catching_up_never_shortens_
+  another_clients_window` proves `floor` moves only on the frame and byte bounds, and
+  `aggregator::tests::an_item_added_and_removed_in_one_window_leaves_no_row` plus
+  `a_rest_readers_cursor_is_never_newer_than_the_socket` cover the other two halves of that bullet.
