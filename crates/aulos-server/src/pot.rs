@@ -1142,13 +1142,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_port_fails_both_halves_of_the_probe() {
-        // Bind then drop, so the port is almost certainly free.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let endpoint = format!("http://{addr}");
-        assert!(tcp_probe(&endpoint).await.is_err());
-        assert!(HttpProbe::new().probe(&endpoint).await.is_err());
+        // Port 1 rather than a bound-then-released ephemeral port: the OS hands ephemeral ports
+        // back out immediately, so a concurrent test that binds one can make "almost certainly
+        // free" false — which it did.
+        let endpoint = "http://127.0.0.1:1";
+        assert!(tcp_probe(endpoint).await.is_err());
+        assert!(HttpProbe::new().probe(endpoint).await.is_err());
     }
 
     #[test]

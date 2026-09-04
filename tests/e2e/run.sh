@@ -150,11 +150,20 @@ ok "the container's HEALTHCHECK reports healthy"
 # --- 2. healthz, pot included -----------------------------------------------------------------
 
 log "healthz"
+http="$(code "${BASE}/healthz")"
 body="$(req "${BASE}/healthz")" || die "healthz did not answer"
 status="$(printf '%s' "$body" | jget status)"
+# DESIGN §16.3: `503` **only** when the store is unusable or the WAL is over 256 MB. The body's
+# word is a roll-up over every component, so a single `down` optional component can make it say
+# `down` under a `200`; the HTTP status is the verdict, as it is for the `healthcheck` subcommand.
+[ "$http" = "200" ] && ok "healthz → 200 (status=$status)" || {
+  printf '%s\n' "$body"
+  fail "healthz → $http"
+}
 case "$status" in
-  ok|degraded) ok "status=$status" ;;
-  *) printf '%s\n' "$body"; fail "healthz status=$status" ;;
+  ok|degraded) ok "the roll-up is $status" ;;
+  *) printf '%s\n' "$body" | head -40
+     fail "the roll-up is $status; a component is down inside the image" ;;
 esac
 
 pot="$(printf '%s' "$body" | jget components.pot.status)"

@@ -107,13 +107,21 @@ impl Probe {
         }
     }
 
-    /// The `healthz` component for this probe: `ok` with a `version`, or `down` with a `detail`.
+    /// The `healthz` component for this probe: `ok` with a `version`, or **`degraded`** with a
+    /// `detail`.
+    ///
+    /// `degraded`, not `down`, is DESIGN §16.1 step 9's own word for these four: "ffmpeg, ffprobe,
+    /// N_m3u8DL-RE, deno are WARN and **mark the component degraded**". It is also the only answer
+    /// that keeps the container alive: [`aulos_core::HealthRegistry`] rolls the whole view up to
+    /// the *worst* component, so one `down` optional tool would make `healthz` report
+    /// `"status":"down"` — and a missing `deno` must not get a server that is downloading fine
+    /// restarted every two minutes.
     #[must_use]
     pub fn component(&self) -> ComponentHealth {
         match self {
             Self::Ok(v) => ComponentHealth::new(ComponentStatus::Ok).with("version", v.clone()),
             Self::Missing(why) => {
-                ComponentHealth::new(ComponentStatus::Down).with("detail", why.clone())
+                ComponentHealth::new(ComponentStatus::Degraded).with("detail", why.clone())
             }
         }
     }
@@ -369,7 +377,13 @@ mod tests {
         let probe = probe_tool(&spec).await;
         assert!(!probe.is_ok(), "{probe:?}");
         let component = probe.component();
-        assert_eq!(component.status, ComponentStatus::Down);
+        assert_eq!(
+            component.status,
+            ComponentStatus::Degraded,
+            "DESIGN §16.1 step 9: an optional tool marks its component degraded, not down -- \
+             `HealthRegistry` rolls up to the worst component, so `down` here would make the \
+             container unhealthy over a missing deno"
+        );
         assert!(component.detail.contains_key("detail"), "{component:?}");
         assert!(!component.detail.contains_key("version"), "{component:?}");
     }
@@ -430,7 +444,7 @@ mod tests {
             view.components.get("ffmpeg").map(|c| c.status),
             Some(ComponentStatus::Ok)
         );
-        // A `down` optional tool degrades the roll-up but the store is what makes it fatal.
+        // Only the store makes `healthz` answer 503.
         assert!(!view.is_fatal());
     }
 }

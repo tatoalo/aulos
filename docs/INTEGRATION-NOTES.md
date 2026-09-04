@@ -1977,6 +1977,23 @@ Recorded because each is the kind of thing an integration pass would otherwise r
   healthcheck || true` — or better, dropping the line, since the `URL_PREFIX=metube` container
   check two lines below already proves the subcommand works — fixes it. `.github/` is not this
   package's to edit.
+- **`aulos-core`: `HealthRegistry`'s roll-up cannot produce the DESIGN §16.3 payload.** `set()`
+  recomputes `HealthView.status` as the **worst** component (`fold(Ok, worse)`), so a single `down`
+  component makes the whole view `down` — while `aulos-api`'s `healthz` still answers `200`,
+  because §16.3 reserves `503` for an unusable store or a runaway WAL. §16.3's own example payload
+  is `"status": "degraded"` with `"pot": {"status":"down"}` inside it, which that roll-up cannot
+  produce. **Found by running the binary**: on a machine with no `deno` and no `N_m3u8DL-RE`,
+  `healthz` answered `200 {"status":"down"}`, and a body-based `healthcheck` would then have
+  restarted a perfectly working container every two minutes.
+
+  Two things were changed here rather than in `aulos-core`: an optional tool's component is
+  `degraded`, which is DESIGN §16.1 step 9's own word for those four ("ffmpeg, ffprobe,
+  N_m3u8DL-RE, deno are WARN and **mark the component degraded**"); and `healthcheck` decides on
+  the **HTTP status** with the body's word as the reason, so no future `down` component can make
+  Docker kill a healthy server. `tests/e2e/run.sh` asserts the same way. The proper fix is one
+  line in `aulos-core`: cap the roll-up at `Degraded` unless the fatal condition holds, i.e.
+  `if worst == Down && name != "store" { Degraded }` — or let `HealthView` carry the roll-up and
+  the fatal flag separately.
 - **`aulos-core`: an engine-task panic cannot be discriminated in a panic hook.**
   `signals::install_panic_hook` aborts on a panic on the store's writer **thread** (matched by
   name, cross-checked against `aulos-store`'s source by a test), which is DESIGN §16.4's rule for

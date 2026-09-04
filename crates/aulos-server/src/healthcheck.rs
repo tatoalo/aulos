@@ -7,9 +7,15 @@
 //! `http://127.0.0.1:8081metubehealthz` — which never answers, so the container is restarted
 //! forever (regression C16).
 //!
-//! Exit 0 when the body's `status` is `ok` **or** `degraded`: a missing `deno` must not make
-//! Docker kill a server that is downloading fine. Only the 503 conditions of DESIGN §16.3 (an
-//! unusable store, or a runaway WAL) exit 1.
+//! Exit 0 for any **2xx**: a missing `deno` must not make Docker kill a server that is downloading
+//! fine, and DESIGN §16.3 defines the HTTP status precisely — `503` **only** when the store is
+//! unusable or the WAL exceeds 256 MB, i.e. only when the service is actually useless. The body's
+//! `status` word is reported as the reason rather than used as the verdict, because
+//! [`aulos_core::HealthRegistry`] rolls the view up to its *worst* component: one `down` optional
+//! component makes the body say `"status":"down"` while `healthz` still answers `200`, which is a
+//! payload DESIGN §16.3's own example shows (`"pot": {"status":"down"}` under a top-level
+//! `"status":"degraded"`) but the roll-up cannot currently produce. See
+//! `docs/INTEGRATION-NOTES.md`, WP-17.
 
 use std::time::Duration;
 
@@ -18,7 +24,7 @@ use aulos_core::config::{self, Config, RawEnv};
 /// The server answered `ok` or `degraded`.
 pub const EXIT_HEALTHY: i32 = 0;
 
-/// Anything else: unreachable, a non-2xx, an unparseable body, or `status: "down"`.
+/// Anything else: unreachable, a non-2xx, or an unparseable body.
 pub const EXIT_UNHEALTHY: i32 = 1;
 
 /// The DESIGN §3.1 request timeout.
@@ -75,17 +81,20 @@ pub async fn check(cfg: &Config) -> (String, i32) {
             );
         }
     };
-    let state = health.get("status").and_then(serde_json::Value::as_str);
-    match state {
-        Some(s @ ("ok" | "degraded")) => (format!("{url}: {s}"), EXIT_HEALTHY),
-        Some(other) => (
-            format!("{url}: HTTP {status}, status={other}"),
+    let state = health
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    if status.is_success() {
+        (
+            format!("{url}: HTTP {status}, status={state}"),
+            EXIT_HEALTHY,
+        )
+    } else {
+        (
+            format!("{url}: HTTP {status}, status={state}"),
             EXIT_UNHEALTHY,
-        ),
-        None => (
-            format!("{url}: HTTP {status}, no status field"),
-            EXIT_UNHEALTHY,
-        ),
+        )
     }
 }
 
@@ -157,5 +166,60 @@ mod tests {
         // Port 1 is privileged and never bound by this suite.
         let (msg, code) = check(&cfg(&[("PORT", "1")])).await;
         assert_eq!(code, EXIT_UNHEALTHY, "{msg}");
+    }
+
+    /// A one-shot HTTP server that answers `http` with `body`, and its port.
+    ///
+    /// Hand-rolled rather than `wiremock`: this crate has no such dev-dependency and the whole
+    /// need is one status line and one body.
+    async fn stub(http: u16, body: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 1024];
+                let _ = socket.read(&mut scratch).await;
+                let head = format!("HTTP/1.1 {http} X\r\n");
+                let headers = format!(
+                    "content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(headers.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (port, task)
+    }
+
+    /// The verdict is the HTTP status, not the body's word.
+    ///
+    /// This is the trap the HTTPS smoke run caught: `HealthRegistry` rolls the view up to its
+    /// worst component, so a machine without `deno` serves `200 {"status":"down"}`. Deciding on the
+    /// body would then restart a perfectly working container every two minutes.
+    #[tokio::test]
+    async fn a_200_is_healthy_whatever_the_body_says_and_a_503_is_not() {
+        for (http, body, want) in [
+            (200_u16, r#"{"status":"ok"}"#, EXIT_HEALTHY),
+            (200, r#"{"status":"degraded"}"#, EXIT_HEALTHY),
+            (200, r#"{"status":"down"}"#, EXIT_HEALTHY),
+            (503, r#"{"status":"down"}"#, EXIT_UNHEALTHY),
+        ] {
+            let (port, served) = stub(http, body).await;
+            let (msg, code) = check(&cfg(&[("PORT", &port.to_string())])).await;
+            assert_eq!(code, want, "HTTP {http} {body}: {msg}");
+            let _ = served.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_body_is_unhealthy() {
+        let (port, served) = stub(200, "nope!").await;
+        let (msg, code) = check(&cfg(&[("PORT", &port.to_string())])).await;
+        assert_eq!(code, EXIT_UNHEALTHY, "{msg}");
+        assert!(msg.contains("unparseable"), "{msg}");
+        let _ = served.await;
     }
 }
