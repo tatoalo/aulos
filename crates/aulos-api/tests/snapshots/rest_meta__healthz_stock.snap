@@ -121,7 +121,7 @@ expression: body
     }
   ],
   "seq": "[n]",
-  "status": "down",
+  "status": "degraded",
   "uptime_s": "[n]",
   "url_prefix": "/",
   "v1_shim": true,

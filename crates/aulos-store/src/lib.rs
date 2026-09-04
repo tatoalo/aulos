@@ -206,6 +206,26 @@ impl Store {
         reply.await.map_err(|_| StoreError::Closed)?
     }
 
+    /// `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)`, leaving the store open.
+    ///
+    /// DESIGN §7.1 asks for this on graceful shutdown **and every six hours**; [`Store::close`] is
+    /// the shutdown half and this is the half a long-lived container schedules. It runs on the
+    /// writer thread, after whatever batch is in flight commits, because the writer owns the only
+    /// connection that may take the write lock — a read-pool connection cannot truncate the WAL.
+    /// A checkpoint another connection is still reading through is reported by SQLite as busy and
+    /// logged as a WARN; the WAL is then kept and the next attempt reclaims it, so this is `Ok`.
+    ///
+    /// # Errors
+    /// [`StoreError::Closed`] when the writer is already gone; otherwise whatever the pragmas
+    /// reported.
+    pub async fn checkpoint(&self) -> Result<(), StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.w
+            .send(WriteMsg::Checkpoint(tx))
+            .map_err(|_| StoreError::Closed)?;
+        rx.await.map_err(|_| StoreError::Closed)?
+    }
+
     /// Records `meta.seq_hwm_witness`, checkpoints the WAL with `TRUNCATE`, runs
     /// `PRAGMA optimize` and stops both thread pools.
     ///

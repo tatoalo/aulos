@@ -68,8 +68,14 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p aulos-workspace-tests --locked
-      - name: shellcheck the entrypoint
-        run: shellcheck docker/entrypoint.sh
+      - name: shellcheck every shipped shell script
+        # `--severity=warning`: the e2e script uses `A && ok … || fail …` throughout, which is a
+        # deliberate idiom there (both branches report) and which shellcheck flags at `info`.
+        run: |
+          shellcheck --severity=warning \
+            docker/entrypoint.sh \
+            tests/e2e/run.sh \
+            crates/aulos-provider-ytdlp/tests/smoke_extract.sh
       - name: docker.yml builds linux/amd64 only
         run: |
           set -eu

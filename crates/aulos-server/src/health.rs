@@ -12,6 +12,7 @@
 //! second would be a frame per second per client forever.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use aulos_provider::Registry;
 use aulos_provider::sink::ProgressSinkFactory;
 use aulos_queue::StateView;
 use aulos_store::Store;
-use aulos_telegram::TelegramHealth;
+use aulos_telegram::{TelegramHealth, TelegramHealthHandle};
 use tokio_util::sync::CancellationToken;
 
 /// How often the moving components are recomputed.
@@ -46,6 +47,12 @@ pub struct Probes {
     pub hooks: Option<HooksHealthHandle>,
     /// The subscription manager, asked for its aggregate once a tick.
     pub subs: SubscriptionsHandle,
+    /// The Telegram actor's counters, taken **before** `TelegramActor::spawn` consumed the actor.
+    /// `None` when the bot is not running.
+    pub telegram: Option<TelegramHealthHandle>,
+    /// The `telegram` subscriber's event-drop counter, taken **before** the inbox was moved into
+    /// the actor. `None` when the bot is not running, and reported as `0` in that case.
+    pub telegram_dropped: Option<Arc<AtomicU64>>,
 }
 
 /// Publishes the moving components until `shutdown` is cancelled.
@@ -80,7 +87,17 @@ pub async fn publish_once(probes: &Probes, health: &HealthRegistry) -> bool {
     if let Some(hooks) = &probes.hooks {
         let view = hooks.health();
         changed |= view.apply(health);
-        changed |= health.set("events", events_component(view.events_dropped));
+        let telegram_dropped = probes
+            .telegram_dropped
+            .as_ref()
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        changed |= health.set(
+            "events",
+            events_component(view.events_dropped, telegram_dropped),
+        );
+    }
+    if let Some(tg) = &probes.telegram {
+        changed |= health.set("telegram", telegram_component(Some(&tg.health())));
     }
     if let Some(subs) = subscriptions(&probes.subs).await {
         changed |= health.set("subscriptions", subs);
@@ -183,20 +200,20 @@ pub fn queue_component(probes: &Probes) -> ComponentHealth {
 /// only user-visible consequence the fan-out can have, so it is a `degraded` component rather than
 /// a detail field on something else.
 ///
-/// `telegram` is reported as `0`: `EventInbox::dropped()` is the only accessor and the inbox is
-/// moved into the actor by `TelegramActor::spawn`, so this process cannot read it back. Every drop
-/// is still WARN-logged by the router itself. An additive `EventInbox::dropped_handle()` in
-/// `aulos-core` would close the gap — see `docs/INTEGRATION-NOTES.md`, WP-17.
+/// Both subscribers are **measured**: the hooks half comes from `HooksHealth::events_dropped`, the
+/// Telegram half from the `Arc<AtomicU64>` that `EventInbox::dropped_handle()` hands over before
+/// `TelegramActor::spawn` consumes the inbox. `telegram` reads `0` when the bot is not running,
+/// which is the truth — an inbox nobody was given cannot drop anything.
 #[must_use]
-pub fn events_component(hooks_dropped: u64) -> ComponentHealth {
-    let status = if hooks_dropped == 0 {
+pub fn events_component(hooks_dropped: u64, telegram_dropped: u64) -> ComponentHealth {
+    let status = if hooks_dropped == 0 && telegram_dropped == 0 {
         ComponentStatus::Ok
     } else {
         ComponentStatus::Degraded
     };
     ComponentHealth::new(status).with(
         "dropped",
-        serde_json::json!({ "hooks": hooks_dropped, "telegram": 0 }),
+        serde_json::json!({ "hooks": hooks_dropped, "telegram": telegram_dropped }),
     )
 }
 
@@ -226,10 +243,9 @@ pub async fn subscriptions(handle: &SubscriptionsHandle) -> Option<ComponentHeal
 
 /// `components.telegram` (DESIGN §16.3).
 ///
-/// Published once, after `TelegramActor::load()`, because the actor exposes `health()` only on
-/// `&self` and `spawn` consumes it. `edits_throttled_total` therefore stops at its boot value; an
-/// additive `TelegramActor::health_handle()`, mirroring `HookDispatcher::health_handle()`, would
-/// make it live — see `docs/INTEGRATION-NOTES.md`, WP-17.
+/// Republished every [`TICK`] from the `TelegramHealthHandle` the wiring takes before
+/// `TelegramActor::spawn` consumes the actor, so `edits_throttled_total` and the board counts move
+/// while the bot runs. `None` is the disabled component, which `healthz` names on purpose.
 #[must_use]
 pub fn telegram_component(health: Option<&TelegramHealth>) -> ComponentHealth {
     match health {
@@ -271,6 +287,8 @@ mod tests {
             sink,
             hooks: None,
             subs,
+            telegram: None,
+            telegram_dropped: None,
         }
     }
 
@@ -353,18 +371,24 @@ mod tests {
 
     #[test]
     fn the_events_component_degrades_only_when_something_was_dropped() {
-        let clean = events_component(0);
+        let clean = events_component(0, 0);
         assert_eq!(clean.status, ComponentStatus::Ok);
         assert_eq!(clean.detail["dropped"]["hooks"], 0);
         assert_eq!(clean.detail["dropped"]["telegram"], 0);
 
-        let lossy = events_component(4);
+        let lossy = events_component(4, 0);
         assert_eq!(
             lossy.status,
             ComponentStatus::Degraded,
             "a skipped hook run is user-visible"
         );
         assert_eq!(lossy.detail["dropped"]["hooks"], 4);
+
+        // The Telegram half is measured now, not hard-coded: a dropped notification degrades too.
+        let tg = events_component(0, 2);
+        assert_eq!(tg.status, ComponentStatus::Degraded);
+        assert_eq!(tg.detail["dropped"]["telegram"], 2);
+        assert_eq!(tg.detail["dropped"]["hooks"], 0);
     }
 
     #[test]

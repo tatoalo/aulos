@@ -229,6 +229,52 @@ async fn the_wal_gauge_grows_with_writes_and_close_truncates_it() {
     );
 }
 
+/// DESIGN §7.1's six-hourly half: the WAL is reclaimed **without** closing the store, and the
+/// store keeps taking writes afterwards.
+#[tokio::test]
+async fn checkpoint_truncates_the_wal_and_leaves_the_store_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(support::options(dir.path())).unwrap();
+    for ord in 0..64 {
+        store
+            .write(
+                vec![WriteOp::InsertItems {
+                    items: vec![support::item(ord)],
+                }],
+                Durability::Sync,
+            )
+            .await
+            .unwrap();
+    }
+    assert!(store.wal_bytes() > 0, "writes go through the WAL");
+
+    store.checkpoint().await.unwrap();
+    assert_eq!(
+        store.wal_bytes(),
+        0,
+        "checkpoint() truncates the WAL, which is the whole point of scheduling it"
+    );
+
+    // Still open: the write lands, and the row count includes everything written before.
+    store
+        .write(
+            vec![WriteOp::InsertItems {
+                items: vec![support::item(64)],
+            }],
+            Durability::Sync,
+        )
+        .await
+        .unwrap();
+    let items = store.items(ItemFilter::default()).await.unwrap();
+    assert_eq!(items.rows.len(), 65);
+
+    store.close().await.unwrap();
+    assert!(
+        matches!(store.checkpoint().await, Err(StoreError::Closed)),
+        "a closed store has no writer to checkpoint through"
+    );
+}
+
 /// Reads are served from the read pool while the writer is busy, and more concurrent reads than
 /// there are pool threads simply queue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

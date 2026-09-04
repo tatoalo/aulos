@@ -598,6 +598,26 @@ impl EventInbox {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// The same counter [`EventInbox::dropped`] reads, as a handle that outlives the inbox.
+    ///
+    /// [`EventInbox::dropped`] needs `&self`, and every consumer in the server — `Aggregator::
+    /// spawn`, `HookDispatcher::spawn`, `TelegramActor::spawn` — takes the inbox **by value**. So
+    /// the health publisher has to take the counter *before* handing the inbox over, or it can
+    /// only ever report the boot value. Take this at wiring time and read it forever:
+    ///
+    /// ```no_run
+    /// # use aulos_core::event::{EventRouter, SubscriberSpec};
+    /// # let (mut router, _tx) = EventRouter::new(64);
+    /// let inbox = router.subscribe(SubscriberSpec::telegram());
+    /// let dropped = inbox.dropped_handle();
+    /// // `inbox` is consumed here by the subscriber's `spawn`; `dropped` still reads the counter.
+    /// assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    /// ```
+    #[must_use]
+    pub fn dropped_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dropped)
+    }
 }
 
 /// One registered subscriber, from the router's point of view.

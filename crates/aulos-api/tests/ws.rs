@@ -75,7 +75,9 @@ async fn a_degraded_component_reaches_a_fresh_client_with_no_health_frame() {
         );
         let mut socket = connect(&rig, "ws").await;
         let snapshot = next_frame(&mut socket).await;
-        assert_eq!(snapshot["health"]["status"], "down");
+        // `degraded`, because DESIGN §16.3 keeps `down` for the one unusable-service condition —
+        // the per-component status is still the honest `down`.
+        assert_eq!(snapshot["health"]["status"], "degraded");
         assert_eq!(snapshot["health"]["components"]["pot"], "down");
         assert!(
             try_next_frame(&mut socket, Duration::from_millis(200))

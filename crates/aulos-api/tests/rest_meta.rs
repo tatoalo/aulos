@@ -1036,14 +1036,27 @@ async fn a_degraded_component_is_visible_to_a_fresh_client() {
 
         // No `health` frame has been sent — the frame is transition-only — and yet a client that
         // connects now learns it from the snapshot (PROTOCOL §5.3).
+        //
+        // The roll-up is `degraded`, not `down`: DESIGN §16.3 reserves `down` for the one
+        // condition that makes the service useless, and its own example payload is this exact
+        // shape — a `down` `pot` inside a `degraded` view.
         let (_, state) = rig.get("api/v2/state").await;
-        assert_eq!(state["health"]["status"], "down");
+        assert_eq!(state["health"]["status"], "degraded");
         assert_eq!(state["health"]["components"]["pot"], "down");
 
         let (status, health) = rig.get("healthz").await;
         assert_eq!(status, 200, "only an unusable store is a 503: {health}");
-        assert_eq!(health["status"], "down");
+        assert_eq!(health["status"], "degraded");
         assert_eq!(health["components"]["pot"]["restarts"], 3);
+
+        // …and the store going down *is* the fatal one.
+        rig.state.health.set(
+            "store",
+            ComponentHealth::new(ComponentStatus::Down).with("detail", "the read pool is gone"),
+        );
+        let (status, health) = rig.get("healthz").await;
+        assert_eq!(status, 503, "an unusable store is the one 503: {health}");
+        assert_eq!(health["status"], "down");
     })
     .await;
 }

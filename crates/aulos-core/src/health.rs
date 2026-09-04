@@ -136,6 +136,28 @@ impl HealthView {
             .get("store")
             .is_some_and(|c| c.status == ComponentStatus::Down)
     }
+
+    /// The roll-up over `components`: the worst component, **capped at `degraded`** unless the
+    /// fatal condition of [`HealthView::is_fatal`] holds.
+    ///
+    /// The cap is what makes DESIGN §16.3's own example payload representable — `"status":
+    /// "degraded"` with `"pot": {"status": "down"}` inside it. A plain "worst wins" fold cannot
+    /// produce it: one `down` optional component would make the whole view `down` while `healthz`
+    /// still answered `200`, and a body-reading `healthcheck` would then restart a container whose
+    /// only problem is a sidecar it does not need. The service is `down` when it is unusable, and
+    /// §16.3 says exactly one component decides that.
+    #[must_use]
+    pub fn roll_up(&self) -> ComponentStatus {
+        let worst = self
+            .components
+            .values()
+            .fold(ComponentStatus::Ok, |acc, c| acc.worse(c.status));
+        if worst == ComponentStatus::Down && !self.is_fatal() {
+            ComponentStatus::Degraded
+        } else {
+            worst
+        }
+    }
 }
 
 /// The process-wide health map. Cheap to read (one `ArcSwap` load), so `healthz` never blocks.
@@ -200,10 +222,7 @@ impl HealthRegistry {
     fn mutate(&self, f: impl FnOnce(&mut HealthView)) {
         let mut next = (*self.snapshot()).clone();
         f(&mut next);
-        next.status = next
-            .components
-            .values()
-            .fold(ComponentStatus::Ok, |acc, c| acc.worse(c.status));
+        next.status = next.roll_up();
         self.inner.store(Arc::new(next));
     }
 }
@@ -253,18 +272,39 @@ mod tests {
     }
 
     #[test]
-    fn the_roll_up_is_the_worst_component() {
+    fn the_roll_up_is_the_worst_component_capped_at_degraded() {
         let r = HealthRegistry::new();
         assert_eq!(r.snapshot().status, ComponentStatus::Ok);
         assert!(r.set("store", ComponentHealth::new(ComponentStatus::Ok)));
         assert!(r.set("pot", ComponentHealth::new(ComponentStatus::Down)));
-        assert_eq!(r.snapshot().status, ComponentStatus::Down);
+        // DESIGN §16.3's own example payload: `"status": "degraded"` around a `down` `pot`. A
+        // `down` sidecar does not make the server unusable, and `healthz` answers 200 for it.
+        assert_eq!(r.snapshot().status, ComponentStatus::Degraded);
         assert!(
             !r.snapshot().is_fatal(),
             "only the store makes healthz answer 503"
         );
         assert!(r.set("store", ComponentHealth::new(ComponentStatus::Down)));
+        assert_eq!(
+            r.snapshot().status,
+            ComponentStatus::Down,
+            "the one fatal component is not capped"
+        );
         assert!(r.snapshot().is_fatal());
+        // …and it stops being fatal, and the roll-up drops back to the cap, when it recovers.
+        assert!(r.set("store", ComponentHealth::new(ComponentStatus::Ok)));
+        assert_eq!(r.snapshot().status, ComponentStatus::Degraded);
+        assert!(!r.snapshot().is_fatal());
+    }
+
+    #[test]
+    fn a_degraded_component_rolls_up_as_degraded_and_ok_ones_as_ok() {
+        let r = HealthRegistry::new();
+        assert!(r.set("store", ComponentHealth::new(ComponentStatus::Ok)));
+        assert!(r.set("telegram", ComponentHealth::new(ComponentStatus::Disabled)));
+        assert_eq!(r.snapshot().status, ComponentStatus::Ok);
+        assert!(r.set("deno", ComponentHealth::new(ComponentStatus::Degraded)));
+        assert_eq!(r.snapshot().status, ComponentStatus::Degraded);
     }
 
     #[test]

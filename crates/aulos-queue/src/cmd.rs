@@ -200,7 +200,31 @@ pub enum EngineCmd {
     SlotFreed,
     /// 1 Hz: `clear_after`, retry backoffs, group drift, the pre-terminal safety net.
     Tick,
+    /// Stop: cancel every in-flight job, hand the interrupted rows to the next boot, ack, and
+    /// **end the loop** (DESIGN §16.4 steps 5–6).
+    ///
+    /// This is the only command that terminates [`crate::Engine::run`]. The engine hands a clone
+    /// of its own sender to every job task it spawns, so `rx.recv()` cannot return `None` while a
+    /// job is alive however many [`EngineHandle`]s the process has dropped — without this the
+    /// shutdown has to reach in from outside and abort the task.
+    Shutdown {
+        /// What was handed back.
+        ack: oneshot::Sender<ShutdownReport>,
+    },
 }
+
+/// What one [`EngineCmd::Shutdown`] did (DESIGN §16.4 step 6).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ShutdownReport {
+    /// How many rows were still resolving or running and were handed to the next boot.
+    pub interrupted: usize,
+    /// Whether that write reached the database. `false` means the next boot re-queues them from
+    /// their stored `downloading` status instead, which DESIGN §8.9 also handles.
+    pub persisted: bool,
+}
+
+/// The `msg` an interrupted row carries into the next boot (DESIGN §16.4 step 6).
+pub const SHUTDOWN_MSG: &str = "Interrupted by shutdown";
 
 impl EngineCmd {
     /// A stable name for logs and for the command-coverage test.
@@ -226,6 +250,7 @@ impl EngineCmd {
             Self::Failed { .. } => "failed",
             Self::SlotFreed => "slot_freed",
             Self::Tick => "tick",
+            Self::Shutdown { .. } => "shutdown",
         }
     }
 }
@@ -670,6 +695,24 @@ impl EngineHandle {
             .tx
             .send(EngineCmd::HooksFinished { id, outcome: None })
             .await;
+    }
+
+    /// Stops the engine: cancels every in-flight job, hands the interrupted rows back to the next
+    /// boot with `msg = `[`SHUTDOWN_MSG`], and ends [`crate::Engine::run`] (DESIGN §16.4 steps
+    /// 5–6).
+    ///
+    /// The rows are written by the engine itself, before it stops handling commands, so the
+    /// `canceled` a job's own cancellation would otherwise produce is never written at all —
+    /// `canceled` is terminal, and a terminal row is one the next boot will not resume.
+    ///
+    /// Idempotent from the caller's side: a second call, or a call after the engine has already
+    /// stopped, reports [`ShutdownReport::default`] rather than failing.
+    pub async fn shutdown(&self) -> ShutdownReport {
+        let (ack, reply) = oneshot::channel();
+        if self.tx.send(EngineCmd::Shutdown { ack }).await.is_err() {
+            return ShutdownReport::default();
+        }
+        reply.await.unwrap_or_default()
     }
 
     /// Runs the 1 Hz maintenance pass now: released retries, `clear_after`, the pre-terminal

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aulos_core::catalog::{BotFormat, FormatCatalog};
@@ -162,6 +163,57 @@ pub struct TelegramHealth {
     pub edits_throttled_total: u64,
 }
 
+/// [`TelegramActor::health`] after the actor has been consumed by [`TelegramActor::spawn`].
+///
+/// [`TelegramActor::health`] needs `&self` and `spawn` takes the actor by value, so without this
+/// `healthz.components.telegram` could only ever report the values the actor had at boot —
+/// `edits_throttled_total` in particular would stop at `0` forever. The actor refreshes the cell
+/// on every pass of its 1 Hz loop, so a reader of this handle is at most one tick behind.
+#[derive(Clone, Debug)]
+pub struct TelegramHealthHandle {
+    cell: Arc<HealthCell>,
+}
+
+impl TelegramHealthHandle {
+    /// The actor's last published health (DESIGN §16.3).
+    #[must_use]
+    pub fn health(&self) -> TelegramHealth {
+        self.cell.load()
+    }
+}
+
+/// The shared cell behind [`TelegramHealthHandle`]. Atomics rather than a lock: the writer is the
+/// actor's own loop and the reader is the health publisher, and neither may ever wait on the other.
+#[derive(Debug, Default)]
+struct HealthCell {
+    enabled: AtomicBool,
+    chats: AtomicUsize,
+    boards: AtomicUsize,
+    watched_jobs: AtomicUsize,
+    edits_throttled_total: AtomicU64,
+}
+
+impl HealthCell {
+    fn store(&self, h: TelegramHealth) {
+        self.enabled.store(h.enabled, Ordering::Relaxed);
+        self.chats.store(h.chats, Ordering::Relaxed);
+        self.boards.store(h.boards, Ordering::Relaxed);
+        self.watched_jobs.store(h.watched_jobs, Ordering::Relaxed);
+        self.edits_throttled_total
+            .store(h.edits_throttled_total, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> TelegramHealth {
+        TelegramHealth {
+            enabled: self.enabled.load(Ordering::Relaxed),
+            chats: self.chats.load(Ordering::Relaxed),
+            boards: self.boards.load(Ordering::Relaxed),
+            watched_jobs: self.watched_jobs.load(Ordering::Relaxed),
+            edits_throttled_total: self.edits_throttled_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// One job's row plus when it should leave the board.
 #[derive(Clone, Debug)]
 struct BoardEntry {
@@ -207,6 +259,11 @@ pub struct TelegramActor {
     limiter: Limiter,
     incoming_tx: mpsc::Sender<Incoming>,
     incoming_rx: mpsc::Receiver<Incoming>,
+    /// The bot `new` built its own transport around, kept so the long-polling loop can have one.
+    /// `None` when the actor was assembled over a supplied transport (every test, and any future
+    /// non-`teloxide` transport).
+    bot: Option<teloxide::Bot>,
+    health: Arc<HealthCell>,
 }
 
 impl std::fmt::Debug for TelegramActor {
@@ -244,10 +301,11 @@ impl TelegramActor {
         if cfg.allowed_chat_ids.is_empty() {
             return Err(TgInitError::NoAllowedChats);
         }
-        let transport = Arc::new(TeloxideTransport::new(teloxide::Bot::new(&cfg.token)));
-        Ok(Self::assemble(
-            cfg, store, engine, &catalog, clock, transport,
-        ))
+        let bot = teloxide::Bot::new(&cfg.token);
+        let transport = Arc::new(TeloxideTransport::new(bot.clone()));
+        let mut actor = Self::assemble(cfg, store, engine, &catalog, clock, transport);
+        actor.bot = Some(bot);
+        Ok(actor)
     }
 
     /// Builds the actor over a supplied transport, skipping the token check.
@@ -295,7 +353,7 @@ impl TelegramActor {
             cfg.allowed_chat_ids.clone(),
         );
         let limiter = Limiter::new(cfg.edit_interval_ms, Arc::clone(&clock));
-        Self {
+        let me = Self {
             formats: catalog.bot_formats(),
             cfg,
             store,
@@ -308,13 +366,42 @@ impl TelegramActor {
             limiter,
             incoming_tx,
             incoming_rx,
-        }
+            bot: None,
+            health: Arc::new(HealthCell::default()),
+        };
+        me.publish_health();
+        me
     }
 
     /// The sender the long-polling loop (or a test) pushes updates into.
     #[must_use]
     pub fn incoming(&self) -> mpsc::Sender<Incoming> {
         self.incoming_tx.clone()
+    }
+
+    /// The bot [`TelegramActor::new`] built, for [`crate::poll_updates`].
+    ///
+    /// `new` owns the token, so it is the only place a `teloxide::Bot` can be made without the
+    /// caller reproducing the DESIGN §12.1 startup gating; the long-polling loop needs that same
+    /// bot. `None` after [`TelegramActor::with_transport`], which has no token and no bot.
+    #[must_use]
+    pub fn bot(&self) -> Option<teloxide::Bot> {
+        self.bot.clone()
+    }
+
+    /// A handle that reports [`Self::health`] after `self` has been consumed by [`Self::spawn`].
+    ///
+    /// Take it **before** `spawn`, the way `HookDispatcher::health_handle` is taken.
+    #[must_use]
+    pub fn health_handle(&self) -> TelegramHealthHandle {
+        TelegramHealthHandle {
+            cell: Arc::clone(&self.health),
+        }
+    }
+
+    /// Refreshes what [`Self::health_handle`] reports. Called on every pass of the actor's loop.
+    fn publish_health(&self) {
+        self.health.store(self.health());
     }
 
     /// Loads the per-chat defaults out of `telegram_chats` (DESIGN §12.2, §7.6.5).
@@ -324,6 +411,7 @@ impl TelegramActor {
     pub async fn load(&mut self) -> Result<usize, aulos_store::StoreError> {
         self.chats = self.store.telegram_chats().await?;
         tracing::info!(chats = self.chats.len(), "Telegram chat configs loaded");
+        self.publish_health();
         Ok(self.chats.len())
     }
 
@@ -356,6 +444,8 @@ impl TelegramActor {
                 },
                 _ = ticker.tick() => self.on_tick().await,
             }
+            // One pass, one refresh: the health publisher reads a handle, not the actor.
+            self.publish_health();
         }
         tracing::info!("Telegram bot stopped");
     }

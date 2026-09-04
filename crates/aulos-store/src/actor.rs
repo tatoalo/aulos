@@ -61,6 +61,10 @@ pub(crate) enum WriteMsg {
     Job(WriteJob),
     /// Record the shutdown witness, checkpoint, optimize and exit.
     Close(oneshot::Sender<Result<(), StoreError>>),
+    /// `PRAGMA optimize` + `wal_checkpoint(TRUNCATE)` and **keep running** (DESIGN §7.1's
+    /// six-hourly half). It goes through the writer because the writer owns the only connection
+    /// that may hold the write lock; a read-pool connection cannot truncate the WAL.
+    Checkpoint(oneshot::Sender<Result<(), StoreError>>),
 }
 
 /// Unix milliseconds. The writer stamps `updated_at` for the ops that carry no `at` of their own.
@@ -149,6 +153,7 @@ pub(crate) fn run(
         let Ok(first) = rx.recv() else { break };
         let mut batch: Vec<WriteJob> = Vec::new();
         let mut close: Option<oneshot::Sender<Result<(), StoreError>>> = None;
+        let mut checkpoint: Option<oneshot::Sender<Result<(), StoreError>>> = None;
         let mut sync_now = false;
         match first {
             WriteMsg::Job(j) => {
@@ -156,6 +161,7 @@ pub(crate) fn run(
                 batch.push(j);
             }
             WriteMsg::Close(tx) => close = Some(tx),
+            WriteMsg::Checkpoint(tx) => checkpoint = Some(tx),
         }
 
         // Extend the batch until the flush window closes, 256 jobs have accumulated, or a `Sync`
@@ -176,6 +182,11 @@ pub(crate) fn run(
                         close = Some(tx);
                         break;
                     }
+                    // The checkpoint runs after this batch commits, not instead of it.
+                    Ok(WriteMsg::Checkpoint(tx)) => {
+                        checkpoint = Some(tx);
+                        break;
+                    }
                     Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
                 }
             }
@@ -186,6 +197,10 @@ pub(crate) fn run(
                 Ok(WriteMsg::Job(j)) => batch.push(j),
                 Ok(WriteMsg::Close(tx)) => {
                     close = Some(tx);
+                    break;
+                }
+                Ok(WriteMsg::Checkpoint(tx)) => {
+                    checkpoint = Some(tx);
                     break;
                 }
                 Err(_) => break,
@@ -221,6 +236,10 @@ pub(crate) fn run(
             if sync_now {
                 let _ = conn.pragma_update(None, "synchronous", opts.synchronous_pragma());
             }
+        }
+
+        if let Some(tx) = checkpoint {
+            let _ = tx.send(schema::checkpoint_and_optimize(&conn));
         }
 
         if let Some(tx) = close {

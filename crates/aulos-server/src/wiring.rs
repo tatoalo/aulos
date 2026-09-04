@@ -73,6 +73,13 @@ pub const TRACKER_CEILING: Duration = Duration::from_secs(10);
 /// How long a WebSocket is given to notice the close frame before the listener task is dropped.
 pub const WS_CLOSE_GRACE: Duration = Duration::from_secs(2);
 
+/// How often the WAL is checkpointed while the server runs (DESIGN §7.1).
+///
+/// `pragma wal_autocheckpoint = 512` already bounds the WAL page-wise; this is the `TRUNCATE`
+/// pass that actually returns the file to zero, which is what keeps a container that has been up
+/// for months from carrying a WAL its `healthz` store component eventually calls out.
+pub const CHECKPOINT_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// How the server is started, so the acceptance tests can drive the real wiring.
 ///
 /// Everything here has a production default; a test overrides only what it must. The alternative —
@@ -207,6 +214,12 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     // was silently skipped".
     let telegram_inbox =
         telegram_will_run(&cfg).then(|| event_router.subscribe(SubscriberSpec::telegram()));
+    // Taken **before** `TelegramActor::spawn` consumes the inbox: `EventInbox::dropped()` needs
+    // `&self`, so this counter is the only way `healthz.components.events.dropped.telegram` can
+    // report a measured number rather than a hard-coded `0`.
+    let telegram_dropped = telegram_inbox
+        .as_ref()
+        .map(aulos_core::event::EventInbox::dropped_handle);
 
     let hub = EventHub::new(store.seq_allocator(), BootId::new(), &cfg);
     health.set_identity(hub.boot_id());
@@ -268,7 +281,33 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         engine_handle.clone(),
     );
 
-    let engine_task = engine.spawn();
+    // The engine is a tokio **task**, not a named thread, so `signals::install_panic_hook`'s
+    // store-writer rule cannot see it: tokio exposes no "current task" in a panic hook. A panicked
+    // engine is not a survivable state — every `EngineHandle` send then fails and the API answers
+    // `state_unavailable` forever, while `healthz` keeps saying `200` because the store is fine —
+    // so its task is watched, and an end that is not this module's own shutdown takes the process
+    // down through the normal sequence, with a non-zero exit so the container restarts.
+    let (engine_ended_tx, engine_ended_rx) = tokio::sync::oneshot::channel::<()>();
+    let engine_task = tokio::spawn(async move {
+        engine.run().await;
+        let _ = engine_ended_tx.send(());
+    });
+    let engine_died = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let died = Arc::clone(&engine_died);
+        let token = http_token.clone();
+        tracker.spawn(async move {
+            // `Err` means the sender was dropped without sending, i.e. the task unwound.
+            if engine_ended_rx.await.is_err() && !token.is_cancelled() {
+                died.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    "the queue engine task ended without finishing its loop (it panicked); \
+                     shutting down so the container restarts"
+                );
+                token.cancel();
+            }
+        });
+    }
 
     // --- 13. the hook dispatcher, the subscription manager, the watchers, the health pass --
     let dispatcher = HookDispatcher::with_hooks(Arc::clone(&cfg), hooks, Arc::clone(&clock))
@@ -336,7 +375,7 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     );
 
     // --- 14. the Telegram actor, then the router ------------------------------------------
-    let telegram_tasks = spawn_telegram(
+    let telegram = spawn_telegram(
         &cfg,
         &store,
         &engine_handle,
@@ -346,6 +385,7 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         http_token.clone(),
     )
     .await;
+    let telegram_tasks = telegram.tasks;
 
     // No subscriber may be registered after this point — and cannot be, because `spawn` consumes
     // the router (DESIGN §2.2.1).
@@ -370,9 +410,34 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         sink: sink.clone(),
         hooks: Some(hooks_health),
         subs: subs_handle.clone(),
+        telegram: telegram.health,
+        telegram_dropped,
     };
     // One pass before the bind, so the very first `healthz` is complete.
     health::publish_once(&health_probes, &health).await;
+
+    // DESIGN §7.1's six-hourly `wal_checkpoint(TRUNCATE)`. The shutdown half is `Store::close`.
+    {
+        let store = store.clone();
+        let token = http_token.clone();
+        tracker.spawn(async move {
+            let mut ticker = tokio::time::interval(CHECKPOINT_EVERY);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await; // the immediate first tick; the store was just opened
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    _ = ticker.tick() => match store.checkpoint().await {
+                        Ok(()) => tracing::info!(
+                            wal_bytes = store.wal_bytes(),
+                            "the six-hourly WAL checkpoint ran"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "the WAL checkpoint failed"),
+                    },
+                }
+            }
+        });
+    }
     {
         let health = Arc::clone(&health);
         let events = events.clone();
@@ -468,52 +533,32 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         }
     }
 
-    // The ids to hand back to the next boot, captured **before** the kill: once the jobs are
-    // cancelled the engine writes them `canceled`, and a `canceled` row is terminal.
-    let interrupted: Vec<aulos_core::ItemId> = state
-        .load()
-        .items
-        .iter()
-        .filter(|i| i.status.is_running() || i.status == aulos_core::Status::Resolving)
-        .map(|i| i.id)
-        .collect();
-
-    // 5. `killpg SIGTERM`, then `SIGKILL`, for every job — each job task owns that ladder and
-    //    observes this token.
-    jobs_token.cancel();
-
-    // 6. Mark the still-active rows `queued` so the next boot resumes them.
+    // 5..6. `EngineCmd::Shutdown`: the engine cancels every job (each job task then owns the
+    //    `killpg SIGTERM` → `SIGKILL` ladder), hands the still-active rows to the next boot as
+    //    `queued` with `msg = SHUTDOWN_MSG`, and **ends its own loop** — which is what lets the
+    //    realtime chain below close by dropping senders instead of being aborted.
     //
-    //    `aulos-queue` has no shutdown command, and the engine's own reaction to a cancelled job
-    //    is to write `canceled` — which is right for a user's cancel and wrong for a shutdown,
-    //    because a `canceled` row is terminal and would never be picked up again. So the rows are
-    //    rewritten through the store's own `WriteOp`, after the engine has settled: the store has
-    //    exactly one writer, so "last write wins" is deterministic, and the loser is the engine's
-    //    `canceled` — which is the outcome DESIGN §16.4 step 6 asks for. See
-    //    `docs/INTEGRATION-NOTES.md`, WP-17: an additive `EngineCmd::Shutdown` would let the
-    //    engine write this itself.
-    if !interrupted.is_empty() {
-        settle(&state).await;
-        let now = clock.now_ms();
-        let ops: Vec<aulos_store::WriteOp> = interrupted
-            .iter()
-            .map(|id| aulos_store::WriteOp::SetStatus {
-                id: *id,
-                status: aulos_core::Status::Queued,
-                msg: aulos_core::FieldUpdate::Set(SHUTDOWN_MSG.into()),
-                error: aulos_core::FieldUpdate::Keep,
-                auto_start: Some(true),
-                at: now,
-            })
-            .collect();
-        tracing::info!(
-            count = ops.len(),
-            "handing interrupted downloads back to the next boot"
+    //    It is the engine and not this module that writes those rows, because the engine is the
+    //    only place where "capture the ids, cancel, write, then stop handling commands" is one
+    //    uninterrupted sequence: a job's own reaction to a cancelled token is a `canceled` row,
+    //    and `canceled` is terminal, so a row that loses that race is one the next boot never
+    //    resumes.
+    let report = tokio::time::timeout(ENGINE_SHUTDOWN_CEILING, engine_handle.shutdown())
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!("the queue engine did not answer the shutdown command in time");
+            aulos_queue::ShutdownReport::default()
+        });
+    if report.interrupted > 0 && !report.persisted {
+        tracing::warn!(
+            count = report.interrupted,
+            "the interrupted rows could not be re-queued; the next boot recovers them from their \
+             stored status instead"
         );
-        if let Err(e) = store.write(ops, aulos_store::Durability::Sync).await {
-            tracing::warn!(error = %e, "the interrupted rows could not be re-queued");
-        }
     }
+    // The jobs' own kill ladder. The engine cancelled its per-job children already; this covers
+    // anything parented to the process-wide token (the hook dispatcher's running hooks).
+    jobs_token.cancel();
 
     // 7. Stop the realtime side and let the engine drain.
     // `timeout` on a `JoinHandle` does **not** stop the task, and the HTTP layer's `ApiState`
@@ -563,6 +608,12 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     let pot_state = pot_supervisor.state();
     tracing::info!(pot = ?pot_state.status, "the sidecar supervisor stopped");
 
+    if engine_died.load(std::sync::atomic::Ordering::SeqCst) {
+        // Everything above still ran: the store is closed and the sidecar is stopped. Only the
+        // exit code differs, and it has to, or a `restart: on-failure` container stays down.
+        anyhow::bail!("the queue engine panicked; the server shut down and is exiting non-zero");
+    }
+
     // 10. exit 0.
     tracing::info!("aulos-server stopped");
     Ok(())
@@ -570,16 +621,15 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
 
 /// Stops the realtime tasks and the engine, in the only order that terminates.
 ///
-/// Two facts make this explicit rather than a matter of dropping senders, and both are structural:
+/// By the time this runs the engine has already been told to stop (`EngineCmd::Shutdown`), so its
+/// task ends on its own and dropping its `EventSender` closes the three inboxes below. One fact
+/// still makes the order explicit rather than a matter of dropping senders:
 ///
-/// 1. **The engine's loop cannot end on its own.** `Engine` keeps a clone of its *own*
-///    `EngineCmd` sender (it hands it to every job task it spawns), so `rx.recv()` never returns
-///    `None` however many `EngineHandle`s the rest of the process drops. `aulos-queue`'s own tests
-///    end an engine by dropping the runtime.
-/// 2. **The aggregator, the hook dispatcher and the Telegram actor each hold an `EngineHandle`
-///    *and* wait on an `EventInbox`**, which closes only when every `EventSender` is dropped — one
-///    of which the engine holds for its whole life. So even without (1) the four would wait on
-///    each other.
+/// **The aggregator, the hook dispatcher and the Telegram actor each hold an `EngineHandle` *and*
+/// wait on an `EventInbox`**, which closes only when every `EventSender` is dropped — one of which
+/// the engine holds until its task has actually finished. So the engine is awaited first, and the
+/// three consumers are given [`FLUSH_WINDOW`] to drain before the aborts, which remain as a
+/// backstop for a consumer that is wedged rather than idle.
 ///
 /// Aborting them is safe at this point, and nothing durable is lost:
 ///
@@ -595,42 +645,56 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
 /// - the Telegram actor's outbound queue is progress edits and terminal notifications for jobs
 ///   that have just been killed.
 ///
-/// An additive `EngineCmd::Shutdown` — or `Engine::run` dropping `self.tx` before its loop — would
-/// let DESIGN §16.4's "dropping the senders closes the chain" close on its own. See
-/// `docs/INTEGRATION-NOTES.md`, WP-17.
 async fn shutdown_tasks(
     mut engine: tokio::task::JoinHandle<()>,
     aggregator: tokio::task::JoinHandle<()>,
     dispatcher: tokio::task::JoinHandle<()>,
     telegram: Vec<tokio::task::JoinHandle<()>>,
 ) {
-    tokio::time::sleep(FLUSH_WINDOW).await;
-    aggregator.abort();
-    dispatcher.abort();
-    for task in telegram {
-        task.abort();
-    }
-    // A bounded chance to end cleanly first, so this keeps working if `aulos-queue` ever grows a
-    // shutdown path.
+    // The engine was told to stop before this was called, so this is a join and not a race.
     if tokio::time::timeout(ENGINE_DRAIN_CEILING, &mut engine)
         .await
         .is_err()
     {
-        tracing::debug!("stopping the queue engine (it holds its own command sender)");
+        tracing::warn!("the queue engine did not stop within its drain ceiling");
         engine.abort();
         let _ = engine.await;
+    }
+    // Its `EventSender` is gone with it, so the three inboxes are closing; give them the flush
+    // window to notice before the backstop.
+    let drain = async {
+        let _ = aggregator.await;
+        let _ = dispatcher.await;
+        for task in telegram {
+            let _ = task.await;
+        }
+    };
+    if tokio::time::timeout(CONSUMER_DRAIN_CEILING, drain)
+        .await
+        .is_err()
+    {
+        tracing::debug!("a realtime consumer outlived its drain ceiling; dropping it");
     }
 }
 
 /// The `msg` an interrupted row carries into the next boot (DESIGN §16.4 step 6).
-pub const SHUTDOWN_MSG: &str = "Interrupted by shutdown";
+///
+/// Re-exported from `aulos-queue`, which is where the write now happens.
+pub use aulos_queue::SHUTDOWN_MSG;
 
 /// How long an in-flight engine command is given to reach its `Store::write` before the engine
 /// task is stopped (DESIGN §16.4 step 7).
 pub const FLUSH_WINDOW: Duration = Duration::from_millis(500);
 
+/// How long the engine is given to answer `EngineCmd::Shutdown`.
+pub const ENGINE_SHUTDOWN_CEILING: Duration = Duration::from_secs(5);
+
 /// How long the engine is given to end on its own before it is aborted.
 pub const ENGINE_DRAIN_CEILING: Duration = Duration::from_secs(2);
+
+/// How long the aggregator, the dispatcher and the Telegram tasks are given to drain once their
+/// inboxes have closed (DESIGN §16.4 step 7).
+pub const CONSUMER_DRAIN_CEILING: Duration = Duration::from_secs(2);
 
 /// How long the bind waits for the recovered set to reach the published snapshot.
 ///
@@ -638,9 +702,6 @@ pub const ENGINE_DRAIN_CEILING: Duration = Duration::from_secs(2);
 /// as "the server lost my queue". On the timeout the bind proceeds anyway with a WARN — refusing
 /// to serve at all would be a strictly worse failure than one stale first read.
 const FIRST_PUBLISH_CEILING: Duration = Duration::from_secs(10);
-
-/// How long the shutdown waits for the engine to settle after the jobs are killed.
-const SETTLE_CEILING: Duration = Duration::from_secs(5);
 
 /// Waits until the aggregator has published the rows boot recovery loaded.
 async fn await_first_publish(
@@ -676,18 +737,6 @@ async fn await_first_publish(
     }
 }
 
-/// Waits (bounded) until no item is running or resolving any more.
-async fn settle(state: &aulos_queue::StateView) {
-    let deadline = tokio::time::Instant::now() + SETTLE_CEILING;
-    while tokio::time::Instant::now() < deadline {
-        let counts = state.load().counts;
-        if counts.downloading + counts.postprocessing + counts.preparing + counts.resolving == 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
 /// The stock hook list plus one [`ManifestHook`] per community `[[hook]]` plus any injected hooks.
 ///
 /// `HookDispatcher::new` builds the same list; it is spelled out here because the **same** `Vec`
@@ -709,12 +758,29 @@ fn build_hooks(
     hooks
 }
 
+/// What the Telegram wiring hands back: its tasks, and the handle `healthz` keeps reading.
+struct TelegramWiring {
+    /// The actor loop and the long-polling loop, or empty when the bot does not run.
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Taken before `spawn` consumed the actor, so `components.telegram` stays live.
+    health: Option<aulos_telegram::TelegramHealthHandle>,
+}
+
+impl TelegramWiring {
+    /// The bot is not running: no tasks, no handle, and a `disabled` component.
+    fn off() -> Self {
+        Self {
+            tasks: Vec::new(),
+            health: None,
+        }
+    }
+}
+
 /// Builds and spawns the Telegram actor, or logs one line and carries on (DESIGN §12.1).
 ///
 /// A missing token must never stop the server: the bot is an optional integration, and a container
 /// that refuses to start because `TELEGRAM_BOT_TOKEN` is empty is strictly worse than one that
 /// serves HTTP and says so in the log.
-#[allow(clippy::too_many_arguments)] // one argument per collaborator, all of them required
 async fn spawn_telegram(
     cfg: &Arc<Config>,
     store: &Store,
@@ -723,7 +789,7 @@ async fn spawn_telegram(
     health: &Arc<HealthRegistry>,
     inbox: Option<aulos_core::event::EventInbox>,
     shutdown: CancellationToken,
-) -> Vec<tokio::task::JoinHandle<()>> {
+) -> TelegramWiring {
     let tg_cfg = Arc::new(TelegramConfig::from_config(cfg));
     let Some(inbox) = inbox else {
         // `telegram_will_run` already said no, so there is no inbox and nothing to start. The
@@ -737,37 +803,37 @@ async fn spawn_telegram(
             tracing::info!("the Telegram bot is disabled");
         }
         health.set("telegram", health::telegram_component(None));
-        return Vec::new();
+        return TelegramWiring::off();
     };
 
-    // `TelegramActor::new` builds its own transport and keeps it private, which would leave the
-    // long-polling loop with no `teloxide::Bot` to poll (`transport::poll_updates` takes one). So
-    // the transport is built here and `with_transport` is used instead; `telegram_will_run`
-    // reproduces the gating `new` performs.
-    let transport = Arc::new(aulos_telegram::TeloxideTransport::new(teloxide_bot(
-        &tg_cfg.token,
-    )));
-    let bot = transport.bot().clone();
     let catalog = Arc::new(aulos_core::catalog::ytdlp_catalog());
-    let mut actor = match TelegramActor::with_transport(
+    let mut actor = match TelegramActor::new(
         Arc::clone(&tg_cfg),
         store.clone(),
         engine.clone(),
         catalog,
         Arc::clone(clock),
-        transport as Arc<dyn aulos_telegram::Transport>,
     ) {
         Ok(actor) => actor,
         Err(TgInitError::Disabled) => {
             tracing::info!("the Telegram bot is disabled");
             health.set("telegram", health::telegram_component(None));
-            return Vec::new();
+            return TelegramWiring::off();
         }
         Err(e) => {
             tracing::error!("the Telegram bot will not start: {e}");
             health.set("telegram", health::telegram_component(None));
-            return Vec::new();
+            return TelegramWiring::off();
         }
+    };
+    // `new` owns the token, so it is the only place that can build the bot without reproducing the
+    // §12.1 gating here; `TelegramActor::bot()` is how the long-polling loop gets the same one.
+    let Some(bot) = actor.bot() else {
+        // Unreachable through `new`, which always builds a `teloxide` transport. Refusing to poll
+        // is better than polling a bot nobody can reach.
+        tracing::error!("the Telegram actor has no bot to poll; the bot will not start");
+        health.set("telegram", health::telegram_component(None));
+        return TelegramWiring::off();
     };
 
     if let Err(e) = actor.load().await {
@@ -778,13 +844,17 @@ async fn spawn_telegram(
         health::telegram_component(Some(&actor.health())),
     );
 
-    // Both taken **before** `spawn` consumes the actor (the WP-16 note in
+    // All three taken **before** `spawn` consumes the actor (the WP-16 note in
     // `docs/INTEGRATION-NOTES.md`).
     let incoming = actor.incoming();
-    vec![
-        actor.spawn(inbox),
-        tokio::spawn(aulos_telegram::poll_updates(bot, incoming, shutdown)),
-    ]
+    let tg_health = actor.health_handle();
+    TelegramWiring {
+        tasks: vec![
+            actor.spawn(inbox),
+            tokio::spawn(aulos_telegram::poll_updates(bot, incoming, shutdown)),
+        ],
+        health: Some(tg_health),
+    }
 }
 
 /// Whether the Telegram bot will actually run, i.e. whether an event inbox for it has a reader.
@@ -797,11 +867,6 @@ pub fn telegram_will_run(cfg: &Config) -> bool {
     cfg.telegram_bot_enabled
         && !cfg.telegram_bot_token.expose().trim().is_empty()
         && !cfg.telegram_allowed_chat_ids.is_empty()
-}
-
-/// A `teloxide::Bot` for a token.
-fn teloxide_bot(token: &str) -> teloxide::Bot {
-    teloxide::Bot::new(token)
 }
 
 /// Binds `HOST:PORT` with `SO_REUSEPORT` where the platform supports it.

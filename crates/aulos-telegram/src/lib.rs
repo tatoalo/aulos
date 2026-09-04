@@ -56,7 +56,7 @@ pub mod transport;
 pub mod urls;
 pub mod watch;
 
-pub use bot::{TelegramActor, TelegramConfig, TelegramHealth, TgInitError};
+pub use bot::{TelegramActor, TelegramConfig, TelegramHealth, TelegramHealthHandle, TgInitError};
 pub use commands::{Command, Incoming, MessagePlan, plan_message};
 pub use config_ui::{Applied, Button, Keyboard, Screen, apply_callback, config_text};
 pub use limiter::{Denied, Limiter};

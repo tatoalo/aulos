@@ -873,6 +873,68 @@ async fn the_spawned_loop_handles_an_update_from_the_channel() {
     task.abort();
 }
 
+/// `TelegramHealthHandle` keeps reporting after `spawn` has consumed the actor.
+///
+/// Without it `healthz.components.telegram` freezes at its boot values, because `health()` needs
+/// `&self` and `spawn` takes the actor by value.
+#[tokio::test]
+async fn the_health_handle_still_reports_after_spawn_consumes_the_actor() {
+    let mut h = Harness::new().await;
+    // One watched job, so the numbers are non-zero and cannot be confused with the boot state.
+    let id = ItemId::new();
+    let v = tg_view(id, "A clip", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    let health = h.actor.health_handle();
+    let before = h.actor.health();
+    assert_eq!(before.watched_jobs, 1);
+    assert_eq!(before.boards, 1);
+
+    let (tx, task) = h.spawn();
+    // The loop republishes on every pass, so one tick of its own 1 Hz timer is enough.
+    for _ in 0..400 {
+        if health.health().watched_jobs == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let live = health.health();
+    assert!(live.enabled);
+    assert_eq!(live.watched_jobs, 1, "read through the handle, after spawn");
+    assert_eq!(live.boards, 1);
+    drop(tx);
+    task.abort();
+}
+
+/// `TelegramActor::new` is the only place that owns the token, so it is the only place that can
+/// hand the long-polling loop a bot; `with_transport` has neither.
+#[tokio::test]
+async fn only_the_token_owning_constructor_exposes_a_bot() {
+    let h = Harness::new().await;
+    assert!(
+        h.actor.bot().is_none(),
+        "a mocked transport has no teloxide bot to poll"
+    );
+
+    let tg = TelegramConfig {
+        token: "123456:not-a-real-token-and-never-used".into(),
+        ..TelegramConfig::for_test(vec![CHAT])
+    };
+    let actor = aulos_telegram::TelegramActor::new(
+        Arc::new(tg),
+        h.store.clone(),
+        h.engine.clone(),
+        Arc::new(aulos_core::catalog::ytdlp_catalog()),
+        Arc::clone(&h.clock) as Arc<dyn aulos_core::Clock>,
+    )
+    .expect("the three startup gates all pass");
+    assert!(
+        actor.bot().is_some(),
+        "`poll_updates` needs this one, and nothing else can build it without the token"
+    );
+}
+
 /// DESIGN §12.1: three startup gates, each a silent no-op with one log line.
 #[tokio::test]
 async fn the_startup_gates_refuse_to_build_an_actor() {

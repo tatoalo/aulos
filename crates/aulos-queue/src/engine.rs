@@ -22,7 +22,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use crate::cmd::{ENGINE_CHANNEL_CAPACITY, EngineCmd, EngineHandle, HookWrite, ResolveReport};
+use crate::cmd::{
+    ENGINE_CHANNEL_CAPACITY, EngineCmd, EngineHandle, HookWrite, ResolveReport, SHUTDOWN_MSG,
+    ShutdownReport,
+};
 use crate::groups::{DRIFT_RECOMPUTE_MS, GroupAcc};
 use crate::priority::Priority;
 use crate::slots::{Slot, Slots};
@@ -289,6 +292,13 @@ impl Engine {
             let deadline = self.next_deadline();
             tokio::select! {
                 cmd = rx.recv() => match cmd {
+                    // The one command that ends the loop: the engine hands a clone of its own
+                    // sender to every job task, so `rx.recv()` cannot report `None` while a job
+                    // is alive (DESIGN §16.4).
+                    Some(EngineCmd::Shutdown { ack }) => {
+                        let _ = ack.send(self.handle_shutdown().await);
+                        break;
+                    }
                     Some(cmd) => self.handle(cmd).await,
                     None => break,
                 },
@@ -297,6 +307,15 @@ impl Engine {
             }
         }
 
+        self.stop_jobs();
+        tracing::debug!("the queue engine has stopped");
+    }
+
+    /// Cancels every in-flight resolution and download and closes the slot semaphores.
+    ///
+    /// Each job task then observes its token and runs the `killpg SIGTERM` → `SIGKILL` ladder of
+    /// DESIGN §16.4 step 5 itself; this only stops the engine from waiting on them.
+    fn stop_jobs(&mut self) {
         for (_, slot) in self.resolving.drain() {
             slot.cancel.cancel();
             slot.handle.abort();
@@ -308,7 +327,65 @@ impl Engine {
             }
         }
         self.slots.close();
-        tracing::debug!("the queue engine has stopped");
+    }
+
+    /// DESIGN §16.4 steps 5 and 6, from inside the engine.
+    ///
+    /// The ids are read out of `running`/`resolving` **before** the cancel, because a job's own
+    /// reaction to a cancelled token is a `canceled` row — which is terminal, and a terminal row
+    /// is one the next boot will never resume. Doing this here rather than from the outside is
+    /// what makes the ordering deterministic: the loop stops right after, so the `Failed` and
+    /// `Finished` commands the dying jobs send are never handled and the `queued` row written
+    /// here is the last word on those items.
+    ///
+    /// The write goes through [`Engine::apply`] rather than [`Engine::write_status`] on purpose.
+    /// `downloading → queued(auto_start)` is deliberately **not** a legal live transition
+    /// (`aulos_core::status::can_transition` reserves `→ queued` from a running state for pause,
+    /// which parks the item with `auto_start = false`); handing the row to the next boot is not a
+    /// live transition but the same thing boot recovery does in reverse, and there is no client
+    /// left to publish it to.
+    async fn handle_shutdown(&mut self) -> ShutdownReport {
+        let mut ids: Vec<ItemId> = self.running.keys().copied().collect();
+        ids.extend(self.resolving.keys().copied());
+        ids.sort_unstable();
+        self.stop_jobs();
+
+        if ids.is_empty() {
+            return ShutdownReport {
+                interrupted: 0,
+                persisted: true,
+            };
+        }
+        let now = self.clock.now_ms();
+        let ops: Vec<WriteOp> = ids
+            .iter()
+            .map(|id| WriteOp::SetStatus {
+                id: *id,
+                status: Status::Queued,
+                msg: FieldUpdate::Set(SHUTDOWN_MSG.into()),
+                error: FieldUpdate::Keep,
+                auto_start: Some(true),
+                at: now,
+            })
+            .collect();
+        tracing::info!(
+            count = ids.len(),
+            "handing interrupted downloads back to the next boot"
+        );
+        let persisted = self.apply(ops, Durability::Sync).await;
+        for id in &ids {
+            if let Some(item) = self.items.get_mut(id) {
+                let mut next = (**item).clone();
+                next.status = Status::Queued;
+                next.msg = Some(SHUTDOWN_MSG.into());
+                next.auto_start = true;
+                *item = Arc::new(next);
+            }
+        }
+        ShutdownReport {
+            interrupted: ids.len(),
+            persisted,
+        }
     }
 
     /// The next `sleep_until` target: the earliest armed retry, clear or hook deadline.
@@ -392,6 +469,12 @@ impl Engine {
             EngineCmd::Failed { id, err } => self.handle_failed(id, *err).await,
             EngineCmd::SlotFreed => self.schedule().await,
             EngineCmd::Tick => self.tick().await,
+            // `run` intercepts this, because it is the only place that can end the loop. Reaching
+            // here means a caller drove `handle` directly (a test); the ack still has to happen,
+            // or `EngineHandle::shutdown` would wait forever.
+            EngineCmd::Shutdown { ack } => {
+                let _ = ack.send(self.handle_shutdown().await);
+            }
         }
     }
 

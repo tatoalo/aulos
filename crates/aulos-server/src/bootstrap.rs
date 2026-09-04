@@ -376,21 +376,17 @@ pub fn build_registry(
         runner,
     )));
 
-    // The community `[[hook]]` tables. The loader caches them as `Arc<HookSpec>` for a later
-    // reload, but `HookDispatcher::new` and `ManifestHook::new` both take an **owned** `HookSpec`
-    // and `HookSpec` is not `Clone`, so the specs are read with a second, direct scan of the same
-    // directory rather than unwrapped out of the loader's cache (which holds a reference and would
-    // therefore refuse). Two walks of `/config/plugins` at boot is a rounding error, and DESIGN
-    // §13.4 does not ask for live hook reload — see `docs/INTEGRATION-NOTES.md`, WP-17.
+    // The community `[[hook]]` tables, taken straight out of the loader's cache — the same scan
+    // that registered the `command` providers above, so the plugin directory is walked exactly
+    // once at boot. `HookDispatcher::new` and `ManifestHook::new` take an **owned** `HookSpec` and
+    // the loader keeps its `Arc` for the next re-scan, which is what `HookSpec: Clone` is for.
     let hooks: Vec<aulos_provider::command::HookSpec> = if cfg.hooks_enabled && cfg.plugins_enabled
     {
-        let scan = aulos_provider::command::scan_with(
-            &cfg.plugins_dir,
-            &PluginEnv {
-                state_dir: cfg.paths.state.clone(),
-            },
-        );
-        scan.hooks
+        loader
+            .hooks()
+            .into_iter()
+            .map(std::sync::Arc::unwrap_or_clone)
+            .collect()
     } else {
         Vec::new()
     };

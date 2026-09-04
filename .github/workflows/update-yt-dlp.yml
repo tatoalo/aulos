@@ -108,13 +108,9 @@ jobs:
           docker run --rm aulos-server:bump-smoke doctor
           docker run --rm --entrypoint python3 aulos-server:bump-smoke \
             -c 'import yt_dlp; print("yt_dlp", yt_dlp.version.__version__)'
-          # A real extraction through the shim lands with WP-07; until then the import above plus
-          # `doctor` is the smoke test.
-          if [ -f crates/aulos-provider-ytdlp/tests/smoke_extract.sh ]; then
-            AULOS_IMAGE=aulos-server:bump-smoke crates/aulos-provider-ytdlp/tests/smoke_extract.sh
-          else
-            echo "::notice::shim extract smoke lands with WP-07; skipping"
-          fi
+          # And a real extraction through the shim, which is the only check that catches a nightly
+          # that still imports but can no longer extract.
+          AULOS_IMAGE=aulos-server:bump-smoke crates/aulos-provider-ytdlp/tests/smoke_extract.sh
 
       - name: Create or update the pull request
         if: steps.update.outputs.has_update == 'true'

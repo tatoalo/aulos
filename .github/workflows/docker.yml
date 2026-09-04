@@ -83,7 +83,14 @@ jobs:
           set -eu
           img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
           docker run --rm "$img" doctor
-          docker run --rm "$img" healthcheck
+          # `healthcheck` probes a *running* server, so against this one-shot container it must
+          # exit non-zero (DESIGN §3.1, PLAN WP-17) — that is the whole point of the subcommand,
+          # and asserting it here is what stops a future "always exit 0" regression from making
+          # every container report healthy. The success path is asserted by the healthy container
+          # below, which runs `healthcheck` through the image's own HEALTHCHECK.
+          if docker run --rm "$img" healthcheck; then
+            echo "::error::healthcheck exited 0 with no server running"; exit 1
+          fi
           # C16 regression: URL_PREFIX without slashes must still produce a healthy container.
           cid=$(docker run -d -e URL_PREFIX=metube "$img")
           for _ in $(seq 1 30); do

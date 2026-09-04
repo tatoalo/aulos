@@ -129,7 +129,7 @@ impl std::fmt::Display for HttpMethod {
 }
 
 /// What a hook does when it fires (DESIGN §13.4).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum HookAction {
     /// An HTTP request. Enough for Plex, Emby, ntfy and any generic webhook.
     Http {
@@ -234,7 +234,11 @@ impl HookFilter {
 }
 
 /// One validated `[[hook]]` table, ready for `aulos-hooks` to execute (DESIGN §13.4).
-#[derive(Debug)]
+///
+/// `Clone` because the loader caches an `Arc<HookSpec>` for its next re-scan while
+/// `aulos_hooks::ManifestHook::new` wants an owned spec: without it the wiring has to walk the
+/// plugin directory a second time just to get a spec it already parsed.
+#[derive(Clone, Debug)]
 pub struct HookSpec {
     /// `hook:<dir>/<id>` — unique across the whole plugin directory.
     pub id: Arc<str>,

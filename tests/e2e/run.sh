@@ -96,6 +96,9 @@ wait_for() {
     fi
     sleep 1
   done
+  # The label the caller passed is what makes a timeout readable in the log; every caller already
+  # reports its own failure, so this is a note on stderr rather than a `fail`.
+  printf '  ...  gave up waiting for %s after %ss\n' "$what" "$secs" >&2
   return 1
 }
 
@@ -289,7 +292,7 @@ v1_code="$(code -X POST "${BASE}/add" -H 'content-type: application/json' \
 [ "$v1_code" = "200" ] && ok "POST add → 200" || fail "POST add → $v1_code"
 
 history="$(req "${BASE}/history")"
-for key in queue pending done; do
+for key in queue pending "done"; do
   printf '%s' "$history" | python3 -c "
 import json,sys
 doc = json.load(sys.stdin)

@@ -1221,6 +1221,19 @@ def _peak_rss_kb():
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
+    except BrokenPipeError:
+        # The parent closed the pipe it is killing us through (DESIGN §16.4 step 6, the
+        # process-group kill after the shutdown grace). The parent hanging up is the parent's
+        # shutdown working, not this process failing, so it is a DEBUG note and not an ERROR —
+        # `aulos-server` forwards our stderr verbatim, and an `ERROR:` here reads as a real
+        # failure in the log a user stares at right after a restart.
+        with contextlib.suppress(OSError):
+            # Keep CPython's own interpreter-shutdown flush from raising a second time.
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        with contextlib.suppress(OSError):
+            sys.stderr.write("DEBUG: ytdlp_runner exiting: the parent closed the protocol channel\n")
+        sys.exit(EXIT_CANCELED)
     except OSError as exc:
         # The protocol channel itself failed. Nothing can be reported through it.
         sys.stderr.write(f"ERROR: ytdlp_runner protocol channel failed: {exc}\n")
