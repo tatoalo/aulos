@@ -288,3 +288,53 @@ with your WP id.
   quality, `ChatConfig`'s twelve keys). They are all narrower-and-correct rather than contested, so
   the integration pass left DESIGN.md untouched; the §6.1/§6.2/§6.3/§6.6/§7.6.5 edits are the one
   piece of documentation debt wave 0 carries into wave 1.
+
+---
+
+## WP-06 — `aulos-provider-ytdlp`: formats, options, outtmpl
+
+- **The golden corpora are read from the workspace root, not from the crate.** PLAN WP-06 names
+  `crates/aulos-provider-ytdlp/tests/golden/{formats,opts}.json`, but WP-00 shipped them (with
+  `percent.json`) as `tests/golden/*.json` at the repo root, and `aulos-core`'s
+  `tests/percent_golden.rs` already reads them from there. `tests/golden_formats.rs` and
+  `tests/golden_opts.rs` follow that convention (`CARGO_MANIFEST_DIR/../../tests/golden/…`) rather
+  than duplicating 76 KB of corpus. If the integrator prefers the per-crate layout, moving the two
+  files and editing one `golden_path()` per test file is the whole change.
+- **`get_opts` does not emit the legacy `Exec` audio-sync postprocessor** — the one deliberate
+  behaviour change of DESIGN §9.8 (Δ C9). **WP-11 owes the other half**: the in-process
+  `audio_sync` hook must fire for a finished `{video, mp4, best_remux}` item, or that selection
+  silently loses the A/V-desync fix it had in legacy. The exact dict we no longer emit is public as
+  `opts::legacy_audio_sync_exec()`, and `tests/golden_opts.rs` asserts that this is the *only*
+  difference from the captured Python output, so the delta cannot widen unnoticed.
+- **`ytdlp_catalog()` delegates to `aulos_core::YTDLP_CATALOG`** rather than declaring a second
+  catalogue. WP-02 put the §6.6 data in `aulos-core` (it is a wire type and the request validator
+  reads it), so this crate only hands out the `Arc`. `tests/catalog.rs` parses the DESIGN §6.6
+  markdown table and asserts the catalogue matches it row for row, plus an `insta` snapshot of the
+  wire shape; `tests/golden_formats.rs` asserts the catalog tuple set and the golden selector key
+  set are **equal** (158 tuples), so neither can grow without the other.
+- **`OutTmpl` is `aulos-provider`'s type, re-exported here.** The wave-0 integration pass hoisted
+  it (`DownloadCtx` names it); `outtmpl::OutTmpl` is a `pub use`, not a redefinition.
+- **WP-07 owes the `outtmpl` shim round trip.** `build_outtmpl` returns an `OutTmplJob`;
+  `job.is_ready()` is the common case (a single video, or a template with no `playlist*`/`channel*`
+  reference) and needs **no Python at all**. Otherwise `job.to_job(job_id)` is the DESIGN §9.2
+  `mode = "outtmpl"` object and the shim must return the evaluated strings **in the same order as
+  `job.templates()`**; feed them to `job.apply(&[String])`. The shim's own frame shape for that
+  reply is WP-07's to define — `apply` only requires the ordered list, and rejects a length
+  mismatch as `OutTmplError::Arity` (a §9.3 contract error).
+- **WP-12 should call `OutTmplJob::merge_info` with the compacted entry blob.** `build_outtmpl`
+  can only derive info fields from `EntryHints`, which carries `playlist_index`/`_count`/`_title`
+  and the channel equivalents — legacy passed yt-dlp's **whole** child info dict, so a template
+  using `%(playlist_id)s` or `%(playlist_uploader)s` resolved there and would resolve to `NA` here.
+  DESIGN §7.5 already keeps exactly the right keys (`^(playlist|channel)`, `n_entries`,
+  `__last_playlist_index`); `merge_info` sanitises and merges them. Without that call the templates
+  still work, but those two fields degrade.
+- **`get_format_raw` / `get_opts_raw` are for WP-15.** The v1 shim receives four free-form strings
+  and legacy applied `or`-defaults, `strip()` and `lower()` to them; the typed `get_format` /
+  `get_opts` cannot express `None`, `"  VIDEO "` or an unknown codec, all of which the golden
+  corpus exercises. Both raw entry points are public and are what the shim should call before its
+  own legacy pre-check, so the 400 strings stay byte-identical.
+- **No manifest and no `Cargo.lock` change.** The package needs no dependency beyond its DESIGN §3
+  row; the field scanner in `outtmpl` is a hand-written port of yt-dlp's `STR_FORMAT_RE_TMPL`
+  because that pattern opens with the lookbehind `(?<!%)`, which the `regex` crate cannot compile —
+  and because the §3 row does not budget for `regex` here anyway. `Cargo.lock` is dirty in the
+  working tree from another package's edits and was deliberately left out of this commit.
