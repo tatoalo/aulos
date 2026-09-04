@@ -15,7 +15,7 @@
 //!                  └── auth ──┬── <p>api/v2/*      v2::router
 //!                             ├── <p>ws            ws::router
 //!                             ├── <p>download/*    files::router
-//!                             └── (WP-15) the v1 shim
+//!                             └── <p>add, history, … v1::router (legacy CORS)
 //! ```
 //!
 //! Every read of queue state goes through [`aulos_queue::StateView`] — one atomic load, no
@@ -33,6 +33,7 @@
 //! | `download_url` — the one derived wire field | [`view`] |
 //! | `POST downloads`, actions, `state`, `items`, `capabilities`, `catalog`, … | [`v2`] |
 //! | the WebSocket session | [`ws`] |
+//! | `add`, `history`, `delete`, `start`, the legacy subscription and cookie routes | [`v1`] |
 //! | `download/*`, `audio_download/*`, `Range`, the JSON listing | [`files`] |
 //! | `healthz`, `livez` | [`health`] |
 //!
@@ -56,6 +57,7 @@ pub mod error;
 pub mod files;
 pub mod health;
 pub mod trace;
+pub mod v1;
 pub mod v2;
 pub mod view;
 pub mod ws;
@@ -310,6 +312,12 @@ pub fn router(state: ApiState) -> Router {
     let mut router = open.merge(guarded);
     if let Some(layer) = cors::v2(&state.cfg.cors_allowed_origins) {
         router = router.layer(layer);
+    }
+    // WP-15's seam. Merged **after** the v2 CORS layer on purpose: `Router::layer` wraps only the
+    // routes registered so far, so the v1 shim keeps legacy's own two-header CORS
+    // (DESIGN §11.6) instead of inheriting v2's method/`Vary`/`Max-Age` set.
+    if state.cfg.v1_enabled {
+        router = router.merge(v1::router(state.clone()));
     }
     router.layer(axum::middleware::from_fn_with_state(state, trace::headers))
 }

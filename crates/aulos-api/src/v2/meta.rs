@@ -111,9 +111,13 @@ pub async fn robots(State(state): State<ApiState>) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }
 
-/// What `robots.txt` says with nothing configured: a download manager has nothing to crawl.
+/// What `robots.txt` says with nothing configured.
+///
+/// DESIGN §11.7 pins this body to the byte — three `\n`-terminated lines, no trailing blank one —
+/// and it is defined once, in [`crate::v1::legacy::ROBOTS_TXT`], because the shim's golden replay
+/// compares against it (WP-15).
 fn default_robots() -> String {
-    "User-agent: *\nDisallow: /\n".to_owned()
+    crate::v1::legacy::ROBOTS_TXT.to_owned()
 }
 
 /// `GET <p>socket.io/*` — the one 501 in the taxonomy (DESIGN §11.1).

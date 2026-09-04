@@ -1551,3 +1551,79 @@ All of these are addressed to packages that do not exist yet. None of them block
   strings and its `MAX_COOKIE_BYTES`, `cors::v1` (the legacy method set), `error::ApiError` and
   `error::Json`, `view::project`/`view::public_url` for `download_url`, and
   `v2::query::lookup`/`items` for id resolution. `aulos_core::Status::v1()` is the status mapping.
+
+---
+
+## WP-15 — `aulos-api::v1`, the v1 compatibility shim
+
+Three changes outside `crates/aulos-api/src/v1/`, all additive, plus the deviations from PLAN
+WP-15's interface block.
+
+### `aulos-store`: one new module
+
+- **`crates/aulos-store/src/v1.rs` — `live_media_ids(&Store)`**, plus the one `pub mod v1;` line in
+  `lib.rs`. No existing signature changed.
+
+  DESIGN §11.4 projects v1's `id` as "the provider's `media_id` when present, else the ULID". For
+  `done[]` that is free — `Store::v1_done` returns whole `Item` rows, which carry `media_id`. For
+  `queue[]`/`pending[]` it is not: DESIGN §11.4 sources those from the **published snapshot**,
+  because that is the only place transient progress (`percent`, `speed`, `eta`) exists, and
+  `ItemView` deliberately carries no `media_id` (PROTOCOL §0 rule 3 — v2 has exactly one
+  identifier). Without a side lookup an in-flight row's v1 `id` would be its ULID, which is a
+  visible change to a field the legacy client displays and keys its list by.
+
+  The lookup is two columns, no parameters, served off the `(status, ord)` index, over the
+  non-terminal set — bounded by the queue's working size, not by the table. `aulos-store`'s own
+  test asserts the excluded statuses are exactly `Status::is_terminal`, so this and `v1_done`
+  partition the table with no row in both and none in neither.
+
+  **If WP-02 ever adds `media_id` to `ItemView`, delete this module and the extra
+  `project_history` argument below.**
+
+### `aulos-api` (WP-14's files)
+
+- **`lib.rs`**: `pub mod v1;` and the two-line mount at the documented seam, merged **after** the
+  v2 CORS layer — `Router::layer` wraps only the routes registered so far, so this is what gives the
+  shim legacy's own two-header CORS (DESIGN §11.6) instead of v2's method/`Vary`/`Max-Age` set.
+- **`v2/meta.rs::default_robots()`** returned `"User-agent: *\nDisallow: /\n"`. DESIGN §11.7 pins
+  the body to three `\n`-terminated lines (`Disallow: /download/`, `Disallow: /audio_download/`),
+  and WP-00's `robots_txt` case captures exactly that. Now one line: it returns
+  `crate::v1::legacy::ROBOTS_TXT`, which is the single definition the golden replay compares
+  against.
+
+### Deviations from PLAN WP-15's interface block
+
+- **`project_history(active, done, media, cfg)`** takes a fourth argument — the `MediaIds` map from
+  the store lookup above. `project_item(view, media_id, cfg)` likewise. Keeping the projection pure
+  was the point of the PLAN's signature, and threading the lookup through the caller is what
+  preserves that.
+- **`migrate_legacy_request` and the request parser live in `v1/request.rs`**, and
+  `parse_download_options(cfg, presets, body) -> DownloadRequest` is the shape the shim actually
+  needs (the PLAN lists only `migrate_legacy_request`).
+- **The `', '` joiner is unit-tested, not driven through the route.** A v1 `POST add` carries
+  exactly one `url`, as legacy's `dqueue.add(url, …)` did, so `WaitResolved` is handed one id and
+  the multi-message join is unreachable over HTTP. `v1::add::failures` implements it (including
+  legacy's de-duplication of a playlist's shared child error) and is tested directly.
+- **`aulos_v1_add_resolve_total{outcome}` is a set of process atomics**, not a Prometheus counter:
+  the metrics endpoint is CUT (BRIEF scope trims). `v1::add::add_resolve_counters()` exposes
+  `(ok, error, timeout, skipped)` and is what the timeout test asserts against.
+- **The `print-schema`-generated JSON-Schema check is CUT** with `print-schema` itself. The three
+  claims it was to encode — all three history arrays always present, `status` only ever one of the
+  five legacy strings, `percent` decodes as a number — are asserted directly against live responses
+  in `tests/v1_routes.rs::the_shipped_client_models_decode_every_route` and by the golden harness's
+  `assert_item_shape`.
+- **The golden harness lives at `crates/aulos-api/tests/v1_golden/harness.rs`** with its test target
+  at `crates/aulos-api/tests/v1_golden.rs`. `tests/v1_golden/harness.rs` at the repository root
+  (where WP-00's README expects it) is not a cargo target and would never run; the corpus itself is
+  read in place from `<workspace>/tests/v1_golden` rather than copied.
+- **`legacy_configuration()` is exposed but unrouted.** DESIGN §11.4 says the v1 shim emits
+  `DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT` and `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL` as **strings**; the
+  only legacy carrier for them was the Socket.IO `configuration` event, which BRIEF §8 does not
+  provide. The function and its test pin the string-typed contract in one place, ready for a
+  `configuration` route if one is ever wanted.
+- **`percent` is always a number in v1.** DESIGN §11.4's field table says so ("always a number;
+  legacy was sometimes `null`, which the client already clamps"); PROTOCOL §10.5's "`percent` may
+  be `null` in v1" is the losing side of that conflict, and PROTOCOL §0 rule 4 agrees with DESIGN.
+- **`filename` and `size` are always present** (legacy omitted the keys until a file existed) and
+  **`folder` is `""` rather than `null`** when there is none, which is what legacy's subscription
+  path emitted and what the fixture records.

@@ -54,6 +54,9 @@ mod reads;
 mod schema;
 mod subscriptions;
 mod telegram;
+/// The v1 compatibility shim's one extra read (DESIGN §11.4). Added additively for WP-15; see
+/// `docs/INTEGRATION-NOTES.md`.
+pub mod v1;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
