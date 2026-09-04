@@ -1287,3 +1287,115 @@ All of these are addressed to packages that do not exist yet. None of them block
   another_clients_window` proves `floor` moves only on the frame and byte bounds, and
   `aggregator::tests::an_item_added_and_removed_in_one_window_leaves_no_row` plus
   `a_rest_readers_cursor_is_never_newer_than_the_socket` cover the other two halves of that bullet.
+
+## WP-16 — `aulos-subscriptions` and `aulos-telegram`
+
+### Things the integrator must act on
+
+- **`SubCmd::Add` carries only `url`, `selection` and `folder`.** `aulos-core::subscription`
+  (WP-02) declares it that way, but legacy's `POST <p>subscribe` accepted the whole download
+  template — `check_interval_minutes`, `custom_name_prefix`, `auto_start`, `playlist_item_limit`,
+  `split_by_chapters`, `chapter_template`, `subtitle_language`, `subtitle_mode`,
+  `ytdl_options_presets`, `ytdl_options_overrides` — and PLAN WP-16's interface block shows
+  `SubscriptionsHandle::create(req: DownloadRequest, interval: u32)`. The manager therefore fills
+  the missing fields from the effective config today:
+  `check_interval_minutes = SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`,
+  `chapter_template = OUTPUT_TEMPLATE_CHAPTER`,
+  `playlist_item_limit = DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT`, and
+  `SubscriptionRecord::new`'s defaults for the rest. **A caller cannot yet set a subscription's
+  interval, and that is a v1 parity gap on `POST subscribe`.** The fix is additive and small:
+  add the fields to `SubCmd::Add` (the enum is `#[non_exhaustive]`, and nothing outside WP-16
+  matches on it yet), then extend
+  `aulos-subscriptions::manager`'s `NewSubscription { … }` construction in `on_cmd` — the struct
+  already has the fields, so it is a one-block change with no new plumbing. WP-14 should wire
+  `PATCH`/`POST` bodies through once that lands. Not done here because changing an existing
+  `aulos-core` signature is outside WP-16's ownership.
+
+- **`Notifier` is declared in `aulos-telegram::watch`, not in `aulos-core::event`.** DESIGN §12.6
+  wants it next to `DomainEvent` and the `EventRouter` so a future APNs crate can implement it
+  without depending on `aulos-telegram`; `aulos-core` does not declare it yet, and adding a trait
+  there is another crate's file. The shape is the design's verbatim
+  (`id`, `interested(&ItemView)`, `async on_event(&DomainEvent)`). Moving it is a cut-and-paste
+  plus a `pub use aulos_core::event::Notifier;` re-export here, and no call site changes:
+  `TelegramActor` consumes its `EventInbox` directly (DESIGN §12.1), so nothing dispatches
+  *through* the trait yet.
+
+- **`aulos-api` (WP-14/WP-15) needs its own copy of the two subscription projections.** It cannot
+  depend on `aulos-subscriptions` (DESIGN §3), so `aulos-subscriptions::public` is the *reference*
+  implementation and its tests are the normative shapes: `to_v1_dict` (exactly
+  `SubscriptionView::V1_KEYS`, with `last_checked` divided by 1000 into a **float**), `v2_frame`
+  (`{"t":"subscription","seq":…,"subscription":{…16 keys…}}`) and `v2_removed_frame`
+  (`{"t":"subscription_removed","seq":…,"ids":[…]}` — an **array**, even for one deletion).
+  `parse_enabled` (the legacy `_coerce_bool` port, `true|1|on` / `false|0|off`, and
+  `enabled must be a boolean` on anything else) lives there too and should be lifted to
+  `aulos-core::subscription` if `aulos-api` wants to share it rather than re-implement it.
+
+- **`DomainEvent::SubscriptionRemoved` carries one `SubId`, the frame carries an array.** The
+  manager publishes one event per deleted id (a `DELETE` of three ids publishes three), so
+  `aulos-api` must either batch them into one `subscription_removed` frame or emit one frame per
+  id with a single-element array. Either is protocol-legal; PROTOCOL §5.9's example is one frame
+  with an array.
+
+### Deliberate deviations, and why
+
+- **`aulos-subscriptions` does not take `arc-swap`.** DESIGN §3's row does not budget it and
+  `tests/arch.rs` enforces the row, so the live `YTDL_OPTIONS` snapshot reaches the checker through
+  a one-method trait, `aulos_subscriptions::check::OptionsSource`. `aulos-server` should implement
+  it over the `Arc<ArcSwap<YtdlOptions>>` it already owns (four lines); `StaticOptions` is the
+  no-reload implementation for `check-config` and the tests.
+
+- **`aulos-telegram` does not take `regex`.** Same reason. The legacy URL pattern
+  `https?://[^\s<>()\[\]{}"']+` is a literal prefix plus a negated character class, so
+  `urls::extract` scans it by hand; `URL_PATTERN` is kept as a documented constant and the port is
+  covered by the legacy accept/reject table. One parity consequence is pinned by a test: a
+  **bracketed IPv6 URL is not extracted from a message at all**, because `[` and `]` are in the
+  pattern's negated class — legacy behaved the same way. `urls::validate` still rejects `[::1]`,
+  and that is the entry point every other caller uses.
+
+- **`aulos-telegram` has a `transport` module DESIGN §3 does not list.** DESIGN §12.1 types the
+  actor's field as `teloxide::Bot`, which can only be exercised against `api.telegram.org`; PLAN
+  WP-16 requires every command text, every callback text and the whole rate-limit ladder to be
+  asserted "against a mocked bot transport, never a real token". `transport::Transport` is the
+  three-call seam (`sendMessage`, `editMessageText`, `answerCallbackQuery`),
+  `TeloxideTransport` is the shipping implementation, `MockTransport` is the test one, and
+  `TelegramActor::new` still builds the real one from the token exactly as the design says.
+  `transport::poll_updates` is the long-polling loop and `transport::to_incoming` the update
+  mapping; **WP-17 should spawn `poll_updates(transport.bot().clone(), actor.incoming(), shutdown)`
+  next to `actor.spawn(inbox)`**, and take `actor.incoming()` *before* `spawn` consumes the actor.
+
+- **The global `governor` limiter is driven by the injected `Clock`, not by `quanta`.** A private
+  `governor::clock::Clock` adapter over `aulos_core::Clock` is what makes the per-chat rules
+  testable: with the real clock, a test that means to exercise the 3 s per-chat interval trips the
+  20/s global burst instead and passes for the wrong reason. The per-chat half is hand-rolled
+  because a GCRA `Quota` is immutable and the `429` rule changes a chat's interval at runtime.
+
+- **The board's change detection compares the body, not the message.** `render::render_board` is
+  `render_body(lines)` plus an `updated HH:MM:SS` footer, and only the body is compared against
+  `last_rendered`. Comparing the whole message would make every 1 Hz tick a change and there would
+  be no `message is not modified` guard at all — which is the one rule DESIGN §12.4 says breaks
+  naive implementations.
+
+- **The subscription backoff is DESIGN §14.2's formula, not PLAN's prose.** DESIGN says
+  `min(interval * 2^min(failures, 8), AULOS_SUB_BACKOFF_MAX_SECS)`; the PLAN acceptance bullet
+  describes the curve as "1, 2, 4 …", which is the same doubling shape counted from a different
+  starting point. The implemented curve after 0, 1, 2 … failures is
+  `interval, 2×, 4×, 8× …` capped, and `model::tests` pins every value.
+
+- **`Manager::load` writes the computed first-check time back to `next_due`.** DESIGN §14.2 only
+  says the first check is at `now + AULOS_SUB_FIRST_CHECK_DELAY_SECS + jitter(0..30 s)`; persisting
+  it means `healthz.components.subscriptions.next_due_in_s` and the `subscription` frame report the
+  schedule the timer is actually on, instead of a stale value or `null`. One batched transaction at
+  boot.
+
+- **`EngineCmd::Add` is all-or-nothing, so a subscription check retries the batch minus the
+  rejected entry.** DESIGN §14.3 step 6 wants one `Add`, and parity wants a failing entry left
+  unseen with its message collected into `error`. The happy path is one round trip; each rejection
+  costs exactly one more, bounded by the batch length.
+
+### BRIEF scope trims applied here
+
+- `AULOS_TELEGRAM_WATCH_ALL` defaults to **`true`**, per the BRIEF table — the legacy blind spot
+  (web and subscription downloads invisible to the bot) is treated as a bug. `false` reproduces it
+  exactly, and `tests/actor.rs` asserts both.
+- No Prometheus metrics: `edits_throttled_total` is exposed on `TelegramHealth` for `healthz`
+  (DESIGN §12.4 asks for it there) and nowhere else.

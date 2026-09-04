@@ -410,6 +410,7 @@ dependencies = [
 name = "aulos-subscriptions"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "aulos-core",
  "aulos-provider",
@@ -432,8 +433,10 @@ dependencies = [
 name = "aulos-telegram"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "aulos-core",
+ "aulos-provider",
  "aulos-queue",
  "aulos-store",
  "governor",
@@ -444,6 +447,7 @@ dependencies = [
  "serde",
  "serde_json",
  "teloxide",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

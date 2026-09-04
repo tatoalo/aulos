@@ -31,4 +31,10 @@ url = { workspace = true }
 rstest = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+# The suite runs a real queue engine, whose `Engine::new` takes the `ArcSwap<YtdlOptions>` the
+# binary owns; `arc-swap` is therefore a dev-only dependency here (the shipped crate reaches the
+# same snapshot through `check::OptionsSource`, so DESIGN §3's row stays as written).
+arc-swap = { workspace = true }
+# The scripted, no-network provider (BRIEF §17).
+aulos-provider = { workspace = true, features = ["fake"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

@@ -32,4 +32,9 @@ url = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 insta = { workspace = true }
+tempfile = { workspace = true }
+# The suite runs a real queue engine, whose `Engine::new` takes the `ArcSwap<YtdlOptions>` the
+# binary owns; `arc-swap` is therefore a dev-only dependency here. The shipped crate never sees it.
+arc-swap = { workspace = true }
+aulos-provider = { workspace = true, features = ["fake"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
