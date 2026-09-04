@@ -1,0 +1,24 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local state / secrets
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+/config/
+/downloads/
+
+# Tooling
+.DS_Store
+*.log
+/recipe.json
+.idea/
+.vscode/
+
+# insta review leftovers
+**/*.snap.new

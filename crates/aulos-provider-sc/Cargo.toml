@@ -1,0 +1,42 @@
+[package]
+name = "aulos-provider-sc"
+description = "The StreamingCommunity provider: scrape pipeline, HLS engines and progress parsing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# BRIEF: Chrome TLS impersonation is the primary path and is on by default; the
+# plain `reqwest` client must remain a working fallback.
+default = ["sc-impersonate"]
+sc-impersonate = ["dep:wreq"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+aulos-core = { workspace = true }
+aulos-provider = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "fs"] }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
+reqwest = { workspace = true }
+wreq = { workspace = true, optional = true }
+scraper = { workspace = true }
+regex = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+url = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

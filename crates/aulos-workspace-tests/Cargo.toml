@@ -1,0 +1,17 @@
+[package]
+name = "aulos-workspace-tests"
+description = "Dev-only crate owning the workspace-wide architecture and packaging gates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+aulos-core = { workspace = true }
+toml = { workspace = true }

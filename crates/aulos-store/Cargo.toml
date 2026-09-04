@@ -1,0 +1,32 @@
+[package]
+name = "aulos-store"
+description = "SQLite (WAL) store actor, hi/lo id allocators and the legacy JSON importer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+aulos-core = { workspace = true }
+rusqlite = { workspace = true, features = ["serde_json", "functions"] }
+rusqlite_migration = { workspace = true }
+ulid = { workspace = true }
+base64 = { workspace = true }
+time = { workspace = true, features = ["formatting", "parsing"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rstest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

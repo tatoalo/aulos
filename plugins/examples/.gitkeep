@@ -1,0 +1,2 @@
+Example `command` provider and `[[hook]]` plugins live here (BRIEF §9, §13; DESIGN §6.5, §13.4).
+The image copies this directory to /opt/aulos/plugins-examples; WP-10 and WP-11 fill it in.

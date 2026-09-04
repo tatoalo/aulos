@@ -1,0 +1,80 @@
+name: release
+
+# DESIGN §18.4, SIMPLIFIED by the BRIEF v1.0 scope trims: tag -> image tag + notes. The `syft`
+# SBOM is CUT; `docker.yml` already tags and pushes the image for `v*`, so this workflow attaches
+# the amd64 binary and generates the release body.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+
+      - name: Build the amd64 binary
+        run: |
+          set -eu
+          cargo build --release --locked -p aulos-server
+          mkdir -p dist
+          cp target/release/aulos-server dist/aulos-server-x86_64-unknown-linux-gnu
+          ( cd dist && sha256sum ./* > SHA256SUMS )
+
+      - name: Generate the release body
+        id: body
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          repo=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          prev=$(git tag -l 'v*' --sort=-version:refname | grep -v "^${TAG}$" | head -n 1 || true)
+          {
+            echo '## Container image'
+            echo ''
+            echo "- \`${repo}:${TAG}\`"
+            echo "- \`${repo}:latest\`"
+            echo ''
+            echo '## Changes'
+            echo ''
+            if [ -n "$prev" ]; then
+              git log "${prev}..${TAG}" --pretty=format:'- %s (%h)' --no-merges
+            else
+              git log "${TAG}" --pretty=format:'- %s (%h)' --no-merges | head -n 100
+            fi
+          } > release_body.md
+          cat release_body.md
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          body_path: release_body.md
+          files: |
+            dist/aulos-server-x86_64-unknown-linux-gnu
+            dist/SHA256SUMS
+          draft: false
+          prerelease: false

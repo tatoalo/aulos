@@ -1,0 +1,31 @@
+# DESIGN §18.3. A drop-in replacement for the legacy MeTube-POT service: same env var names, same
+# volumes. `STATE_DIR` is unchanged on purpose — the importer reads the legacy JSON from it on
+# first start.
+services:
+  aulos:
+    image: ghcr.io/tatoalo/aulos-server:latest
+    container_name: aulos
+    restart: unless-stopped
+    ports: ["8081:8081"]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      CHOWN_DIRS: "false"
+      DOWNLOAD_DIR: /downloads
+      AUDIO_DOWNLOAD_DIR: /downloads/audio
+      STATE_DIR: /downloads/.metube          # unchanged: the importer reads it
+      TEMP_DIR: /downloads/.tmp
+      MAX_CONCURRENT_DOWNLOADS: "3"
+      SC_MAX_CONCURRENT_DOWNLOADS: "1"
+      YTDL_OPTIONS_FILE: /config/ytdl-options.json
+      JELLYFIN_SYNC_ENABLED: "true"
+      JELLYFIN_URL: http://jellyfin:8096
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
+      JELLYFIN_LIBRARY_ID: ${JELLYFIN_LIBRARY_ID}
+      TELEGRAM_BOT_ENABLED: "true"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
+    volumes:
+      - /srv/media:/downloads
+      - /srv/aulos/config:/config

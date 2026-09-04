@@ -1,0 +1,14 @@
+# Keep the build context small: the builder stage compiles from source and needs Cargo.lock.
+/target/
+.git/
+.github/
+docs/
+*.md
+!README.md
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+/recipe.json

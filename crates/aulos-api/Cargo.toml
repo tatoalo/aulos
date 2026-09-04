@@ -1,0 +1,45 @@
+[package]
+name = "aulos-api"
+description = "The axum surface: v2 REST, the WebSocket, the v1 compatibility shim, files and health."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+aulos-core = { workspace = true }
+aulos-store = { workspace = true }
+aulos-queue = { workspace = true }
+axum = { workspace = true, features = ["ws", "http1", "json", "tokio", "query", "macros"] }
+axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["trace", "cors", "request-id", "limit", "fs"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "fs"] }
+tokio-util = { workspace = true, features = ["io"] }
+arc-swap = { workspace = true }
+bytes = { workspace = true }
+mime_guess = { workspace = true, features = ["default"] }
+percent-encoding = { workspace = true }
+serde_with = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["json"] }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

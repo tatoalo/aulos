@@ -1,0 +1,38 @@
+[package]
+name = "aulos-queue"
+description = "The queue engine: scheduling, slots, resolution pool, cancellation and the realtime aggregator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+aulos-core = { workspace = true }
+aulos-store = { workspace = true }
+aulos-provider = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+arc-swap = { workspace = true }
+bytes = { workspace = true }
+smallvec = { workspace = true }
+indexmap = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

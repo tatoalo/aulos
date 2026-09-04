@@ -1,0 +1,31 @@
+[package]
+name = "aulos-core"
+description = "Domain types, status vocabulary, ids, events, config and errors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+ulid = { workspace = true }
+url = { workspace = true }
+time = { workspace = true, features = ["formatting", "parsing", "macros"] }
+arc-swap = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+rstest = { workspace = true }
+proptest = { workspace = true }
+insta = { workspace = true, features = ["json"] }

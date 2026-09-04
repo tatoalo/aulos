@@ -1,0 +1,152 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# ---------------------------------------------------------------------------
+# Shared package metadata (DESIGN §3: edition 2024, rust-version 1.95).
+# ---------------------------------------------------------------------------
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tatoalo/aulos-server"
+authors = ["Aulos contributors"]
+
+# ---------------------------------------------------------------------------
+# Lints (DESIGN §3, PLAN §0 "No unwrap").
+# `unwrap_used` is denied everywhere; `#[cfg(test)]` code is exempted at the
+# call site with `#![cfg_attr(test, allow(clippy::unwrap_used))]`.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+disallowed_methods = "deny"
+# Curated pedantic subset (DESIGN §3). `doc_markdown` is deliberately NOT in it: the module docs
+# in this workspace are prose and it flags every acronym (SQLite, WAL, HLS, NFO, ANSI, ...).
+explicit_iter_loop = "warn"
+if_not_else = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+str_to_string = "warn"
+unnested_or_patterns = "warn"
+
+# ---------------------------------------------------------------------------
+# Dependencies (DESIGN §18.6). Every version below is pinned here and referenced
+# from member crates with `workspace = true`; a member never names a version.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# --- the ubiquitous five (permitted in every crate, DESIGN §3) ---
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+
+# --- runtime ---
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# --- http server ---
+axum = { version = "0.8", default-features = false }
+axum-server = { version = "0.7", default-features = false }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false }
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+
+# --- serialisation helpers ---
+serde_with = { version = "3", default-features = false, features = ["macros", "std"] }
+toml = "0.9"
+quick-xml = "0.38"
+base64 = "0.22"
+
+# --- storage ---
+rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite_migration = "2"
+
+# --- domain plumbing ---
+ulid = "1"
+arc-swap = "1"
+bytes = "1"
+smallvec = "1"
+indexmap = "2"
+url = "2"
+regex = "1"
+time = { version = "0.3", default-features = false, features = ["std"] }
+rand = "0.9"
+sha2 = "0.10"
+percent-encoding = "2"
+mime_guess = { version = "2", default-features = false }
+strip-ansi-escapes = "0.2"
+
+# --- process control ---
+nix = { version = "0.30", default-features = false }
+command-fds = "0.3"
+notify = "8"
+
+# --- outbound http / scraping ---
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# DESIGN §18.6 asks for `wreq = "6"`; upstream has only published 6.0.0-rc.* so far
+# (highest stable is 5.3.0). Pinned to the release candidate so the major matches the
+# design; BRIEF allows dropping to plain `reqwest` if it will not build (feature
+# `sc-impersonate` in `aulos-provider-sc`).
+wreq = "6.0.0-rc.31"
+scraper = "0.23"
+
+# --- tls ---
+rustls = { version = "0.23", default-features = false }
+rustls-pemfile = "2"
+
+# --- integrations ---
+teloxide = { version = "0.17", default-features = false }
+governor = { version = "0.8", default-features = false, features = ["std", "quanta"] }
+
+# --- observability / cli ---
+tracing-subscriber = { version = "0.3", default-features = false }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+
+# --- v1.0: not implemented, see BRIEF (Prometheus `metrics` endpoint is CUT). Pinned
+# --- so re-enabling §16.7 later is a one-line change in `aulos-api`.
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# --- dev ---
+insta = "1"
+wiremock = "0.6"
+rstest = "0.26"
+proptest = "1"
+tempfile = "3"
+tokio-test = "0.4"
+tokio-tungstenite = "0.27"
+assert_cmd = "2"
+predicates = "3"
+# v1.0: not implemented, see BRIEF (criterion benchmarks are CUT).
+criterion = "0.7"
+
+# --- internal ---
+aulos-core = { path = "crates/aulos-core" }
+aulos-store = { path = "crates/aulos-store" }
+aulos-provider = { path = "crates/aulos-provider" }
+aulos-provider-ytdlp = { path = "crates/aulos-provider-ytdlp" }
+aulos-provider-sc = { path = "crates/aulos-provider-sc" }
+aulos-queue = { path = "crates/aulos-queue" }
+aulos-api = { path = "crates/aulos-api" }
+aulos-telegram = { path = "crates/aulos-telegram" }
+aulos-subscriptions = { path = "crates/aulos-subscriptions" }
+aulos-hooks = { path = "crates/aulos-hooks" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

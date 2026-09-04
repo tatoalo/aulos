@@ -1,0 +1,200 @@
+name: update-yt-dlp
+
+# DESIGN §18.5. Ported from the legacy repo with the four hardening changes: the pin lives in one
+# place (`docker/Dockerfile`'s `ARG YTDLP_VERSION=`, asserted exactly once), the PR is only opened
+# after an amd64 image build plus a smoke run, the commit message stays byte-identical, and a
+# fine-grained PAT is preferred with a graceful `GITHUB_TOKEN` fallback.
+on:
+  schedule:
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bump-yt-dlp
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-yt-dlp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.AULOS_REPO_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Assert the pin lives in exactly one place
+        run: |
+          set -eu
+          n=$(grep -c 'ARG YTDLP_VERSION=' docker/Dockerfile)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly one 'ARG YTDLP_VERSION=' in docker/Dockerfile, found $n"
+            exit 1
+          fi
+
+      - name: Check for yt-dlp nightly updates
+        id: update
+        run: |
+          set -eu
+          CURRENT_VERSION=$(grep -oE 'ARG YTDLP_VERSION=[^ ]+' docker/Dockerfile | sed 's/ARG YTDLP_VERSION=//')
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "::error::Could not extract yt-dlp version from docker/Dockerfile"
+            exit 1
+          fi
+          echo "Current version (docker/Dockerfile): $CURRENT_VERSION"
+
+          pip install --dry-run --pre yt-dlp 2>&1 | tee /tmp/pip_output.txt
+          LATEST_VERSION=$(grep 'Would install' /tmp/pip_output.txt | grep -oE 'yt-dlp-[^ ,]+' | sed 's/yt-dlp-//')
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "::error::Could not determine latest yt-dlp nightly version"
+            exit 1
+          fi
+          echo "Latest nightly version: $LATEST_VERSION"
+
+          if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "Update available: $CURRENT_VERSION -> $LATEST_VERSION"
+            {
+              echo "has_update=true"
+              echo "current_version=$CURRENT_VERSION"
+              echo "latest_version=$LATEST_VERSION"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "yt-dlp is already up to date ($CURRENT_VERSION)"
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update the pin
+        if: steps.update.outputs.has_update == 'true'
+        env:
+          LATEST_VERSION: ${{ steps.update.outputs.latest_version }}
+        run: |
+          set -eu
+          sed -i "s/^ARG YTDLP_VERSION=.*/ARG YTDLP_VERSION=$LATEST_VERSION/" docker/Dockerfile
+          git diff docker/Dockerfile
+
+      - name: Set up Docker Buildx
+        if: steps.update.outputs.has_update == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the amd64 image with the new pin
+        if: steps.update.outputs.has_update == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          build-args: |
+            VERSION=bump-smoke
+          tags: aulos-server:bump-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke the new pin
+        # This is the entire point of pinning a nightly: a bad nightly must fail here, not on the
+        # VPS. Legacy auto-merged on a version-string diff alone.
+        if: steps.update.outputs.has_update == 'true'
+        run: |
+          set -eu
+          docker run --rm aulos-server:bump-smoke doctor
+          docker run --rm --entrypoint python3 aulos-server:bump-smoke \
+            -c 'import yt_dlp; print("yt_dlp", yt_dlp.version.__version__)'
+          # A real extraction through the shim lands with WP-07; until then the import above plus
+          # `doctor` is the smoke test.
+          if [ -f crates/aulos-provider-ytdlp/tests/smoke_extract.sh ]; then
+            AULOS_IMAGE=aulos-server:bump-smoke crates/aulos-provider-ytdlp/tests/smoke_extract.sh
+          else
+            echo "::notice::shim extract smoke lands with WP-07; skipping"
+          fi
+
+      - name: Create or update the pull request
+        if: steps.update.outputs.has_update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AULOS_REPO_PAT || secrets.GITHUB_TOKEN }}
+          HAVE_PAT: ${{ secrets.AULOS_REPO_PAT != '' }}
+          CURRENT_VERSION: ${{ steps.update.outputs.current_version }}
+          LATEST_VERSION: ${{ steps.update.outputs.latest_version }}
+        run: |
+          set -eu
+          BRANCH="auto/update-yt-dlp-nightly-${LATEST_VERSION}"
+
+          git config user.email "updater@aulos"
+          git config user.name "AutoUpdater"
+
+          # Reuse the branch on a retry, otherwise create it. The pin edit is re-applied on the
+          # branch rather than carried across the checkout, so the step is idempotent.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists, reusing it"
+            git checkout -- docker/Dockerfile
+            git fetch origin "$BRANCH"
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -- docker/Dockerfile
+            git checkout -b "$BRANCH"
+          fi
+          sed -i "s/^ARG YTDLP_VERSION=.*/ARG YTDLP_VERSION=$LATEST_VERSION/" docker/Dockerfile
+
+          git add docker/Dockerfile
+          if ! git diff --cached --quiet; then
+            # Byte-identical to the legacy message: the release-notes tooling keys off it.
+            git commit -m "upgrade yt-dlp nightly to $LATEST_VERSION"
+          else
+            echo "No new Dockerfile changes to commit"
+          fi
+          git push -u origin "$BRANCH"
+
+          PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" --json url --jq '.[0].url')
+          if [ -z "$PR_URL" ]; then
+            LABEL_ARGS=""
+            if gh api "repos/$GITHUB_REPOSITORY/labels/automated" >/dev/null 2>&1; then
+              LABEL_ARGS="--label automated"
+            else
+              echo "Label 'automated' not found; creating PR without label"
+            fi
+            # shellcheck disable=SC2086
+            PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" \
+              --title "Upgrade yt-dlp nightly to $LATEST_VERSION" \
+              --body "## Summary
+          - Automated yt-dlp nightly update
+          - Version: $CURRENT_VERSION -> $LATEST_VERSION
+          - The amd64 image was built and smoke-tested with this pin before this PR was opened.
+
+          ---
+          *This PR was automatically created by the update-yt-dlp workflow.*" $LABEL_ARGS)
+          fi
+
+          if [ "$HAVE_PAT" = "true" ]; then
+            gh pr merge "$PR_URL" --auto --squash
+          else
+            echo "::warning::AULOS_REPO_PAT is not configured; opened $PR_URL without auto-merge"
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          HAS_UPDATE: ${{ steps.update.outputs.has_update }}
+          CURRENT_VERSION: ${{ steps.update.outputs.current_version }}
+          LATEST_VERSION: ${{ steps.update.outputs.latest_version }}
+        run: |
+          {
+            echo "## yt-dlp Nightly Update Check"
+            echo ""
+            if [ "${HAS_UPDATE:-false}" = "true" ]; then
+              echo "**Status**: Update available"
+              echo "**Current version**: $CURRENT_VERSION"
+              echo "**Latest version**: $LATEST_VERSION"
+              echo ""
+              echo "A pull request has been created or updated."
+            else
+              echo "**Status**: Already up to date"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

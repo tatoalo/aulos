@@ -1,0 +1,118 @@
+name: ci
+
+# DESIGN §18.4, SIMPLIFIED by the BRIEF v1.0 scope trims: the `deny`, `coverage`, `schema` and
+# `gitleaks` jobs are CUT.
+on:
+  push:
+    branches: [master]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+      - run: cargo test --workspace --locked
+
+  arch:
+    # The DESIGN §3 dependency-direction rules (A1-A5, WP-03) plus the WP-01 packaging gates: the
+    # HEALTHCHECK shape, the single yt-dlp pin, and the amd64-only docker matrix.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p aulos-workspace-tests --locked
+      - name: shellcheck the entrypoint
+        run: shellcheck docker/entrypoint.sh
+      - name: docker.yml builds linux/amd64 only
+        run: |
+          set -eu
+          grep -q 'platforms: linux/amd64$' .github/workflows/docker.yml
+          if grep -q 'linux/arm64' .github/workflows/docker.yml; then
+            echo "::error::docker.yml must build linux/amd64 only (BRIEF §16)"; exit 1
+          fi
+          if grep -q 'setup-qemu-action' .github/workflows/docker.yml; then
+            echo "::error::docker.yml must not set up QEMU (BRIEF §16)"; exit 1
+          fi
+      - name: the yt-dlp pin lives in exactly one place
+        run: |
+          set -eu
+          n=$(grep -c 'ARG YTDLP_VERSION=' docker/Dockerfile)
+          test "$n" -eq 1 || { echo "::error::yt-dlp pin appears $n times"; exit 1; }
+
+  python:
+    # DESIGN §18.4. Present from day one so the required check exists; each step no-ops until the
+    # file it needs lands (the shim in WP-07, the capture tooling in WP-00).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: ruff + py_compile the yt-dlp shim
+        run: |
+          set -eu
+          shim=crates/aulos-provider-ytdlp/python/ytdlp_runner.py
+          if [ ! -f "$shim" ]; then
+            echo "::notice::$shim does not exist yet (WP-07); skipping"; exit 0
+          fi
+          pip install --quiet ruff
+          ruff check "$shim"
+          python -m py_compile "$shim"
+      - name: shim contract test (canned job, stubbed yt_dlp)
+        run: |
+          set -eu
+          t=crates/aulos-provider-ytdlp/tests/shim_contract.py
+          if [ ! -f "$t" ]; then
+            echo "::notice::$t does not exist yet (WP-07); skipping"; exit 0
+          fi
+          python "$t"
+      - name: verify the golden corpora
+        run: |
+          set -eu
+          if [ ! -f tools/capture/verify.py ]; then
+            echo "::notice::tools/capture/verify.py does not exist yet (WP-00); skipping"; exit 0
+          fi
+          python tools/capture/verify.py

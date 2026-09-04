@@ -1,0 +1,108 @@
+name: docker
+
+# DESIGN §18.4, SIMPLIFIED by the BRIEF v1.0 scope trims: linux/amd64 only (no QEMU, no arm64),
+# push to GHCR on master and tags. `trivy` and the `syft` SBOM are CUT.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+    inputs:
+      push:
+        description: Push the image to GHCR
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute tags
+        id: meta
+        run: |
+          set -eu
+          date=$(date +'%Y.%m.%d')
+          short=$(git rev-parse --short HEAD)
+          repo=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "date=$date"
+            echo "version=$date"
+            echo "tags<<EOF"
+            echo "${repo}:latest"
+            echo "${repo}:${date}"
+            echo "${repo}:sha-${short}"
+            case "$GITHUB_REF" in
+              refs/tags/*) echo "${repo}:${GITHUB_REF#refs/tags/}" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))) || inputs.push }}
+          load: ${{ github.event_name == 'pull_request' }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke the locally-loaded image
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu
+          img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
+          docker run --rm "$img" doctor
+          docker run --rm "$img" healthcheck
+          # C16 regression: URL_PREFIX without slashes must still produce a healthy container.
+          cid=$(docker run -d -e URL_PREFIX=metube "$img")
+          for _ in $(seq 1 30); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
+            [ "$s" = healthy ] && break
+            sleep 2
+          done
+          docker logs "$cid" || true
+          docker rm -f "$cid" >/dev/null
+          test "$s" = healthy || { echo "::error::container never became healthy"; exit 1; }
+
+      - name: End-to-end against the built image
+        if: github.event_name == 'push' || inputs.push
+        env:
+          AULOS_E2E: '1'
+        run: |
+          set -eu
+          if [ ! -x tests/e2e/run.sh ]; then
+            echo "::notice::tests/e2e/run.sh does not exist yet; skipping"; exit 0
+          fi
+          img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
+          AULOS_IMAGE="$img" tests/e2e/run.sh
