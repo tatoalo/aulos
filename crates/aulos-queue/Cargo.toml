@@ -36,3 +36,5 @@ proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+# Every integration test in this crate runs on the scripted no-network provider (BRIEF §17).
+aulos-provider = { workspace = true, features = ["fake"] }

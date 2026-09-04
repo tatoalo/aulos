@@ -1040,3 +1040,129 @@ All of these are addressed to packages that do not exist yet. None of them block
 | Schedule the six-hourly checkpoint and `await store.close()` on shutdown; ask for `pub async fn checkpoint(&self)` rather than reaching into `schema` | WP-17 |
 | Run the importer only when the DB file did not exist, and handle `ImportFatal` as the WP-05 note describes | WP-17 |
 | Add `crates/aulos-provider-ytdlp/tests/smoke_extract.sh` and `tests/e2e/run.sh` — each turns on a CI step that no-ops today | WP-18 |
+
+---
+
+## WP-12 — `aulos-queue`: the engine
+
+- **`EngineCmd` deviations from DESIGN §8.1, all four deliberate.**
+  1. `Watch` / `Unwatch` / `ConnClosed` and the `ConnId` they carry are **absent**: the BRIEF scope
+     trim CUTs the WS watch registry, so there is no connection→groups map anywhere in the process
+     and `ItemView.children_inline` is always `true` on a group. `PLAN WP-12` still lists them; the
+     BRIEF wins.
+  2. `HooksFinished { id, outcome: Option<Box<Outcome>> }` — `Option`, because
+     `aulos_hooks::HookFinalizer::hooks_finished` carries **only the id** (see the WP-11 note). The
+     engine parks the `Outcome` in `pending_hooks` on the `Finished → Finishing` transition and
+     pairs it back up here. `None` is what the wiring adapter sends.
+  3. `File { id, slot, file }` added: DESIGN §8.1 omits it while §15.1 requires the aggregator to
+     forward `ProgressMsg::File` "to the engine (persisted)". Without it `WriteOp::PushFile` has no
+     caller.
+  4. `ExpandNext { group }` and `Clear { delete_file }` added. `ExpandNext` makes a 500-child
+     expansion interruptible between batches, which is what "`CancelResolve` marks the
+     not-yet-created children of every in-flight expansion cancelled" requires; `Clear` is the only
+     producer of `RemoveReason::Cleared`, which both the v1 "clear completed" call and the v2 clear
+     route need.
+- **`EngineHandle` has four methods DESIGN does not list, and WP-13/WP-14/WP-16 need all four.**
+  `stage(id, stage, msg)` and `file(id, slot, file)` are what the aggregator calls when it forwards
+  the two lossless `ProgressMsg` kinds (DESIGN §15.1). `clear(delete_file)` is the clear route.
+  `tick()` runs the 1 Hz maintenance pass on demand — for a caller that has just moved the clock,
+  and it is what makes every timer in this crate's tests instant instead of wall-clock bound.
+- **WP-13 must call `EngineHandle::heartbeats().frame(id, now_ms)` on every progress frame it
+  receives.** That is the whole input to the stall watchdog (DESIGN §8.11). DESIGN §4.7 asks for
+  `last_frame_at` to be bumped "before the drop decision", but the drop decision is made inside
+  `ProgressSink::progress` (`aulos-provider`), whose per-item state neither the engine nor the
+  aggregator can see — only the factory-wide `ProgressSinkFactory::dropped()` counter is
+  observable. The watchdog therefore treats **either** a heartbeat advance **or** a rise in that
+  counter as liveness, which reproduces the discrimination the design asks for
+  (`watchdog::tests::a_drop_storm_does_not_trip_the_stall_watchdog` proves it). An additive
+  per-item beat on `ProgressSink` — one `Arc<AtomicI64>` bumped before the `try_send` — would let
+  the sink record it exactly where DESIGN §4.7 says, and would make the global counter
+  unnecessary. That is an `aulos-provider` change (WP-03's file), so it is not done here.
+- **WP-16 must wire `Engine::with_pre_terminal(...)`.** The engine cannot evaluate
+  `aulos_hooks::Hook::applies` (`aulos-queue` must not depend on `aulos-hooks`, DESIGN §3), so the
+  seam is `aulos_queue::PreTerminalHooks` — one method,
+  `fn label_for(&self, view: &ItemView) -> Option<Box<str>>`, returning the `msg` the engine writes
+  while the phase runs. Implement it in `aulos-server` over `HookDispatcher`'s hook list
+  (`hooks.iter().filter(|h| h.phase() == PreTerminal && h.applies(view, Finished)).next()`), and
+  pass the same dispatcher's `HookFinalizer` adapter. **Without it every item finalises in one
+  step** — correct for a build with no pre-terminal hook, and silently wrong for `audio_sync`.
+- **A pre-terminal hook's `set_size` wins over the provider's outcome.** `EngineCmd::HookWrite`
+  records the item in `hook_sized`, and `finalise_success` then keeps the row's size rather than
+  the `Outcome`'s, so the single `completed` frame carries the post-re-encode value (DESIGN §13.3).
+  `Finishing` is published **only** on the success path, as the WP-11 note requires.
+- **`Engine::recover` publishes the whole recovered working set as one `Added(_, Created)`
+  event, and WP-13 must treat that as its snapshot baseline.** The aggregator builds `Published`
+  from the events it sees (DESIGN §15.1/§15.2); without this a client connecting after a restart
+  would get an empty snapshot until something happened to change a row. It is one event carrying
+  every view, never one per item, because the router's inbox is bounded at 4 096 and recovery may
+  run before the router task is spawned.
+- **`ViewExtras.download_url` is left `None` by the engine, so `aulos-api` must fill it.**
+  `percent-encoding` is not in `aulos-queue`'s `tests/arch.rs` row (it *is* in `aulos-api`'s), and
+  `aulos_core::ViewExtras`'s own documentation assigns the field to `aulos-api`. WP-14 therefore
+  has to apply `PUBLIC_HOST_URL`/`PUBLIC_HOST_AUDIO_URL` plus percent-encoding when it serves a
+  view — including views read straight out of WP-13's published snapshot — and the same goes for
+  `FileRef.download_url` on the two artifact lists.
+- **`OutTmpl` is built from the config templates only.** `Engine::outtmpl_for` reproduces legacy's
+  prefix handling and the `OUTPUT_TEMPLATE_PLAYLIST`/`_CHANNEL` swap, but **not** legacy's
+  `_resolve_outtmpl_fields` pre-resolution: that is `aulos_provider_ytdlp::outtmpl::OutTmplJob`,
+  and `aulos-queue` may not depend on that crate (DESIGN §3, `tests/arch.rs`). The natural home for
+  it is the ytdlp provider itself, which already holds both the `MediaEntry` and `OutTmplJob`;
+  otherwise `%(playlist_id)s`-style fields degrade to `NA` (WP-06's note).
+- **`DownloadCtx::tmp_dir` is a per-job directory, `<TEMP_DIR>/<item id>`, not the shared
+  `TEMP_DIR` legacy passed.** `aulos-provider-sc` uses `ctx.tmp_dir` *as* its segment directory
+  (`engines::temp_dir`), so two concurrent StreamingCommunity jobs sharing it would interleave
+  their segments. It also makes the DESIGN §8.7 partial cleanup one `remove_dir_all`, and keeps a
+  paused yt-dlp job's `.part` exactly where the resume looks for it. Boot recovery's orphan scan
+  understands both shapes: a loose `*.part`/`*.ytdl` file and a scratch directory whose name is an
+  `ItemId` no row claims.
+- **`streamingcommunity` is named as a string constant in the engine**
+  (`aulos_queue::entry::SC_PROVIDER`). DESIGN §7.5, §8.7 and §8.9 all state their rules per
+  provider id — keep the entry blob until the NFO hook has run; remove the partials on a pause
+  because the m3u8 token is dead — rather than as a capability. An additive
+  `Provider::partials_resumable() -> bool` (default `true`) plus
+  `Provider::keeps_entry_after_success() -> bool` would let the engine ask instead of knowing, and
+  would drop the constant.
+- **`GroupAcc` has one field DESIGN §8.6's struct does not: `active_percent`.** The count-weighted
+  fallback is written there as `Σ_active(child.percent / 100)` without saying where that sum lives,
+  and it has to be a field — walking 500 children per 250 ms tick is exactly what the accumulator
+  exists to avoid. **WP-13 owns three of the nine fields** (`downloaded`, `speed`,
+  `active_percent`): they are progress-derived, and progress never enters the engine (DESIGN §2.2).
+  They are `pub` for that reason.
+- **The five-minute drift pass corrects and WARNs; it does not `debug_assert_eq!`.** DESIGN §8.6
+  asks for the assert in debug builds, but a debug build is exactly where the acceptance test for
+  this path runs, and aborting the process is a strictly worse outcome than the corrected counter
+  the pass exists to produce. `GroupAcc::correct` returns whether it drifted.
+- **`Engine::write_status` chains a transition when the direct edge is illegal.** A provider is not
+  obliged to report every stage — the `fake` provider's default script and any downloader that
+  produces its file in one go hand the engine `Finished` while the row still reads `preparing`, and
+  DESIGN §4.2 has no `Preparing → Finished` edge. `engine::status_chain` walks the forward run of
+  the happy path, all hops land in **one** transaction, and **one** frame is published, so the
+  persisted column is legal at every step while the wire never shows a state the item held for a
+  microsecond. `Resolving → Preparing` is still refused: the only edge out of `resolving` is to
+  `queued`, and inventing a chain through it would let a resolve result overwrite a cancel.
+- **The dedupe index holds two keys per resolved item.** DESIGN §8.5 says the canonical target is
+  the `media_id` "once resolved", but a re-add arrives with a URL and nothing else, so the
+  URL-derived key has to stay in the index alongside the `media_id`-derived one — otherwise
+  re-adding the URL of an item that is still queued creates a second item, which is the exact
+  legacy bug §8.5 exists to close. `Engine::drop_dedupe` is therefore a value scan, bounded by the
+  live queue.
+- **`canonical_key` delegates to `aulos_store::canonical_key`** (WP-05's note), and
+  `aulos_queue::DedupeKey` implements `Hash` by hand because `aulos_core::Selection` derives `Eq`
+  but not `Hash`. A one-line `#[derive(Hash)]` on `Selection` would remove the hand-written impl.
+- **`AddError` is one variant per HTTP status, not DESIGN §8.3's six.** `Invalid { index, errors }`
+  carries every failing field as a `WireError`, so the API layer maps `errors[0].code` straight onto
+  the §8.3 table (`validation_failed`, `unknown_preset`, `overrides_disabled`, `folder_invalid`,
+  `unsupported_url` → 400; `Duplicate` → 409 in strict mode; `TooManyUrls` → 413). `index` says
+  which request in a batch failed, which DESIGN's shape could not express. A batch fails **whole**:
+  that is what "`AddError` → HTTP status" means, and partial acceptance would need a different
+  `AddOutcome`.
+- **`Registry::pick` → `None` is mapped to `unsupported_url`** with the verbatim
+  `Unsupported resource "<url>"` (WP-03's request), on both the add path and the resolve path.
+- **Cancel writes the terminal status immediately and ignores the job's later report.** `RunSlot`
+  carries a `settled` flag; a cancel or a pause sets it, and the task's own `Finished`/`Failed` is
+  then discarded rather than overwriting what the user asked for. This is what makes the HTTP
+  response independent of `SIGKILL` (DESIGN §8.7).
+- **`/proc` is not scanned by the cancel test.** The acceptance list asks for a `/proc` scan plus a
+  directory scan; the `fake` provider spawns no process, so there is nothing to scan for, and the
+  process-group kill itself is `aulos_provider::proc`'s own tested surface (WP-03). The directory
+  scan is asserted, on both a `.part` and a `.ytdl` file.
