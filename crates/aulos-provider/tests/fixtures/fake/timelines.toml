@@ -1,0 +1,81 @@
+# The fixture the wave-2 integration suite scripts its scenarios from (BRIEF §17, DESIGN §20).
+#
+# Every timeline is selected by a regex over the whole URL, so one provider instance can serve a
+# "normal download", a "500-item playlist", a "geo-blocked item" and a "stalled item" in the same
+# test run. The first matching timeline wins; the last one, with no `url_regex`, is the fallback.
+
+id     = "fake"
+score  = 200
+strong = true
+hosts  = ["fake.test"]
+
+# ---------------------------------------------------------------------------
+# A realistic ten-minute download: 600 s of waiting, in microseconds of test time.
+# ---------------------------------------------------------------------------
+[[timeline]]
+url_regex   = "slow"
+title       = "A Ten Minute Clip"
+write_files = true
+download = [
+  { kind = "stage",    stage = "preparing" },
+  { kind = "wait",     ms = 1500 },
+  { kind = "stage",    stage = "downloading" },
+  { kind = "progress", percent = 0.0,  speed = 0.0,       eta = 600 },
+  { kind = "wait",     ms = 300000 },
+  { kind = "progress", percent = 50.0, speed = 1048576.0, eta = 300 },
+  { kind = "wait",     ms = 298500 },
+  { kind = "progress", percent = 99.9, speed = 1048576.0, eta = 1 },
+  { kind = "stage",    stage = "postprocessing" },
+  { kind = "wait",     ms = 2000 },
+  { kind = "file",     slot = "subtitle", name = "clip.en.srt", size = 128 },
+  { kind = "file",     slot = "chapter",  name = "clip - 01.mp4", size = 256 },
+  { kind = "finish",   filename = "clip.mp4", size = 4096 },
+]
+
+# ---------------------------------------------------------------------------
+# A 500-child playlist, resolved in one step.
+# ---------------------------------------------------------------------------
+[[timeline]]
+url_regex = "playlist"
+title     = "Big Playlist"
+resolve   = [{ kind = "expand_playlist", count = 500 }]
+download  = [{ kind = "finish", filename = "child.mp4", size = 512 }]
+
+# ---------------------------------------------------------------------------
+# A geo-blocked item: resolution fails terminally.
+# ---------------------------------------------------------------------------
+[[timeline]]
+url_regex = "geo"
+resolve   = [{ kind = "fail", code = "geo_restricted" }]
+
+# ---------------------------------------------------------------------------
+# A retryable transport failure, mid-download.
+# ---------------------------------------------------------------------------
+[[timeline]]
+url_regex = "flaky"
+download = [
+  { kind = "stage",    stage = "downloading" },
+  { kind = "progress", percent = 12.5 },
+  { kind = "fail",     code = "network" },
+]
+
+# ---------------------------------------------------------------------------
+# A stalled download: no progress, no timer, forever. The caller's stall watchdog is what has to
+# notice — which is the whole point.
+# ---------------------------------------------------------------------------
+[[timeline]]
+url_regex = "stall"
+download = [
+  { kind = "stage",    stage = "downloading" },
+  { kind = "progress", percent = 43.2 },
+  { kind = "hang" },
+]
+
+# ---------------------------------------------------------------------------
+# The fallback: the plain, instant, successful download.
+# ---------------------------------------------------------------------------
+[[timeline]]
+download = [
+  { kind = "stage",  stage = "downloading" },
+  { kind = "finish", filename = "plain.mp4", size = 1024 },
+]

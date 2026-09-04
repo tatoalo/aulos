@@ -28,10 +28,12 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 toml = { workspace = true }
 regex = { workspace = true }
-nix = { workspace = true, features = ["signal", "process"] }
+nix = { workspace = true, features = ["signal", "process", "resource"] }
 url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 rstest = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# The `fake` provider is exercised by this crate's own test suite, so the feature is on for tests.
+aulos-provider = { workspace = true, features = ["fake"] }

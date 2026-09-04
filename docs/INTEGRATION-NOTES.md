@@ -150,3 +150,76 @@ with your WP id.
   from `GET history` entirely, so WP-15 should filter them out rather than rely on that value.
 - **`Item` and `DownloadRequest` derive `PartialEq`** (not `Eq`: `serde_json::Value` has no total
   equality) so WP-04's store round-trips and WP-05's importer fixtures can compare rows directly.
+
+## WP-03 — `aulos-provider`: trait, registry, sink, process helpers, fake provider, arch test
+
+- **`Registry::pick` returns `Option<Selected>`, not `Selected`** (and `catalog_for` likewise
+  returns an `Option`). DESIGN §6.3 writes both as infallible, but "no provider matched" is a real
+  outcome the engine has to handle: it is exactly the `unsupported_url` case of DESIGN §5 (a
+  `magnet:`/`file:` URL, or any scheme `ytdlp` declines), and a synthesised `Selected` would be a
+  provider id the engine could route a job to. WP-12 must map `None` to
+  `WireError::new(ErrorCode::UnsupportedUrl, …)`; WP-14 must serve `match: null` for a
+  `catalog?url=` that matches nothing.
+- **`OutTmpl` is declared in `aulos_provider::provider`, not in `aulos-provider-ytdlp`.** PLAN
+  WP-06 lists `pub struct OutTmpl` under the ytdlp crate's `outtmpl` module, but
+  `DownloadCtx.outtmpl` names it (DESIGN §6.1) and `aulos-provider` is upstream of every provider
+  crate, so declaring it there would be a cycle. WP-06 should `pub use aulos_provider::OutTmpl;`
+  from its `outtmpl` module rather than declare a second one.
+- **`command` plugin loading is a seam, not a call.** `Registry::reload_commands(dir)` has the
+  DESIGN §6.5 signature and returns a real `ReloadReport`, but the manifest parsing lives in
+  WP-10. WP-10 should implement `registry::CommandLoader` (one method,
+  `load(&Path) -> CommandLoadResult`, carrying `LoadedPlugin { provider, degraded, fingerprint }`)
+  and the binary should call `Registry::set_command_loader` at boot. Without a loader installed,
+  `reload_commands` logs at debug and returns an empty report, so wiring can land before WP-10.
+  `LoadedPlugin.fingerprint` is what makes the report's `updated` list honest — hash the manifest
+  bytes; `None` means "assume it changed".
+- **`ProviderError` variants carry a `String` message** (except `ToolMissing(&'static str)` and the
+  payload-free `Canceled`). DESIGN §6.1 lists most of them bare, but `Item.error.message` has to
+  come from somewhere and DESIGN §6.5.3 requires a plugin's stderr tail to reach the user.
+  `ProviderError::message()` does the DESIGN §9.6 cleaning once (`"ERROR: "` stripped, ANSI and
+  control characters removed, 512 characters), and `to_wire(&provider_id, provider_code)` builds
+  the `WireError`. `ProviderError::from_code(code, msg)` is the inverse, for WP-07's shim `code`
+  field and WP-10's plugin `{"t":"error","code":…}` frame — neither needs its own copy of the map.
+- **`SpawnSpec::new` takes a `&'static str` tool label** before the program path. That label is
+  what a missing binary reports as `ProviderError::ToolMissing`, and that variant is
+  `&'static str` by design. Use the canonical tool name (`"ffmpeg"`, `"python3"`,
+  `"N_m3u8DL-RE"`); a `command` plugin whose `argv[0]` is not static should pass `"plugin"` and
+  rely on the manifest's load-time executable check instead.
+- **`aulos-provider-ytdlp` should spawn through `Child::spawn_command`, not `Command::spawn`.**
+  `SpawnSpec::to_command()` applies the whole policy (own process group, `nice(5)`, rlimits, env
+  clearing, piped stderr) and hands back a `tokio::process::Command`; add the fd-3 pipe with
+  `command-fds` and then call `Child::spawn_command(&spec, cmd)`. Bypassing `Child` loses the
+  **mandatory** stderr drain, which is the one failure mode in DESIGN §2.3 that deadlocks a child
+  forever rather than merely failing it.
+- **`strip_ansi` lives in `aulos_provider::proc`.** DESIGN §3 gives `strip-ansi-escapes` to
+  `aulos-provider-sc` only, and `aulos-provider` may not take a dependency its row does not budget
+  for, so the ~30-line CSI/OSC scrubber the stderr ring needs is implemented here and exported.
+  WP-09 and WP-10 should use it (or `strip-ansi-escapes`, which is theirs to use) rather than a
+  third copy.
+- **`Stage` gained `serde` derives** so a `fake` timeline can name a stage in TOML. It serialises
+  as `preparing`/`downloading`/`postprocessing`, i.e. `Status::as_str()` for the three running
+  statuses; `Stage::status()` is the mapping WP-13's aggregator should use.
+- **`tests/arch.rs` amends the DESIGN §3 table in two places to pass on the real tree**, both
+  recorded in the `TABLE` const next to the row they affect: `aulos-provider-sc` declares
+  `futures-util` and `aulos-api` declares `serde_with` (both landed in WP-01 and both budgeted by
+  DESIGN §18.6, but neither is in its §3 row). If WP-08 or WP-14 drops one, the row can lose it —
+  the check is a subset rule, so declaring *fewer* dependencies than the row is always fine.
+  `metrics`/`metrics-exporter-prometheus` stay in the `aulos-api` row for the same reason even
+  though the Prometheus endpoint is CUT.
+- **The subset rule is judged on normal + build dependencies only; A1–A4 also cover
+  dev-dependencies; A5 (`anyhow`) does not.** The rows describe the architecture, while `insta`,
+  `wiremock`, `rstest`, `proptest` and friends are a test toolbox the table does not enumerate. A
+  provider crate whose *tests* need `aulos-store` is still an A1 violation, though — that is the
+  property A1 exists to protect. A crate's dev-dependency on itself (the standard trick for
+  enabling a feature for test targets, which `aulos-provider` uses for `fake`) is ignored.
+- **`cargo test -p aulos-provider` builds with the `fake` feature on**, via a dev-dependency of
+  `aulos-provider` on itself with `features = ["fake"]`. That keeps the plain gate command
+  meaningful; the shipped library still defaults to `fake` off.
+- **The wave-2 fixture is `crates/aulos-provider/tests/fixtures/fake/timelines.toml`.** It already
+  scripts the six scenarios the integration suite needs — a ten-minute download, a 500-child
+  playlist, a geo-block at resolve time, a retryable mid-download `network` failure, a stall that
+  arms no timer, and a plain instant success — selected by a regex over the URL, so one provider
+  instance serves all of them. `Step::Hang` deliberately awaits **only** the cancellation token:
+  under `tokio::time::pause()` that means virtual time still advances to the caller's stall
+  deadline, which is what makes a stall test instant. Timelines write their output files by
+  default, so the static file route and the `size` bookkeeping have something real to look at.
