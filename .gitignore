@@ -19,6 +19,9 @@
 /recipe.json
 .idea/
 .vscode/
+.ruff_cache/
+__pycache__/
+*.pyc
 
 # insta review leftovers
 **/*.snap.new

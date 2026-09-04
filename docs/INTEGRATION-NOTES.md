@@ -40,6 +40,9 @@ with your WP id.
   sidecars, amd64-only docker matrix, workflow inventory, crate inventory). WP-03 adds
   `tests/arch.rs` for the A1–A5 dependency rules next to it; `ci.yml`'s `arch` job already runs
   `cargo test -p aulos-workspace-tests`, so no workflow change is needed.
+  **APPLIED (wave-0 integration).** WP-03 landed `crates/aulos-workspace-tests/tests/arch.rs`;
+  `cargo test -p aulos-workspace-tests` now runs 12 arch + 10 packaging tests green, and `ci.yml`
+  needed no edit.
 - **`deny.toml` is not shipped.** The BRIEF cuts the `deny` CI job for v1.0, and a config no
   workflow reads is dead weight. Restoring the job means restoring the file.
 - **`clippy::doc_markdown` is deliberately absent** from the workspace pedantic subset: with
@@ -49,6 +52,8 @@ with your WP id.
 - **`crates/aulos-provider-ytdlp/python/` exists with a `.gitkeep`** so the image's
   `COPY crates/aulos-provider-ytdlp/python/ /app/python/` resolves before WP-07 lands
   `ytdlp_runner.py`. WP-07 should just add the file; no Dockerfile change is needed.
+  **VERIFIED (wave-0 integration).** The `.gitkeep` is present and the `COPY` still resolves; the
+  file drop stays WP-07's, so this bullet remains open for WP-07 only.
 - **CI has conditional no-op steps that WP-00 and WP-07 turn on by adding a file**, with no
   workflow edit: `ci.yml`'s `python` job runs `ruff`/`py_compile` once
   `crates/aulos-provider-ytdlp/python/ytdlp_runner.py` exists, the shim contract test once
@@ -57,6 +62,12 @@ with your WP id.
   is executable, and `update-yt-dlp.yml` runs
   `crates/aulos-provider-ytdlp/tests/smoke_extract.sh` for the real `mode=extract` smoke of
   DESIGN §18.5. If a package prefers a different path, update the workflow in that package.
+  **PARTLY APPLIED (wave-0 integration).** WP-00 landed `tools/capture/verify.py`, so `ci.yml`'s
+  "verify the golden corpora" step is live and no longer a no-op — it passes locally
+  (`OK — tests/golden/{formats,opts,percent}.json and 131 v1 case(s) verified`). The `ruff`/
+  `py_compile`, `shim_contract.py`, `smoke_extract.sh` and `tests/e2e/run.sh` steps still no-op and
+  stay open for WP-07 / WP-18; the paths in the workflow match what those packages are told to
+  create, so none of them needs a workflow edit either.
 - **`serve` blocks in the skeleton.** It prints `aulos-server serve: not implemented`, then parks
   on `SIGTERM`/`SIGINT` and exits 0. Nothing is bound and no task is spawned, but the container
   needs a live process for the `HEALTHCHECK` to have anything to probe. `healthcheck` currently
@@ -83,6 +94,11 @@ with your WP id.
   is downstream of nothing. They are `aulos_core::selection::ProviderId` (also at the crate root)
   and `aulos_core::item::FileSlot`. **WP-03 should `pub use` them rather than declare its own**, or
   the two crates end up with structurally identical but incompatible types.
+  **APPLIED (wave-0 integration).** WP-03 re-exports both instead of declaring them
+  (`crates/aulos-provider/src/lib.rs`: `pub use aulos_core::item::{FileRef, FileSlot};` and
+  `pub use aulos_core::selection::ProviderId;`), so there is exactly one of each type in the
+  workspace. A duplicate-declaration sweep over every `crates/*/src/*.rs` finds no other repeated
+  `pub struct`/`pub enum`/`pub trait` name.
 - **`RawProgress` carries provider numbers as `f64`/`i64`, not `u64`/`u32`.** The golden corpus
   pins legacy `_number()` behaviour, which coerces numeric **strings** and floats
   (`"250.5" / "1000.0" ⇒ 25.05`) and tolerates negatives; integer inputs cannot reproduce that.
@@ -165,6 +181,9 @@ with your WP id.
   `DownloadCtx.outtmpl` names it (DESIGN §6.1) and `aulos-provider` is upstream of every provider
   crate, so declaring it there would be a cycle. WP-06 should `pub use aulos_provider::OutTmpl;`
   from its `outtmpl` module rather than declare a second one.
+  **VERIFIED (wave-0 integration).** `OutTmpl` is declared exactly once, in
+  `crates/aulos-provider/src/provider.rs`, and re-exported from the crate root; adding the
+  `pub use` stays WP-06's job.
 - **`command` plugin loading is a seam, not a call.** `Registry::reload_commands(dir)` has the
   DESIGN §6.5 signature and returns a real `ReloadReport`, but the manifest parsing lives in
   WP-10. WP-10 should implement `registry::CommandLoader` (one method,
@@ -223,3 +242,49 @@ with your WP id.
   under `tokio::time::pause()` that means virtual time still advances to the caller's stall
   deadline, which is what makes a stall test instant. Timelines write their output files by
   default, so the static file route and the `size` bookkeeping have something real to look at.
+
+## Wave-0 integration pass (integrator, 2026-09-04)
+
+- **The tree was already clean and green when the pass started.** `git status` reported nothing to
+  commit on `main` after WP-00/01/02/03 landed, and no test anywhere in the workspace is
+  `#[ignore]`d (`grep -rn '#\[ignore' crates/ tests/ tools/` is empty). In particular the WP-02
+  Normalizer golden test (`crates/aulos-core/tests/percent_golden.rs`) is **not** ignored:
+  `tests/golden/percent.json` shipped in WP-00's commit, so the six tests in that file — the vector
+  replay, the threaded-sequence replay, the rule-coverage check, the `source_tag` reset and the two
+  `proptest` invariants — run and pass on every `cargo test --workspace`. No un-ignoring was
+  needed.
+- **Gates run at integration time, all green**, on `rustc 1.95.0 (59807616e 2026-04-14)`:
+  `cargo fmt --all` (no diff), `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the CI form — it
+  compiles the `wreq` path too), `cargo test --workspace`, `cargo test --workspace --locked`
+  (so `Cargo.lock` is in sync and CI's `--locked` will not fail), and
+  `cargo test -p aulos-workspace-tests` (12 arch + 10 packaging). Totals: 314 tests passed, 0 failed,
+  0 ignored. `python3 tools/capture/verify.py` also passes.
+- **Junk removed:** `tools/capture/.ruff_cache/` (a ruff tool cache left by the WP-00 lint run). It
+  was invisible to `git status` only because ruff writes a self-ignoring `.gitignore` inside it, so
+  `.gitignore` now lists `.ruff_cache/`, `__pycache__/` and `*.pyc` under *Tooling* to keep the
+  next one out of the tree. **No code was discarded** — nothing else was untracked or modified.
+- **No cross-package request needed new glue.** The only wave-0-addressable request in this file
+  (WP-02's "`WP-03` should `pub use` `ProviderId`/`FileSlot`") was already honoured by WP-03, and
+  the `OutTmpl` and `tests/arch.rs` placements match what the notes ask for — each is marked
+  inline above with what was verified. Every other request in this file is addressed to a package
+  that does not exist yet; they are carried forward, not applied:
+  | Request | Owner |
+  |---|---|
+  | Decide `wreq` rc-31 vs `5.3.0` vs plain `reqwest`, record it in DESIGN §10.1 (and drop the `cmake`/`clang` installs if `wreq` goes) | WP-08 / WP-09 |
+  | Build `RawProgress` through `aulos_core::progress::{number, integer}`, never `as u64` | WP-07 / WP-09 / WP-10 |
+  | Call `config::load_with_warnings()` **and** `YtdlOptions::load(...)`, merge both reports before the single exit-2 step | WP-17 |
+  | Build the `notice` frame from `DomainEvent::as_notice()`; assert the delta field list against `ItemView::FIELDS` | WP-13 |
+  | Fill `ytdl_options_presets.choices` from `YTDL_OPTIONS_PRESETS` when serving `catalog`/`capabilities`; serve `match: null` for a `catalog?url=` that matches nothing | WP-14 |
+  | Filter `Canceled` items out of `GET history` rather than relying on `Status::v1()`'s defensive `"error"` | WP-15 |
+  | Map `Registry::pick` → `None` to `ErrorCode::UnsupportedUrl` | WP-12 |
+  | Implement `registry::CommandLoader`; wire `Registry::set_command_loader` at boot | WP-10 / WP-17 |
+  | Spawn through `Child::spawn_command` (never `Command::spawn`) so the stderr drain is not lost; `pub use aulos_provider::OutTmpl` | WP-07 / WP-06 |
+  | Add `python/ytdlp_runner.py`, `tests/shim_contract.py`, `tests/smoke_extract.sh`, `tests/e2e/run.sh` — each turns on a CI step that no-ops today | WP-07 / WP-18 |
+- **Deviations from DESIGN that live only in this file.** PLAN §0 says a deliberate deviation wants
+  a DESIGN.md edit in the same PR; wave 0 recorded five in prose here instead (`ProviderId`/
+  `FileSlot` moved to `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl`
+  hoisted to `aulos-provider`, `FormatSpec.flags.slow` on `mp4` rather than on the `best_remux`
+  quality, `ChatConfig`'s twelve keys). They are all narrower-and-correct rather than contested, so
+  the integration pass left DESIGN.md untouched; the §6.1/§6.2/§6.3/§6.6/§7.6.5 edits are the one
+  piece of documentation debt wave 0 carries into wave 1.
