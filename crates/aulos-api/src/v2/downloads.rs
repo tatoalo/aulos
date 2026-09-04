@@ -1,0 +1,547 @@
+//! `POST api/v2/downloads` and `POST api/v2/downloads/cancel-resolve` (PROTOCOL §4.1, §4.7).
+//!
+//! The add returns **before** any metadata extraction: the handler translates the wire body into
+//! [`DownloadRequest`]s and hands them to [`aulos_queue::EngineHandle::add`], which validates,
+//! inserts as `resolving`, acks, and only then starts resolving (DESIGN §8.3). By the time the
+//! `202` reaches the client the item is in the queue and an `added` frame is on its way.
+//!
+//! Validation is deliberately **not** duplicated here. The engine owns the catalog check, the
+//! folder resolve and containment, the preset and overrides gates and the dedupe lookup, and
+//! reports each failure as a [`aulos_core::WireError`] with its `field` already set, so this
+//! module's job is to parse types, fill defaults, collect `warnings` — and map
+//! [`AddError`] onto a status.
+
+use std::sync::Arc;
+
+use aulos_core::{
+    Codec, Config, DownloadRequest, DownloadType, ErrorCode, FormatId, ItemId, ProviderId,
+    QualityId, RelDir, Selection, SourceKind, SourceRef, SubtitleLang, SubtitleMode,
+};
+use aulos_provider::Registry;
+use aulos_queue::{AddError, CancelScope};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use serde_json::{Map, Value, json};
+use url::Url;
+
+use crate::ApiState;
+use crate::error::{ApiError, Json};
+use crate::v2::{json_body, parse_bool, parse_str, parse_u32, unknown_fields};
+
+/// Every key one add request may carry (PROTOCOL §4.1). Anything else is a `warnings` entry.
+pub const REQUEST_FIELDS: [&str; 16] = [
+    "url",
+    "download_type",
+    "codec",
+    "format",
+    "quality",
+    "folder",
+    "custom_name_prefix",
+    "playlist_item_limit",
+    "auto_start",
+    "split_by_chapters",
+    "chapter_template",
+    "subtitle_language",
+    "subtitle_mode",
+    "ytdl_options_presets",
+    "ytdl_options_overrides",
+    "provider",
+];
+
+/// The two keys the batch envelope carries.
+pub const BATCH_FIELDS: [&str; 2] = ["items", "defaults"];
+
+/// `POST api/v2/downloads` — the async add.
+pub async fn add(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    let root = json_body(&headers, &body)?;
+    let mut warnings: Vec<String> = Vec::new();
+
+    let requests = parse_batch(&state, &root, &mut warnings)?;
+    if requests.is_empty() {
+        return Err(ApiError::invalid("items", "at least one url is required"));
+    }
+
+    let source = SourceRef::bare(SourceKind::ApiV2);
+    let outcome = state
+        .engine
+        .add(requests, source)
+        .await
+        .map_err(map_add_error)?;
+
+    let duplicates: Vec<Value> = outcome
+        .duplicates
+        .iter()
+        .map(|d| json!({ "url": d.url, "existing_id": d.existing_id }))
+        .collect();
+
+    let payload = json!({
+        "id": outcome.ids.first(),
+        "ids": outcome.ids,
+        "generation": outcome.generation,
+        "seq": state.seq(),
+        "duplicates": duplicates,
+        "warnings": warnings,
+    });
+    Ok((StatusCode::ACCEPTED, Json(payload)).into_response())
+}
+
+/// `POST api/v2/downloads/cancel-resolve` — abort an add that is still resolving (PROTOCOL §4.7).
+///
+/// `{}` (or an absent/`null` `generation`) cancels **every** in-flight resolution, which is what
+/// the legacy `cancel-add` did; `{"generation": n}` — the value from that add's `202` — cancels
+/// only that add's resolution and its not-yet-created children.
+pub async fn cancel_resolve(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let root = json_body(&headers, &body)?;
+    let mut warnings: Vec<String> = Vec::new();
+    unknown_fields(&root, &["generation"], &mut warnings);
+
+    let generation = match root.get("generation") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64().ok_or_else(|| {
+            ApiError::invalid("generation", "generation must be a non-negative integer")
+        })?),
+    };
+    let scope = generation.map_or(CancelScope::All, CancelScope::Generation);
+    let result = state.engine.cancel_resolve(scope).await;
+
+    Ok(Json(json!({
+        "canceled": result.applied.len(),
+        "generation": generation,
+        "seq": state.seq(),
+        "warnings": warnings,
+    })))
+}
+
+/// Maps [`AddError`] onto the DESIGN §8.3 status table.
+fn map_add_error(err: AddError) -> ApiError {
+    match err {
+        AddError::Invalid { errors, .. } => errors.into_iter().next().map_or_else(
+            || ApiError::of(ErrorCode::ValidationFailed, "the request is invalid"),
+            ApiError::from,
+        ),
+        AddError::Duplicate { existing_id, .. } => ApiError::of(
+            ErrorCode::Conflict,
+            format!("this url already has a live item ({existing_id})"),
+        ),
+        AddError::TooManyUrls { max, got } => ApiError::of(
+            ErrorCode::PayloadTooLarge,
+            format!("{got} urls exceeds the {max} per-batch limit"),
+        ),
+        AddError::Unavailable(message) => ApiError::unavailable(message),
+    }
+}
+
+/// Parses either body shape into one request list.
+///
+/// A body with `items` is the batch form and `defaults` is merged **under** each entry, so a share
+/// sheet can send three URLs with one selection.
+fn parse_batch(
+    state: &ApiState,
+    root: &Map<String, Value>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<DownloadRequest>, ApiError> {
+    let empty = Map::new();
+    match root.get("items") {
+        Some(Value::Array(items)) => {
+            let mut known: Vec<&str> = BATCH_FIELDS.to_vec();
+            known.extend(REQUEST_FIELDS); // a batch body may also carry top-level defaults
+            unknown_fields(root, &known, warnings);
+            let defaults = match root.get("defaults") {
+                None | Some(Value::Null) => empty.clone(),
+                Some(Value::Object(map)) => map.clone(),
+                Some(_) => {
+                    return Err(ApiError::invalid("defaults", "defaults must be an object"));
+                }
+            };
+            let mut out = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let object = item.as_object().ok_or_else(|| {
+                    ApiError::invalid("items", format!("items[{index}] must be an object"))
+                })?;
+                unknown_fields(object, &REQUEST_FIELDS, warnings);
+                out.push(parse_request(state, object, &defaults)?);
+            }
+            Ok(out)
+        }
+        Some(_) => Err(ApiError::invalid("items", "items must be an array")),
+        None => {
+            unknown_fields(root, &REQUEST_FIELDS, warnings);
+            Ok(vec![parse_request(state, root, &empty)?])
+        }
+    }
+}
+
+/// Parses one wire object as an add request, with no `defaults` layer.
+///
+/// This is what `POST api/v2/subscriptions` uses: PROTOCOL §4.7 says it "takes the same body as an
+/// add plus `check_interval_minutes`", and sharing the parser is what keeps that true.
+///
+/// # Errors
+/// Every failure `POST api/v2/downloads` can produce for a single request.
+pub fn parse_one(
+    state: &ApiState,
+    entry: &Map<String, Value>,
+) -> Result<DownloadRequest, ApiError> {
+    parse_request(state, entry, &Map::new())
+}
+
+/// One field, from the entry or from `defaults`.
+fn field<'a>(
+    entry: &'a Map<String, Value>,
+    defaults: &'a Map<String, Value>,
+    key: &str,
+) -> Option<&'a Value> {
+    entry
+        .get(key)
+        .or_else(|| defaults.get(key))
+        .filter(|v| !v.is_null())
+}
+
+/// Translates one wire object into a [`DownloadRequest`], filling every default.
+fn parse_request(
+    state: &ApiState,
+    entry: &Map<String, Value>,
+    defaults: &Map<String, Value>,
+) -> Result<DownloadRequest, ApiError> {
+    let cfg = &state.cfg;
+    let raw_url =
+        field(entry, defaults, "url").ok_or_else(|| ApiError::invalid("url", "url is required"))?;
+    let url = parse_url(parse_str("url", raw_url)?)?;
+
+    let download_type = match field(entry, defaults, "download_type") {
+        Some(value) => DownloadType::from_str_exact(parse_str("download_type", value)?)
+            .ok_or_else(|| {
+                ApiError::invalid(
+                    "download_type",
+                    aulos_core::request::legacy::download_type_legacy(),
+                )
+            })?,
+        None => DownloadType::Video,
+    };
+
+    let mut codec = match field(entry, defaults, "codec") {
+        Some(value) => Codec::from_str_exact(parse_str("codec", value)?).ok_or_else(|| {
+            ApiError::invalid("codec", aulos_core::request::legacy::codec_legacy())
+        })?,
+        None => Codec::Auto,
+    };
+    // PROTOCOL §4.1: `codec` applies to video only and is forced to `auto` otherwise. The other
+    // legacy coercion (`quality → best` for captions and thumbnails) is deliberately **not**
+    // applied: a v2 client that asks for a quality the catalog does not have gets an honest 400,
+    // and only the v1 shim keeps the silent fix-up.
+    if download_type != DownloadType::Video {
+        codec = Codec::Auto;
+    }
+
+    let (default_format, default_quality) = catalog_defaults(state, &url, download_type);
+    let format = match field(entry, defaults, "format") {
+        Some(value) => parse_id("format", parse_str("format", value)?)?,
+        None => default_format,
+    };
+    let quality = match field(entry, defaults, "quality") {
+        Some(value) => parse_quality("quality", parse_str("quality", value)?)?,
+        None => default_quality,
+    };
+
+    let folder = match field(entry, defaults, "folder") {
+        Some(value) => {
+            let raw = parse_str("folder", value)?.trim();
+            if raw.is_empty() {
+                None
+            } else {
+                Some(RelDir::parse(raw).map_err(|e| {
+                    ApiError::new(ErrorCode::FolderInvalid, e.to_string(), Some("folder"))
+                })?)
+            }
+        }
+        None => None,
+    };
+
+    let custom_name_prefix = match field(entry, defaults, "custom_name_prefix") {
+        Some(value) => Box::from(parse_str("custom_name_prefix", value)?),
+        None => Box::from(""),
+    };
+
+    let playlist_item_limit = match field(entry, defaults, "playlist_item_limit") {
+        Some(value) => parse_u32("playlist_item_limit", value)?,
+        None => cfg.default_option_playlist_item_limit,
+    };
+
+    let auto_start = match field(entry, defaults, "auto_start") {
+        Some(value) => parse_bool("auto_start", value)?,
+        None => true,
+    };
+
+    let split_by_chapters = match field(entry, defaults, "split_by_chapters") {
+        Some(value) => parse_bool("split_by_chapters", value)?,
+        None => false,
+    };
+
+    let chapter_template = match field(entry, defaults, "chapter_template") {
+        Some(value) => Box::from(parse_str("chapter_template", value)?),
+        None => Box::from(cfg.default_chapter_template()),
+    };
+
+    let subtitle_language = match field(entry, defaults, "subtitle_language") {
+        Some(value) => {
+            SubtitleLang::parse(parse_str("subtitle_language", value)?).map_err(|e| {
+                ApiError::new(
+                    ErrorCode::ValidationFailed,
+                    e.to_string(),
+                    Some("subtitle_language"),
+                )
+            })?
+        }
+        None => SubtitleLang::english(),
+    };
+
+    let subtitle_mode = match field(entry, defaults, "subtitle_mode") {
+        Some(value) => SubtitleMode::from_str_exact(parse_str("subtitle_mode", value)?)
+            .ok_or_else(|| {
+                ApiError::invalid(
+                    "subtitle_mode",
+                    aulos_core::request::legacy::subtitle_mode_legacy(),
+                )
+            })?,
+        None => SubtitleMode::PreferManual,
+    };
+
+    let ytdl_options_presets = match field(entry, defaults, "ytdl_options_presets") {
+        Some(Value::Array(list)) => {
+            let mut out = Vec::with_capacity(list.len());
+            for value in list {
+                out.push(Box::from(parse_str("ytdl_options_presets", value)?));
+            }
+            out
+        }
+        Some(_) => {
+            return Err(ApiError::invalid(
+                "ytdl_options_presets",
+                "ytdl_options_presets must be an array of preset names",
+            ));
+        }
+        None => Vec::new(),
+    };
+
+    let ytdl_options_overrides = match field(entry, defaults, "ytdl_options_overrides") {
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Err(ApiError::invalid(
+                "ytdl_options_overrides",
+                "ytdl_options_overrides must be an object",
+            ));
+        }
+        None => Map::new(),
+    };
+
+    let provider_hint = match field(entry, defaults, "provider") {
+        Some(value) => Some(
+            ProviderId::parse(parse_str("provider", value)?)
+                .map_err(|e| ApiError::new(e.code(), e.to_string(), Some("provider")))?,
+        ),
+        None => None,
+    };
+
+    Ok(DownloadRequest {
+        url,
+        selection: Selection::new(download_type, codec, format, quality),
+        folder,
+        custom_name_prefix,
+        playlist_item_limit,
+        auto_start,
+        split_by_chapters,
+        chapter_template,
+        subtitle_language,
+        subtitle_mode,
+        ytdl_options_presets,
+        ytdl_options_overrides,
+        provider_hint,
+    })
+}
+
+/// A URL, trimmed, with a usable scheme.
+///
+/// `unsupported_url` rather than `validation_failed` for a scheme no provider could ever take, so
+/// a client can tell "you typed this wrong" from "this server cannot download that".
+fn parse_url(raw: &str) -> Result<Url, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::invalid("url", "url is required"));
+    }
+    let url = Url::parse(trimmed)
+        .map_err(|e| ApiError::invalid("url", format!("url is not a valid URL: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiError::new(
+            ErrorCode::UnsupportedUrl,
+            format!("Unsupported resource \"{trimmed}\""),
+            Some("url"),
+        ));
+    }
+    Ok(url)
+}
+
+fn parse_id(field_name: &str, raw: &str) -> Result<FormatId, ApiError> {
+    FormatId::parse(raw).map_err(|e| ApiError::new(e.code(), e.to_string(), Some(field_name)))
+}
+
+fn parse_quality(field_name: &str, raw: &str) -> Result<QualityId, ApiError> {
+    QualityId::parse(raw).map_err(|e| ApiError::new(e.code(), e.to_string(), Some(field_name)))
+}
+
+/// The `(format, quality)` a request that named neither gets.
+///
+/// They come from the catalog of the provider that **would** be selected for this URL, so a
+/// StreamingCommunity link defaults to that provider's single rendition rather than to yt-dlp's
+/// `mp4`/`best`, and a plugin with its own catalog needs no client release. When nothing matches
+/// the URL the merged catalog decides, and if even that is empty the legacy pair is used —
+/// the engine will reject the add with `unsupported_url` a moment later either way.
+fn catalog_defaults(
+    state: &ApiState,
+    url: &Url,
+    download_type: DownloadType,
+) -> (FormatId, QualityId) {
+    let picked = {
+        let registry = match state.registry.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        catalog_defaults_from(&registry, url, download_type)
+    };
+    picked.unwrap_or_else(|| (fallback_format(download_type), fallback_quality()))
+}
+
+/// The catalog lookup, split out so it needs only a `&Registry`.
+fn catalog_defaults_from(
+    registry: &Registry,
+    url: &Url,
+    download_type: DownloadType,
+) -> Option<(FormatId, QualityId)> {
+    let catalog = registry
+        .pick(url, None)
+        .and_then(|s| registry.by_id(&s.id).map(|p| p.catalog()));
+    let spec = catalog.as_ref().and_then(|c| c.spec_for(download_type));
+    let (format_id, quality_id) = match spec {
+        Some(dt) => {
+            let format = dt.format(&dt.default_format)?;
+            (dt.default_format.clone(), format.default_quality.clone())
+        }
+        None => {
+            let merged = registry.merged_catalog();
+            let dt = merged
+                .download_types
+                .iter()
+                .find(|d| &*d.id == download_type.as_str())?;
+            let format = dt.format(&dt.default_format)?;
+            (dt.default_format.clone(), format.default_quality.clone())
+        }
+    };
+    Some((
+        FormatId::parse(&format_id).ok()?,
+        QualityId::parse(&quality_id).ok()?,
+    ))
+}
+
+/// The legacy default format per download type, for a registry with no catalog at all.
+fn fallback_format(download_type: DownloadType) -> FormatId {
+    let id = match download_type {
+        DownloadType::Video => "mp4",
+        DownloadType::Audio => "m4a",
+        DownloadType::Captions => "srt",
+        DownloadType::Thumbnail => "jpg",
+    };
+    FormatId::parse(id).unwrap_or_else(|_| unreachable!("{id} is a valid format id"))
+}
+
+/// `best`, the one quality every catalog has.
+fn fallback_quality() -> QualityId {
+    QualityId::parse("best").unwrap_or_else(|_| unreachable!("\"best\" is a valid quality id"))
+}
+
+/// The `config` block of `capabilities`, which advertises the same defaults this module applies
+/// (PROTOCOL §4.5).
+#[must_use]
+pub fn advertised_defaults(state: &ApiState) -> (String, String, String) {
+    let url = Url::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        .unwrap_or_else(|_| unreachable!("a literal URL parses"));
+    let (format, quality) = catalog_defaults(state, &url, DownloadType::Video);
+    (
+        DownloadType::Video.as_str().to_owned(),
+        format.as_str().to_owned(),
+        quality.as_str().to_owned(),
+    )
+}
+
+/// Resolves one wire id token to an [`ItemId`].
+///
+/// v2 has exactly one identifier (PROTOCOL §0 rule 3), so an unparseable token is a `404` rather
+/// than the v1 shim's url-or-media-id search.
+pub fn parse_item_id(raw: &str) -> Option<ItemId> {
+    raw.parse().ok()
+}
+
+/// The effective `chapter_template` a request with none of its own gets.
+#[must_use]
+pub fn default_chapter_template(cfg: &Config) -> Arc<str> {
+    Arc::from(cfg.default_chapter_template())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scheme_no_provider_can_take_is_unsupported_not_invalid() {
+        let err = parse_url("magnet:?xt=urn:btih:deadbeef").expect_err("magnet");
+        assert_eq!(err.code, ErrorCode::UnsupportedUrl);
+        assert_eq!(
+            &*err.message,
+            "Unsupported resource \"magnet:?xt=urn:btih:deadbeef\""
+        );
+        let err = parse_url("  ").expect_err("blank");
+        assert_eq!(err.code, ErrorCode::ValidationFailed);
+        assert_eq!(err.field.as_deref(), Some("url"));
+        assert!(parse_url(" https://a.test/x ").is_ok(), "trimmed");
+    }
+
+    #[test]
+    fn the_request_field_list_is_the_protocol_list() {
+        // PROTOCOL §4.1's table has sixteen rows; any drift here silently turns a documented
+        // field into a `warnings` entry.
+        assert_eq!(REQUEST_FIELDS.len(), 16);
+        for key in ["url", "provider", "ytdl_options_overrides", "subtitle_mode"] {
+            assert!(REQUEST_FIELDS.contains(&key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_batch_error_maps_to_its_status() {
+        assert_eq!(
+            map_add_error(AddError::TooManyUrls { max: 500, got: 501 }).status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            map_add_error(AddError::Unavailable("busy".into())).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            map_add_error(AddError::field(
+                0,
+                ErrorCode::FolderInvalid,
+                "folder",
+                "nope"
+            ))
+            .field
+            .as_deref(),
+            Some("folder")
+        );
+    }
+}

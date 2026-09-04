@@ -1,0 +1,875 @@
+---
+source: crates/aulos-api/tests/rest_meta.rs
+expression: ytdlp
+---
+{
+  "download_types": [
+    {
+      "default_format": "mp4",
+      "formats": [
+        {
+          "codecs": [
+            {
+              "id": "auto",
+              "label": "Auto"
+            },
+            {
+              "id": "av1",
+              "label": "AV1"
+            },
+            {
+              "id": "h264",
+              "label": "H.264"
+            },
+            {
+              "id": "h265",
+              "label": "H.265"
+            },
+            {
+              "id": "vp9",
+              "label": "VP9"
+            }
+          ],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": false,
+            "slow": false
+          },
+          "id": "any",
+          "label": "Any",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            },
+            {
+              "id": "2160",
+              "label": "2160p",
+              "notice": null
+            },
+            {
+              "id": "1440",
+              "label": "1440p",
+              "notice": null
+            },
+            {
+              "id": "1080",
+              "label": "1080p",
+              "notice": null
+            },
+            {
+              "id": "720",
+              "label": "720p",
+              "notice": null
+            },
+            {
+              "id": "480",
+              "label": "480p",
+              "notice": null
+            },
+            {
+              "id": "360",
+              "label": "360p",
+              "notice": null
+            },
+            {
+              "id": "240",
+              "label": "240p",
+              "notice": null
+            },
+            {
+              "id": "worst",
+              "label": "Worst",
+              "notice": "This selector currently resolves to the best available stream"
+            }
+          ]
+        },
+        {
+          "codecs": [
+            {
+              "id": "auto",
+              "label": "Auto"
+            },
+            {
+              "id": "av1",
+              "label": "AV1"
+            },
+            {
+              "id": "h264",
+              "label": "H.264"
+            },
+            {
+              "id": "h265",
+              "label": "H.265"
+            },
+            {
+              "id": "vp9",
+              "label": "VP9"
+            }
+          ],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": true
+          },
+          "id": "mp4",
+          "label": "MP4",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            },
+            {
+              "id": "best_remux",
+              "label": "Best (remux)",
+              "notice": "Re-encodes audio after download (slower; fixes SponsorBlock drift)"
+            },
+            {
+              "id": "2160",
+              "label": "2160p",
+              "notice": null
+            },
+            {
+              "id": "1440",
+              "label": "1440p",
+              "notice": null
+            },
+            {
+              "id": "1080",
+              "label": "1080p",
+              "notice": null
+            },
+            {
+              "id": "720",
+              "label": "720p",
+              "notice": null
+            },
+            {
+              "id": "480",
+              "label": "480p",
+              "notice": null
+            },
+            {
+              "id": "360",
+              "label": "360p",
+              "notice": null
+            },
+            {
+              "id": "240",
+              "label": "240p",
+              "notice": null
+            },
+            {
+              "id": "worst",
+              "label": "Worst",
+              "notice": "This selector currently resolves to the best available stream"
+            }
+          ]
+        },
+        {
+          "codecs": [
+            {
+              "id": "auto",
+              "label": "Auto"
+            },
+            {
+              "id": "av1",
+              "label": "AV1"
+            },
+            {
+              "id": "h264",
+              "label": "H.264"
+            },
+            {
+              "id": "h265",
+              "label": "H.265"
+            },
+            {
+              "id": "vp9",
+              "label": "VP9"
+            }
+          ],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": false,
+            "slow": false
+          },
+          "id": "ios",
+          "label": "iOS",
+          "notice": "Uses the iOS player client's format list.",
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            },
+            {
+              "id": "2160",
+              "label": "2160p",
+              "notice": null
+            },
+            {
+              "id": "1440",
+              "label": "1440p",
+              "notice": null
+            },
+            {
+              "id": "1080",
+              "label": "1080p",
+              "notice": null
+            },
+            {
+              "id": "720",
+              "label": "720p",
+              "notice": null
+            },
+            {
+              "id": "480",
+              "label": "480p",
+              "notice": null
+            },
+            {
+              "id": "360",
+              "label": "360p",
+              "notice": null
+            },
+            {
+              "id": "240",
+              "label": "240p",
+              "notice": null
+            },
+            {
+              "id": "worst",
+              "label": "Worst",
+              "notice": "This selector currently resolves to the best available stream"
+            }
+          ]
+        }
+      ],
+      "id": "video",
+      "label": "Video",
+      "options": [
+        {
+          "choices": [],
+          "default": null,
+          "help": "Subdirectory of the download root.",
+          "id": "folder",
+          "kind": {
+            "type": "path"
+          },
+          "label": "Folder"
+        },
+        {
+          "choices": [],
+          "default": "",
+          "help": null,
+          "id": "custom_name_prefix",
+          "kind": {
+            "pattern": "^[^/\\\\]*$",
+            "type": "text"
+          },
+          "label": "Filename prefix"
+        },
+        {
+          "choices": [],
+          "default": 0,
+          "help": "0 downloads the whole playlist.",
+          "id": "playlist_item_limit",
+          "kind": {
+            "max": 10000,
+            "min": 0,
+            "type": "int"
+          },
+          "label": "Playlist limit"
+        },
+        {
+          "choices": [],
+          "default": true,
+          "help": null,
+          "id": "auto_start",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Start immediately"
+        },
+        {
+          "choices": [],
+          "default": false,
+          "help": "Writes one file per chapter.",
+          "id": "split_by_chapters",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Split by chapters"
+        },
+        {
+          "choices": [],
+          "default": [],
+          "help": "Named yt-dlp option bundles the operator configured.",
+          "id": "ytdl_options_presets",
+          "kind": {
+            "type": "enum"
+          },
+          "label": "Presets"
+        }
+      ]
+    },
+    {
+      "default_format": "m4a",
+      "formats": [
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "m4a",
+          "label": "M4A",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            },
+            {
+              "id": "192",
+              "label": "192 kbps",
+              "notice": null
+            },
+            {
+              "id": "128",
+              "label": "128 kbps",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": true,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "mp3",
+          "label": "MP3",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            },
+            {
+              "id": "320",
+              "label": "320 kbps",
+              "notice": null
+            },
+            {
+              "id": "192",
+              "label": "192 kbps",
+              "notice": null
+            },
+            {
+              "id": "128",
+              "label": "128 kbps",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": true,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "opus",
+          "label": "Opus",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "wav",
+          "label": "WAV",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "flac",
+          "label": "FLAC",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        }
+      ],
+      "id": "audio",
+      "label": "Audio",
+      "options": [
+        {
+          "choices": [],
+          "default": null,
+          "help": "Subdirectory of the download root.",
+          "id": "folder",
+          "kind": {
+            "type": "path"
+          },
+          "label": "Folder"
+        },
+        {
+          "choices": [],
+          "default": "",
+          "help": null,
+          "id": "custom_name_prefix",
+          "kind": {
+            "pattern": "^[^/\\\\]*$",
+            "type": "text"
+          },
+          "label": "Filename prefix"
+        },
+        {
+          "choices": [],
+          "default": 0,
+          "help": "0 downloads the whole playlist.",
+          "id": "playlist_item_limit",
+          "kind": {
+            "max": 10000,
+            "min": 0,
+            "type": "int"
+          },
+          "label": "Playlist limit"
+        },
+        {
+          "choices": [],
+          "default": true,
+          "help": null,
+          "id": "auto_start",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Start immediately"
+        },
+        {
+          "choices": [],
+          "default": false,
+          "help": "Writes one file per chapter.",
+          "id": "split_by_chapters",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Split by chapters"
+        },
+        {
+          "choices": [],
+          "default": [],
+          "help": "Named yt-dlp option bundles the operator configured.",
+          "id": "ytdl_options_presets",
+          "kind": {
+            "type": "enum"
+          },
+          "label": "Presets"
+        }
+      ]
+    },
+    {
+      "default_format": "srt",
+      "formats": [
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": false,
+            "slow": false
+          },
+          "id": "srt",
+          "label": "SRT",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "txt",
+          "label": "Text",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": false,
+            "slow": false
+          },
+          "id": "vtt",
+          "label": "VTT",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "ttml",
+          "label": "TTML",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "sbv",
+          "label": "SBV",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "scc",
+          "label": "SCC",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        },
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "dfxp",
+          "label": "DFXP",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        }
+      ],
+      "id": "captions",
+      "label": "Subtitles",
+      "options": [
+        {
+          "choices": [],
+          "default": null,
+          "help": "Subdirectory of the download root.",
+          "id": "folder",
+          "kind": {
+            "type": "path"
+          },
+          "label": "Folder"
+        },
+        {
+          "choices": [],
+          "default": "",
+          "help": null,
+          "id": "custom_name_prefix",
+          "kind": {
+            "pattern": "^[^/\\\\]*$",
+            "type": "text"
+          },
+          "label": "Filename prefix"
+        },
+        {
+          "choices": [],
+          "default": 0,
+          "help": "0 downloads the whole playlist.",
+          "id": "playlist_item_limit",
+          "kind": {
+            "max": 10000,
+            "min": 0,
+            "type": "int"
+          },
+          "label": "Playlist limit"
+        },
+        {
+          "choices": [],
+          "default": true,
+          "help": null,
+          "id": "auto_start",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Start immediately"
+        },
+        {
+          "choices": [],
+          "default": false,
+          "help": "Writes one file per chapter.",
+          "id": "split_by_chapters",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Split by chapters"
+        },
+        {
+          "choices": [],
+          "default": [],
+          "help": "Named yt-dlp option bundles the operator configured.",
+          "id": "ytdl_options_presets",
+          "kind": {
+            "type": "enum"
+          },
+          "label": "Presets"
+        },
+        {
+          "choices": [],
+          "default": "en",
+          "help": null,
+          "id": "subtitle_language",
+          "kind": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,34}$",
+            "type": "text"
+          },
+          "label": "Language"
+        },
+        {
+          "choices": [
+            {
+              "id": "auto_only",
+              "label": "Automatic only"
+            },
+            {
+              "id": "manual_only",
+              "label": "Manual only"
+            },
+            {
+              "id": "prefer_manual",
+              "label": "Prefer manual"
+            },
+            {
+              "id": "prefer_auto",
+              "label": "Prefer automatic"
+            }
+          ],
+          "default": "prefer_manual",
+          "help": null,
+          "id": "subtitle_mode",
+          "kind": {
+            "type": "enum"
+          },
+          "label": "Subtitle source"
+        }
+      ]
+    },
+    {
+      "default_format": "jpg",
+      "formats": [
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": false,
+            "lossy_remux": false,
+            "requires_ffmpeg": false,
+            "slow": false
+          },
+          "id": "jpg",
+          "label": "Thumbnail",
+          "notice": null,
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Best",
+              "notice": null
+            }
+          ]
+        }
+      ],
+      "id": "thumbnail",
+      "label": "Thumbnail",
+      "options": [
+        {
+          "choices": [],
+          "default": null,
+          "help": "Subdirectory of the download root.",
+          "id": "folder",
+          "kind": {
+            "type": "path"
+          },
+          "label": "Folder"
+        },
+        {
+          "choices": [],
+          "default": "",
+          "help": null,
+          "id": "custom_name_prefix",
+          "kind": {
+            "pattern": "^[^/\\\\]*$",
+            "type": "text"
+          },
+          "label": "Filename prefix"
+        },
+        {
+          "choices": [],
+          "default": 0,
+          "help": "0 downloads the whole playlist.",
+          "id": "playlist_item_limit",
+          "kind": {
+            "max": 10000,
+            "min": 0,
+            "type": "int"
+          },
+          "label": "Playlist limit"
+        },
+        {
+          "choices": [],
+          "default": true,
+          "help": null,
+          "id": "auto_start",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Start immediately"
+        },
+        {
+          "choices": [],
+          "default": false,
+          "help": "Writes one file per chapter.",
+          "id": "split_by_chapters",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Split by chapters"
+        },
+        {
+          "choices": [],
+          "default": [],
+          "help": "Named yt-dlp option bundles the operator configured.",
+          "id": "ytdl_options_presets",
+          "kind": {
+            "type": "enum"
+          },
+          "label": "Presets"
+        }
+      ]
+    }
+  ],
+  "etag": "[etag]",
+  "match": {
+    "reason": "fallback",
+    "score": 1
+  },
+  "naming": "template",
+  "provider": "ytdlp",
+  "runner_up": null
+}

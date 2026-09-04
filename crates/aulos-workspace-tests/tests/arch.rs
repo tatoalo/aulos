@@ -117,6 +117,12 @@ const TABLE: [(&str, Option<&[&str]>); 12] = [
             "aulos-core",
             "aulos-store",
             "aulos-queue",
+            // Amendment (WP-14): DESIGN §3's row omits `aulos-provider`, while PLAN WP-14's
+            // `ApiState` types `registry: Arc<RwLock<Registry>>` and `GET api/v2/catalog`,
+            // `providers` and `resolve-preview` are all projections of it. No §3 *rule* forbids
+            // the edge (A1 is about provider crates depending on the store or the queue), so the
+            // row gains the crate. See docs/INTEGRATION-NOTES.md, WP-14.
+            "aulos-provider",
             "axum",
             "axum-server",
             "tower",

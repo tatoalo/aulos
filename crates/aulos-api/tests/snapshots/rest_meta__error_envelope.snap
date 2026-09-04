@@ -1,0 +1,14 @@
+---
+source: crates/aulos-api/tests/rest_meta.rs
+expression: body
+---
+{
+  "error": {
+    "code": "validation_failed",
+    "field": "quality",
+    "message": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'best_remux', 'worst'] for video",
+    "provider": null,
+    "provider_code": null,
+    "request_id": "[id]"
+  }
+}

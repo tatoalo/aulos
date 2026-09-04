@@ -1,0 +1,58 @@
+---
+source: crates/aulos-api/tests/rest_meta.rs
+expression: sc
+---
+{
+  "download_types": [
+    {
+      "default_format": "mp4",
+      "formats": [
+        {
+          "codecs": [],
+          "default_quality": "best",
+          "flags": {
+            "advisory": true,
+            "lossy_remux": false,
+            "requires_ffmpeg": true,
+            "slow": false
+          },
+          "id": "mp4",
+          "label": "MP4",
+          "notice": "StreamingCommunity serves one source rendition; quality is ignored.",
+          "qualities": [
+            {
+              "id": "best",
+              "label": "Source",
+              "notice": null
+            }
+          ]
+        }
+      ],
+      "id": "video",
+      "label": "Video",
+      "options": [
+        {
+          "choices": [],
+          "default": true,
+          "help": null,
+          "id": "auto_start",
+          "kind": {
+            "type": "bool"
+          },
+          "label": "Start immediately"
+        }
+      ]
+    }
+  ],
+  "etag": "[etag]",
+  "match": {
+    "reason": "host_contains",
+    "score": 200
+  },
+  "naming": "provider",
+  "provider": "streamingcommunity",
+  "runner_up": {
+    "provider": "ytdlp",
+    "score": 1
+  }
+}

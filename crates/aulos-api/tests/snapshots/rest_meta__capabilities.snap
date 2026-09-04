@@ -1,0 +1,401 @@
+---
+source: crates/aulos-api/tests/rest_meta.rs
+expression: body
+---
+{
+  "actions": [
+    "start",
+    "pause",
+    "cancel",
+    "retry",
+    "delete"
+  ],
+  "boot_id": "[id]",
+  "codecs": [
+    "auto",
+    "h264",
+    "h265",
+    "av1",
+    "vp9"
+  ],
+  "config": {
+    "allow_ytdl_options_overrides": false,
+    "clear_completed_after": 0,
+    "create_custom_dirs": true,
+    "custom_dirs": true,
+    "default_download_type": "video",
+    "default_format": "mp4",
+    "default_option_playlist_item_limit": 0,
+    "default_quality": "best",
+    "default_theme": "auto",
+    "delete_file_on_trashcan": false,
+    "max_concurrent_downloads": 3,
+    "output_template_chapter": "%(title)s - %(section_number)02d - %(section_title)s.%(ext)s",
+    "public_host_audio_url": "audio_download/",
+    "public_host_url": "download/",
+    "subscription_default_check_interval": 60
+  },
+  "download_types": [
+    "video",
+    "audio",
+    "captions",
+    "thumbnail"
+  ],
+  "features": [
+    "async_add",
+    "stable_ids",
+    "deltas",
+    "since_resume",
+    "etag",
+    "retry",
+    "cancel",
+    "cancel_resolve",
+    "groups",
+    "subscriptions",
+    "file_serving",
+    "batch_add",
+    "postprocessing_status",
+    "per_url_catalog"
+  ],
+  "formats": [
+    {
+      "download_type": "video",
+      "id": "any",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        },
+        {
+          "id": "2160",
+          "text": "2160p"
+        },
+        {
+          "id": "1440",
+          "text": "1440p"
+        },
+        {
+          "id": "1080",
+          "text": "1080p"
+        },
+        {
+          "id": "720",
+          "text": "720p"
+        },
+        {
+          "id": "480",
+          "text": "480p"
+        },
+        {
+          "id": "360",
+          "text": "360p"
+        },
+        {
+          "id": "240",
+          "text": "240p"
+        },
+        {
+          "id": "worst",
+          "text": "Worst"
+        }
+      ],
+      "text": "Any"
+    },
+    {
+      "download_type": "video",
+      "id": "mp4",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        },
+        {
+          "id": "best_remux",
+          "text": "Best (remux)"
+        },
+        {
+          "id": "2160",
+          "text": "2160p"
+        },
+        {
+          "id": "1440",
+          "text": "1440p"
+        },
+        {
+          "id": "1080",
+          "text": "1080p"
+        },
+        {
+          "id": "720",
+          "text": "720p"
+        },
+        {
+          "id": "480",
+          "text": "480p"
+        },
+        {
+          "id": "360",
+          "text": "360p"
+        },
+        {
+          "id": "240",
+          "text": "240p"
+        },
+        {
+          "id": "worst",
+          "text": "Worst"
+        }
+      ],
+      "text": "MP4"
+    },
+    {
+      "download_type": "video",
+      "id": "ios",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        },
+        {
+          "id": "2160",
+          "text": "2160p"
+        },
+        {
+          "id": "1440",
+          "text": "1440p"
+        },
+        {
+          "id": "1080",
+          "text": "1080p"
+        },
+        {
+          "id": "720",
+          "text": "720p"
+        },
+        {
+          "id": "480",
+          "text": "480p"
+        },
+        {
+          "id": "360",
+          "text": "360p"
+        },
+        {
+          "id": "240",
+          "text": "240p"
+        },
+        {
+          "id": "worst",
+          "text": "Worst"
+        }
+      ],
+      "text": "iOS"
+    },
+    {
+      "download_type": "audio",
+      "id": "m4a",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        },
+        {
+          "id": "192",
+          "text": "192 kbps"
+        },
+        {
+          "id": "128",
+          "text": "128 kbps"
+        }
+      ],
+      "text": "M4A"
+    },
+    {
+      "download_type": "audio",
+      "id": "mp3",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        },
+        {
+          "id": "320",
+          "text": "320 kbps"
+        },
+        {
+          "id": "192",
+          "text": "192 kbps"
+        },
+        {
+          "id": "128",
+          "text": "128 kbps"
+        }
+      ],
+      "text": "MP3"
+    },
+    {
+      "download_type": "audio",
+      "id": "opus",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "Opus"
+    },
+    {
+      "download_type": "audio",
+      "id": "wav",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "WAV"
+    },
+    {
+      "download_type": "audio",
+      "id": "flac",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "FLAC"
+    },
+    {
+      "download_type": "captions",
+      "id": "srt",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "SRT"
+    },
+    {
+      "download_type": "captions",
+      "id": "txt",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "Text"
+    },
+    {
+      "download_type": "captions",
+      "id": "vtt",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "VTT"
+    },
+    {
+      "download_type": "captions",
+      "id": "ttml",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "TTML"
+    },
+    {
+      "download_type": "captions",
+      "id": "sbv",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "SBV"
+    },
+    {
+      "download_type": "captions",
+      "id": "scc",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "SCC"
+    },
+    {
+      "download_type": "captions",
+      "id": "dfxp",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "DFXP"
+    },
+    {
+      "download_type": "thumbnail",
+      "id": "jpg",
+      "qualities": [
+        {
+          "id": "best",
+          "text": "Best"
+        }
+      ],
+      "text": "Thumbnail"
+    }
+  ],
+  "presets": [],
+  "protocol": {
+    "batch_ms": 50,
+    "delta_semantics": "absent-key-means-unchanged",
+    "socketio": false,
+    "urgent_ms": 5,
+    "v1_shim": true,
+    "v2": true,
+    "ws_path": "ws",
+    "ws_subprotocol": "aulos.v2"
+  },
+  "providers": [
+    {
+      "fallback": true,
+      "id": "ytdlp",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    },
+    {
+      "fallback": false,
+      "id": "streamingcommunity",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    },
+    {
+      "fallback": false,
+      "id": "fake",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    }
+  ],
+  "subtitle_modes": [
+    "auto_only",
+    "manual_only",
+    "prefer_manual",
+    "prefer_auto"
+  ],
+  "url_prefix": "/",
+  "version": "2026.09.04",
+  "yt_dlp": "2026.8.30.232658.dev0"
+}

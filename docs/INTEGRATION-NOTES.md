@@ -1399,3 +1399,155 @@ All of these are addressed to packages that do not exist yet. None of them block
   exactly, and `tests/actor.rs` asserts both.
 - No Prometheus metrics: `edits_throttled_total` is exposed on `TelegramHealth` for `healthz`
   (DESIGN §12.4 asks for it there) and nowhere else.
+
+## WP-14 — `aulos-api`: v2 REST, WebSocket, files, health, auth
+
+### Things the integrator must act on
+
+- **`aulos-api` now declares `aulos-provider`, and `tests/arch.rs`'s table was amended by one
+  line.** DESIGN §3's `aulos-api` row omits the crate, while PLAN WP-14's `ApiState` types
+  `registry: Arc<RwLock<Registry>>` and `GET api/v2/{catalog,providers,resolve-preview}` and the
+  add path's catalog defaults are all projections of it. No §3 *rule* forbids the edge (A1 is about
+  provider crates depending on the store or the queue; A2–A5 are untouched), so the row gained
+  `"aulos-provider"` with an `// Amendment (WP-14)` comment next to WP-01's and WP-08's. **DESIGN §3
+  should gain the same word.** The alternative — a port trait in `aulos-api` implemented by
+  `aulos-server` over the registry — would have mirrored `Match`, `MatchReason`, `ProviderState`
+  and `FormatCatalog` for no architectural gain.
+- **`CancelScope::Generation` cannot isolate one add today, and one line in `aulos-queue` fixes
+  it.** `Engine::handle_add` reads `self.add_generation` without incrementing it, and only
+  `CancelScope::All` bumps it, so two adds that race share a generation and
+  `POST api/v2/downloads/cancel-resolve {"generation": n}` cancels both. The wire side is complete
+  — the `202` carries `generation`, the route maps `{"generation": n}` → `Generation(n)` and `{}` →
+  `All`, `capabilities.features` advertises `cancel_resolve` — so the fix is `self.add_generation
+  += 1` (or a separate per-add counter) in `crates/aulos-queue/src/add.rs`, which is a WP-12 file.
+  `rest_queue::cancel_resolve_scopes_by_generation_and_falls_back_to_everything` asserts today's
+  behaviour and carries a `todo(WP-12)` on the one assertion that will flip.
+- **`ServerInfo.yt_dlp` is `None` until the binary fills it in.** `capabilities.yt_dlp`,
+  `GET <p>version`'s `yt-dlp` and `healthz.yt_dlp` all read it, and `aulos-api` may not depend on
+  `aulos-provider-ytdlp` (DESIGN §3). WP-17 should call
+  `ApiState::with_info(ServerInfo::new(&cfg, clock).with_yt_dlp(runner.identity().yt_dlp))` once
+  the shim has answered; until then the three surfaces say `null`, which is honest.
+- **`healthz` synthesises `store` and `queue` when the registry has none, and nothing else.**
+  The other thirteen components of DESIGN §16.3 are WP-17's probes; `rest_meta::
+  the_healthz_payload_is_stable_for_the_stock_component_set` seeds the full stock set by hand and
+  snapshot-tests the payload, so the document and the wire are pinned to each other. The 503 rule
+  is implemented here: `HealthView::is_fatal()` (a `down` store) **or** a WAL over 256 MB.
+- **`GET api/v2/items?q=` filters the page, not the query.** `aulos_store::ItemFilter` has no title
+  predicate, so `q` is applied to the rows the keyset query returned and `total` stays the
+  unfiltered count. An additive `ItemFilter.title_like: Option<Box<str>>` plus a `LIKE` clause in
+  `aulos-store` (a WP-04 file) is what makes a filtered set pageable honestly.
+- **`POST api/v2/items/clear` is an addition to PROTOCOL §4.7.** DESIGN §8.10 defines
+  `EngineCmd::Clear` and the v1 shim's `POST <p>delete {"where":"done"}` needs it, but the §4.7
+  table has no v2 clear route, which would leave a v2-only deployment deleting history one id at a
+  time. It answers `{"removed": [ids], "seq": n}`. **PROTOCOL §4.7 should adopt the row.**
+- **`GET api/v2/catalog` (no `?url=`) reports `provider: "merged"`.** §4.6 defines `provider` as
+  "the provider whose catalog this is" and says nothing about the union. `"merged"` is not a legal
+  `ProviderId`, and `match` is `null` on the same payload, so the two facts together are
+  unambiguous — but PROTOCOL should say so.
+- **`GET api/v2/providers` fills `version`, `capabilities` and `argv` with `null`/`[]`.** The
+  `Provider` trait exposes none of the three (DESIGN §6.1), and inventing them would be worse than
+  saying nothing. An additive `Provider::describe() -> ProviderDescription` would fill them for
+  every provider at once; `limits.slots` already comes from `Provider::own_slots()` and
+  `fallback` is derived by asking each provider whether it answers `Match::Weak` to a URL in the
+  reserved `.invalid` TLD.
+- **The `subscription`/`subscription_removed` frames are published by the aggregator, not here.**
+  `aulos-api` only sends `SubCmd`s; the manager publishes `DomainEvent::SubscriptionChanged` and
+  WP-13's aggregator turns it into the frame (one frame per deleted id, with a single-element
+  `ids` array — PROTOCOL §5.9's example batches them, and either is legal).
+- **`POST api/v2/subscriptions` applies `check_interval_minutes` with a follow-up
+  `SubCmd::Update`.** `SubCmd::Add` carries only `url`, `selection` and `folder` (WP-16's note), so
+  an explicit interval would otherwise be silently ignored. One extra message on a rare route; it
+  can be deleted the day `SubCmd::Add` grows the field.
+
+### Deliberate deviations, and why
+
+- **The WS session is one task, not two.** DESIGN §15.4 step 3 asks for a reader and a writer
+  sharing a `CancellationToken`; splitting an `axum::extract::ws::WebSocket` needs `futures-util`,
+  which is not in `aulos-api`'s §3 row. The session is one `tokio::select!` over the socket, the
+  bus and the keepalive tick, and the property the two tasks existed for — a wedged writer can
+  neither hold memory nor block progress — is the **send timeout**
+  (`AULOS_WS_SEND_TIMEOUT_MS`, then close `1013`), which this shape enforces directly. There is no
+  `ConnClosed` command and no `Drop` guard that sends one, because the watch registry is CUT; the
+  `Drop` guard that remains keeps `healthz.ws.clients` from leaking on any close path.
+- **The 100 ms `hello` grace before the snapshot is gone.** DESIGN §15.4 step 1 waits so that a
+  `hello`'s `topics` list can narrow the snapshot — and **topic narrowing is CUT** (BRIEF), so the
+  wait buys nothing and costs 100 ms on exactly the path this package exists to make fast. The
+  snapshot goes out immediately and `hello` is handled in the loop like any other client frame.
+  Subscribe-before-snapshot is unchanged, so no update can be lost.
+- **The snapshot cursor is an `Option<Seq>`.** `seq` is allocated from **zero**
+  (`HiLoAllocator::next()` returns 0 for the first frame) and `Published::empty()` also reports
+  `seq: 0`, so a `frame.seq > snapshot.seq` filter silently ate the very first `added` frame of a
+  fresh boot — a lost update, and the first bug this package's tests caught. `None` now means
+  "nothing is reflected in this snapshot yet". A cheaper alternative is for the allocator to hand
+  out `1` first, which would make `Seq(0)` mean "no frame" everywhere; that is an `aulos-store`
+  change and it is worth considering, because `Published::empty().seq == Seq(0)` is a trap for any
+  future reader of `Published`.
+- **`download_url` is filled by patching, on every surface.** The engine leaves it `None`
+  (WP-12/WP-13 notes), so `aulos_api::view` fills it: `project()` for the snapshot, `items` and
+  `items/{id}`, and `patch_frame()` for the `added`/`completed`/`delta` frames — one parse and
+  re-serialise per frame per socket, and only for the three kinds that can carry a file name.
+  `stress_consistency` is what proves the two paths agree; if they had disagreed the reconstructed
+  client state would differ from the snapshot on every finished item. A `delta` carries no
+  `selection`, so the download type is looked up in `Published` and falls back to the video root.
+  **The cheaper fix is still the one WP-13 proposed**: an additive formatter passed to
+  `Engine::new` so `ViewExtras.download_url` is filled once, at the source; then `view::patch_frame`
+  can be deleted.
+- **A patched frame's JSON keys are alphabetical.** `serde_json` without `preserve_order` uses a
+  `BTreeMap`, so a re-serialised frame reads `{"items":…,"reason":…,"seq":…,"t":…}`. Key order is
+  not part of the protocol and no client can depend on it, but it is worth knowing before staring
+  at a packet capture.
+- **`ApiError` is a struct, not PLAN WP-14's three-field tuple.** `field` has to hold a *dynamic*
+  name, because the engine reports validation failures as `WireError`s built from the catalog and
+  `SubError::Invalid` does the same. The tuple's three positions survive as `ApiError::new`'s three
+  arguments. `request_id` is stamped on the way out by one middleware (`trace::headers`) rather
+  than threaded through forty handlers, keyed on an `EnvelopeStamp` response extension.
+- **A request id is minted with `ItemId::new()`.** PROTOCOL §1.3 says a ULID and `ulid` is not in
+  `aulos-api`'s §3 row, so the mint goes through the core newtype that wraps it. No item is
+  created. A one-line `aulos_core::id::new_ulid()` would read better.
+- **`Last-Modified` is formatted by hand.** `time` is not in the §3 row either, so `files.rs`
+  carries Howard Hinnant's `civil_from_days` and an IMF-fixdate formatter with exact tests
+  (including the RFC 9110 example and a leap day). Twenty lines, no dependency.
+- **`GET api/v2/state`'s delta is folded out of the hub's serialised frames.** The hub hands back
+  `Vec<Arc<WireFrame>>` (already encoded once for every reader), so the REST delta re-parses them
+  into the four §4.3 buckets rather than asking the ring for a second representation. The
+  passthrough kinds a window can also contain (`subscription`, `notice`, `providers`,
+  `ytdl_options`, `health`) have no place in the §4.3 shape and are dropped — a polling client
+  re-reads them from its next snapshot.
+- **`api/v2/items`' `next_cursor` is `"<ord>.<id>"`.** PROTOCOL §4.4 says only that it is opaque;
+  `base64` is not in the §3 row, and a keyset cursor that is readable in a log is easier to support
+  than one that is not.
+- **`SkipReason::NotCancelable` is unreachable.** The engine's cancel is idempotent from every
+  state (DESIGN §8.7), so no request can produce it; it stays in the closed wire enum because
+  PROTOCOL §4.2 documents it, and `rest_queue::the_reachable_skip_reasons_are_all_produced` says so
+  in a comment next to the five that are.
+- **`?probe=deep` re-probes providers and folds the result into the registry.** DESIGN §16.3 says
+  it "re-runs the tool probes live"; the tool probes belong to WP-17, and the one live probe
+  `aulos-api` can reach is `Provider::probe()`. The route is rate-limited to one real run per 10 s
+  and reports `"probe": "shallow" | "deep" | "throttled"` so an operator can tell which they got.
+
+### BRIEF scope trims applied here
+
+- `GET <p>metrics` answers `404 not_found` from the same envelope as everything else, and neither
+  `metrics` nor `metrics-exporter-prometheus` is linked.
+- The WS client frames `hello` (topic narrowing), `ack`, `watch` and `unwatch` are accepted and
+  produce **no** error, so a client written from PROTOCOL §5.11 is never disconnected for sending
+  one. `ping`/`pong`, the `Lagged` resync, the lag budget (`1013`), the send timeout (`1013`), the
+  client cap (an `error` frame then `1013`) and the 1 MiB frame cap (`1009`) are all implemented and
+  tested.
+- `truncated.groups` is always `[]` and a group's `children_inline` is always `true`, because the
+  snapshot carries every non-terminal child.
+
+### What the v1 shim (WP-15) needs from here
+
+- Mount the shim in **one** place: `pub mod v1;` in `lib.rs` plus
+  `router = router.merge(v1::router(state.clone()))` when `state.cfg.v1_enabled`, next to the
+  documented seam in `router`'s doc comment.
+- `<p>version`, `<p>robots.txt`, `<p>`, `<p>socket.io/*`, `<p>healthz`, `<p>livez`,
+  `<p>download/*` and `<p>audio_download/*` are already served for **both** protocol versions;
+  registering any of them again will panic at router build time. PROTOCOL §10.1 lists them under
+  v1 because a v1 client uses them, not because the shim re-implements them. The `GET /` → `<p>`
+  redirect (prefix ≠ `/`) is v1's and is not registered here.
+- Reusable pieces: `v2::downloads::parse_one` (the add-body parser), `v2::cookies`' four legacy
+  strings and its `MAX_COOKIE_BYTES`, `cors::v1` (the legacy method set), `error::ApiError` and
+  `error::Json`, `view::project`/`view::public_url` for `download_url`, and
+  `v2::query::lookup`/`items` for id resolution. `aulos_core::Status::v1()` is the status mapping.

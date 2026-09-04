@@ -1,0 +1,135 @@
+---
+source: crates/aulos-api/tests/rest_meta.rs
+expression: body
+---
+{
+  "boot_id": "[id]",
+  "components": {
+    "audio_sync": {
+      "phase": "pre_terminal",
+      "runs_total": 2,
+      "status": "ok"
+    },
+    "deno": {
+      "status": "ok",
+      "version": "2.x"
+    },
+    "events": {
+      "dropped": {
+        "hooks": 0,
+        "telegram": 0
+      },
+      "status": "ok"
+    },
+    "ffmpeg": {
+      "status": "ok",
+      "version": "6.1.1"
+    },
+    "importer": {
+      "status": "ok",
+      "warnings": 2
+    },
+    "jellyfin": {
+      "failures_total": 0,
+      "pending": false,
+      "runs_total": 18,
+      "status": "ok"
+    },
+    "nfo": {
+      "failures_total": 0,
+      "runs_total": 7,
+      "status": "ok"
+    },
+    "nm3u8dl": {
+      "status": "ok",
+      "version": "v0.5.1-beta"
+    },
+    "pot": {
+      "detail": "3 consecutive probe failures",
+      "endpoint": "http://127.0.0.1:4416",
+      "restarts": 3,
+      "status": "down"
+    },
+    "queue": {
+      "downloading": 2,
+      "postprocessing": 0,
+      "progress_dropped_total": 0,
+      "queued": 5,
+      "resolving": 1,
+      "status": "ok"
+    },
+    "store": {
+      "db_bytes": "[n]",
+      "latency_ms": 0.42,
+      "status": "ok",
+      "wal_bytes": "[n]"
+    },
+    "subscriptions": {
+      "failing": 1,
+      "next_due_in_s": 412,
+      "status": "ok",
+      "total": "[n]"
+    },
+    "telegram": {
+      "chats": 2,
+      "edits_throttled_total": 11,
+      "status": "ok"
+    },
+    "ytdl_options": {
+      "presets": 2,
+      "status": "ok"
+    },
+    "ytdlp_runner": {
+      "python": "3.13.5",
+      "status": "ok",
+      "yt_dlp": "2026.8.30.232658.dev0"
+    }
+  },
+  "items": {
+    "canceled": 0,
+    "downloading": 0,
+    "error": 0,
+    "finished": 0,
+    "postprocessing": 0,
+    "preparing": 0,
+    "queued": 0,
+    "resolving": 0
+  },
+  "probe": "shallow",
+  "providers": [
+    {
+      "fallback": true,
+      "id": "ytdlp",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    },
+    {
+      "fallback": false,
+      "id": "streamingcommunity",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    },
+    {
+      "fallback": false,
+      "id": "fake",
+      "reason": null,
+      "slots": null,
+      "state": "ready"
+    }
+  ],
+  "seq": "[n]",
+  "status": "down",
+  "uptime_s": "[n]",
+  "url_prefix": "/",
+  "v1_shim": true,
+  "version": "2026.09.04",
+  "ws": {
+    "clients": 0,
+    "frames_total": "[n]",
+    "lagged_total": 0,
+    "slow_disconnects": 0
+  },
+  "yt_dlp": "2026.8.30.232658.dev0"
+}
