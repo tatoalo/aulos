@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:queue","items":[{"key":"https://youtu.be/mix1","info":{"id":"mix1","title":"A v2 queued item","url":"https://youtu.be/mix1","quality":"best","download_type":"video","codec":"auto","format":"mp4","status":"pending","timestamp":1757000000000000010}}]}

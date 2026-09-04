@@ -1,5 +1,7 @@
 //! WP-01 acceptance: the CLI surface the container depends on.
 
+use std::path::{Path, PathBuf};
+
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt as _;
 use predicates::str::contains;
@@ -79,30 +81,195 @@ fn doctor_exits_zero_with_the_not_implemented_line() {
 }
 
 #[test]
-fn check_config_and_healthcheck_exit_zero() {
-    for sub in ["check-config", "healthcheck"] {
-        bin()
-            .arg(sub)
-            .assert()
-            .success()
-            .stdout(contains(format!("aulos-server {sub}: not implemented")));
-    }
+fn healthcheck_exits_zero_with_the_not_implemented_line() {
+    bin()
+        .arg("healthcheck")
+        .assert()
+        .success()
+        .stdout(contains("aulos-server healthcheck: not implemented"));
 }
 
 #[test]
 fn import_requires_state_dir_and_db() {
     bin().arg("import").assert().failure();
     bin()
+        .args(["import", "--state-dir", "/downloads/.metube"])
+        .assert()
+        .failure();
+}
+
+// ---------------------------------------------------------------------------
+// WP-05: `import` and `check-config`
+// ---------------------------------------------------------------------------
+
+/// A fixture directory copied out of `aulos-store`'s corpus, so the checked-in files stay
+/// pristine and the marker file lands somewhere disposable.
+fn state_dir(fixture: &str, into: &Path) -> PathBuf {
+    let from = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../aulos-store/tests/fixtures/state")
+        .join(fixture);
+    let to = into.join("state");
+    std::fs::create_dir_all(&to).unwrap_or_else(|e| panic!("mkdir: {e}"));
+    for entry in std::fs::read_dir(&from).unwrap_or_else(|e| panic!("{}: {e}", from.display())) {
+        let entry = entry.unwrap_or_else(|e| panic!("{e}"));
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), to.join(entry.file_name()))
+                .unwrap_or_else(|e| panic!("copy: {e}"));
+        }
+    }
+    to
+}
+
+/// A disposable working directory. `tempfile` is not a dependency of this crate, and one
+/// process-scoped directory per test is enough.
+fn workdir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "aulos-cli-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+    dir
+}
+
+/// A command with a clean environment: the importer reads `AULOS_*` from it, and a developer
+/// machine must not be able to change what these tests assert.
+fn clean() -> Command {
+    let mut cmd = bin();
+    cmd.env_clear();
+    cmd
+}
+
+#[test]
+fn import_dry_run_reports_without_writing() {
+    let work = workdir("dry");
+    let state = state_dir("v2", &work);
+    let db = work.join("aulos.db");
+
+    clean()
         .args([
             "import",
             "--state-dir",
-            "/downloads/.metube",
+            &state.display().to_string(),
             "--db",
-            "/config/aulos.db",
+            &db.display().to_string(),
+            "--dry-run",
         ])
         .assert()
         .success()
-        .stdout(contains("aulos-server import: not implemented"));
+        .stdout(
+            contains("DRY RUN — nothing was written")
+                .and(contains("queue.json"))
+                .and(contains("items: queued=3 finished=1 error=2 canceled=0")),
+        );
+
+    assert!(!db.exists(), "a dry run must not create the database");
+    assert!(
+        !state.join(".aulos-imported").exists(),
+        "a dry run must not write the marker"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn import_writes_the_database_then_refuses_to_run_twice() {
+    let work = workdir("real");
+    let state = state_dir("v2", &work);
+    let db = work.join("aulos.db");
+    let argv = [
+        "import".to_owned(),
+        "--state-dir".to_owned(),
+        state.display().to_string(),
+        "--db".to_owned(),
+        db.display().to_string(),
+    ];
+
+    clean()
+        .args(&argv)
+        .assert()
+        .success()
+        .stdout(contains("legacy import from").and(contains("errors: 0")));
+    assert!(db.is_file(), "the database must exist");
+    assert!(state.join(".aulos-imported").is_file());
+
+    // Idempotence, and the database survives the refusal.
+    clean()
+        .args(&argv)
+        .assert()
+        .failure()
+        .stderr(contains("--force"));
+    assert!(db.is_file());
+
+    clean().args(&argv).arg("--force").assert().success();
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn import_of_a_corrupt_state_dir_fails_and_skip_corrupt_rescues_it() {
+    let work = workdir("corrupt");
+    let state = state_dir("corrupt", &work);
+    let db = work.join("aulos.db");
+    let argv = [
+        "import".to_owned(),
+        "--state-dir".to_owned(),
+        state.display().to_string(),
+        "--db".to_owned(),
+        db.display().to_string(),
+    ];
+
+    clean()
+        .args(&argv)
+        .assert()
+        .failure()
+        .stdout(contains("file_invalid: queue.json"))
+        .stderr(contains("import failed"));
+    assert!(
+        !db.exists(),
+        "the database must not exist after a rolled-back import"
+    );
+
+    clean()
+        .args(&argv)
+        .arg("--skip-corrupt")
+        .assert()
+        .success()
+        .stdout(contains("file_skipped: queue.json"));
+    assert!(db.is_file());
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn check_config_exits_zero_on_a_valid_environment_and_redacts_secrets() {
+    clean()
+        .arg("check-config")
+        .env("DOWNLOAD_DIR", "/downloads")
+        .env("TELEGRAM_BOT_TOKEN", "123456:super-secret")
+        .assert()
+        .success()
+        .stdout(
+            contains("effective configuration")
+                .and(contains("TELEGRAM_BOT_TOKEN = «redacted»"))
+                .and(contains("configuration is valid"))
+                .and(contains("super-secret").not()),
+        );
+}
+
+#[test]
+fn check_config_exits_one_with_a_table_on_an_invalid_environment() {
+    clean()
+        .arg("check-config")
+        .env("PORT", "eighty")
+        .env("AULOS_TYPO_HERE", "1")
+        .assert()
+        .code(1)
+        .stdout(
+            contains("configuration is INVALID")
+                .and(contains("PORT"))
+                .and(contains("AULOS_TYPO_HERE")),
+        );
 }
 
 #[test]

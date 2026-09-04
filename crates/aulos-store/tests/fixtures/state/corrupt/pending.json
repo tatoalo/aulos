@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:pending","items":[{"key":"https://youtu.be/ok1","info":{"id":"ok1","title":"A readable pending item","url":"https://youtu.be/ok1","quality":"best","download_type":"video","codec":"auto","format":"mp4","status":"pending","timestamp":1757000000000000000}}]}

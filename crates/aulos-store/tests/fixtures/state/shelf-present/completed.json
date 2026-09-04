@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:completed","items":[{"key":"https://youtu.be/sh1","info":{"id":"sh1","title":"A readable completed item","url":"https://youtu.be/sh1","download_type":"video","codec":"auto","format":"mp4","quality":"best","status":"finished","timestamp":1757000000000000000}}]}

@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:queue","items":[{"key":"https://youtu.be/dup","info":{"id":"dup","title":"The queued copy","url":"https://youtu.be/dup","download_type":"video","codec":"auto","format":"mp4","quality":"best","status":"pending","timestamp":1757000001000000000}}]}

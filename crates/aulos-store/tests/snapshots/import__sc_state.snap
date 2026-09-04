@@ -1,0 +1,53 @@
+---
+source: crates/aulos-store/tests/import.rs
+expression: "format!(\"episode:\\n{}\\n\\nmovie:\\n{}\",\nserde_json::to_string_pretty(state).unwrap(),\nserde_json::to_string_pretty(movie_state).unwrap())"
+---
+episode:
+{
+  "base_url": "https://streamingcommunity.test",
+  "episode": "Il segreto",
+  "episode_id": 77,
+  "episode_number": 2,
+  "ext": "mp4",
+  "extractor": "streamingcommunity",
+  "extractor_key": "StreamingCommunity",
+  "legacy": {
+    "_type": "video",
+    "duration": 2712,
+    "id": "sc_9_77",
+    "original_url": "https://streamingcommunity.test/it/titles/9-una-serie",
+    "plot": "La trama dell'episodio.",
+    "title": "Una serie S01E02 - Il segreto",
+    "upload_date": "20260101",
+    "url": "https://streamingcommunity.test/it/watch/9?e=77",
+    "webpage_url": "https://streamingcommunity.test/it/watch/9?e=77"
+  },
+  "needs_m3u8_extraction": true,
+  "season_number": 1,
+  "series": "Una serie",
+  "title_id": 9
+}
+
+movie:
+{
+  "base_url": "https://streamingcommunity.test",
+  "episode": "",
+  "episode_id": null,
+  "episode_number": null,
+  "ext": "mp4",
+  "extractor": "StreamingCommunity",
+  "extractor_key": "StreamingCommunity",
+  "legacy": {
+    "_type": "video",
+    "id": "sc_5",
+    "plot": "La trama del film.",
+    "title": "Un film",
+    "upload_date": "20251115",
+    "url": "https://streamingcommunity.test/it/watch/5",
+    "webpage_url": "https://streamingcommunity.test/it/watch/5"
+  },
+  "needs_m3u8_extraction": true,
+  "season_number": null,
+  "series": null,
+  "title_id": 5
+}

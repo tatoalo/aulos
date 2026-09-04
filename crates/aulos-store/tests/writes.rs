@@ -348,6 +348,38 @@ async fn every_write_op_round_trips_through_a_typed_read() {
     assert!(s.kv_all().await.unwrap().is_empty());
     covered.insert("set_kv");
 
+    // 20. SetMeta — insert then overwrite, observed through `Store::meta` (WP-05: the importer's
+    // provenance keys have to land in the same transaction as the rows).
+    s.write(
+        vec![WriteOp::SetMeta {
+            key: "imported_at".into(),
+            value: "1757000000000".into(),
+        }],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.meta().await.unwrap().get("imported_at").map(|v| &**v),
+        Some("1757000000000")
+    );
+    s.write(
+        vec![WriteOp::SetMeta {
+            key: "imported_at".into(),
+            value: "1757000000001".into(),
+        }],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.meta().await.unwrap().get("imported_at").map(|v| &**v),
+        Some("1757000000001")
+    );
+    // The seeded keys are untouched by a `meta` write.
+    assert!(s.meta().await.unwrap().contains_key("schema_version"));
+    covered.insert("set_meta");
+
     let expected: BTreeSet<&'static str> = WriteOp::NAMES.into_iter().collect();
     assert_eq!(
         covered, expected,

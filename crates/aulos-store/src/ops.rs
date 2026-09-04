@@ -207,6 +207,19 @@ pub enum WriteOp {
         /// The value, or `None` to delete.
         value: Option<Value>,
     },
+
+    /// One `meta` key (DESIGN §7.2). Added in WP-05: the importer's provenance keys
+    /// (`imported_from`, `imported_at`, `import_report`) must land in the **same transaction** as
+    /// the rows they describe (DESIGN §7.6.6), and the two existing `meta` writers — the schema
+    /// seed and the id allocators — both write outside the actor on their own connections.
+    ///
+    /// Not a `FieldUpdate`: `meta` values are never null and are never cleared.
+    SetMeta {
+        /// The key.
+        key: Box<str>,
+        /// The value, always a string — `meta.value` is `TEXT NOT NULL`.
+        value: Box<str>,
+    },
 }
 
 impl WriteOp {
@@ -235,7 +248,8 @@ impl WriteOp {
             | Self::PruneSeen { .. }
             | Self::DeleteSubscriptions(_)
             | Self::UpsertTelegramChat { .. }
-            | Self::SetKv { .. } => None,
+            | Self::SetKv { .. }
+            | Self::SetMeta { .. } => None,
         }
     }
 
@@ -262,14 +276,15 @@ impl WriteOp {
             Self::DeleteSubscriptions(_) => "delete_subscriptions",
             Self::UpsertTelegramChat { .. } => "upsert_telegram_chat",
             Self::SetKv { .. } => "set_kv",
+            Self::SetMeta { .. } => "set_meta",
         }
     }
 
     /// Every variant name, so the round-trip test can assert it covers all of them.
     ///
     /// DESIGN §7.1 lists nineteen variants and calls them "eighteen" in prose; the enum is the
-    /// authority and this list is asserted against it.
-    pub const NAMES: [&'static str; 19] = [
+    /// authority and this list is asserted against it. WP-05 added the twentieth, `set_meta`.
+    pub const NAMES: [&'static str; 20] = [
         "insert_items",
         "set_status",
         "set_auto_start",
@@ -289,6 +304,7 @@ impl WriteOp {
         "delete_subscriptions",
         "upsert_telegram_chat",
         "set_kv",
+        "set_meta",
     ];
 }
 

@@ -28,7 +28,7 @@ use tokio::sync::oneshot;
 use crate::error::StoreError;
 use crate::ops::{Durability, WriteOp};
 use crate::options::StoreOptions;
-use crate::{alloc, items, kv, schema, subscriptions, telegram};
+use crate::{alloc, items, kv, meta, schema, subscriptions, telegram};
 
 /// The most jobs one transaction may cover (DESIGN §7.1).
 pub(crate) const MAX_BATCH: usize = 256;
@@ -81,6 +81,7 @@ fn apply_one(
         || subscriptions::apply(conn, op, now)?
         || telegram::apply(conn, op, now)?
         || kv::apply(conn, op, now)?
+        || meta::apply(conn, op, now)?
     {
         Ok(())
     } else {

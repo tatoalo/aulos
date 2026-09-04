@@ -1,0 +1,1 @@
+{"schema_version":1,"kind":"persistent_queue:completed","items":[{"key":"https://youtu.be/old1","info":{"id":"old1","title":"An old finished download","url":"https://youtu.be/old1","format":"mp4","quality":"best","video_codec":"auto","status":"finished","timestamp":1756999999000000000,"filename":"An old finished download.mp4","size":2048}}]}

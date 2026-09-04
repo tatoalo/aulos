@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:completed","items":[{"key":"https://youtu.be/ok2","info":{"id":"ok2","title":"A readable completed item","url":"https://youtu.be/ok2","quality":"best","download_type":"video","codec":"auto","format":"mp4","status":"finished","timestamp":1757000000000000001,"filename":"ok2.mp4","size":10}}]}

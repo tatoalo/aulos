@@ -1,0 +1,1 @@
+{"schema_version":2,"kind":"persistent_queue:completed","items":[{"key":"https://youtu.be/dup","info":{"id":"dup","title":"The finished copy","url":"https://youtu.be/dup","download_type":"video","codec":"auto","format":"mp4","quality":"best","status":"finished","timestamp":1757000000000000000,"filename":"The finished copy.mp4","size":7}}]}

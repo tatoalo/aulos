@@ -699,3 +699,63 @@ with your WP id.
   interpreter can `import yt_dlp` *and* `ffmpeg` is on `PATH`. Run it with
   `AULOS_TEST_PYTHON=<venv>/bin/python cargo test -p aulos-provider-ytdlp --test real_ytdlp`; it
   generates a one-second clip with ffmpeg and extracts and downloads it over `file://`.
+
+## WP-05 — `aulos-store` legacy importer + `import` / `check-config` CLI
+
+- **`aulos_core::Status` gained `PartialOrd, Ord`** (a derive added to the existing enum in
+  `crates/aulos-core/src/status.rs`; no signature changed). The PLAN's `ImportReport.items` is a
+  `BTreeMap<Status, u64>`, which needs `Ord`. Derived order is declaration order, which is also the
+  order DESIGN §7.6.6 prints the counts in. Nothing reads it as a severity or a progression.
+- **`WriteOp::SetMeta { key, value }` is new** (`WriteOp::NAMES` is now 20 entries, handled by the
+  new `aulos-store` module `meta`). DESIGN §7.6.6 requires `meta.imported_from`, `meta.imported_at`
+  and `meta.import_report` to land **in the same transaction as the rows**, and the two existing
+  `meta` writers (the schema seed and the id allocators) both write outside the writer actor on
+  their own connections. `tests/writes.rs` gained the matching round-trip case. Consumers read the
+  keys through `Store::meta()`; the key names are re-exported as `aulos_store::{IMPORTED_FROM,
+  IMPORTED_AT, IMPORT_REPORT}` and `aulos_store::import::stored_report(&store)` decodes the report.
+- **`canonical_key` lives in `aulos-store`, not `aulos-queue`** —
+  `aulos_store::canonical_key(provider: &str, url: &str, media_id: Option<&str>) -> Box<str>`
+  (module `import::canonical`). `items.canonical_key` is `NOT NULL` and DESIGN §7.6.2 step 5
+  requires the imported value to come from "the same function used at runtime", but `aulos-store`
+  is upstream of `aulos-queue` and its DESIGN §3 row deliberately excludes `url`. **WP-11 must
+  delegate rather than reimplement**:
+  ```rust
+  pub fn canonical_key(p: &ProviderId, url: &Url, media_id: Option<&str>) -> Box<str> {
+      aulos_store::canonical_key(p.as_str(), url.as_str(), media_id)
+  }
+  ```
+  Two implementations would silently defeat dedupe for every pre-cutover URL.
+- **`healthz.components.importer` (WP-17):** `ImportReport::is_degraded()` and
+  `ImportReport::skipped_files()` are the DESIGN §7.6.1 "degraded for the life of the process"
+  inputs, and `warnings.len()` / `imported_at` are the other two fields of the §16.3 payload.
+  `GET <p>api/v2/import-report` (WP-14) should serve `import::stored_report(&store)`.
+- **The boot path (WP-17)** should call `aulos_store::import::import(state_dir, &store, opts)` only
+  when the DB file did not exist, then on `Err` call `store.close()`, `import::delete_db_files(&db)`
+  when `fatal.should_delete_db()`, print `fatal.report.render_table()` and exit non-zero.
+  `ImportOpts` is built from `Config` exactly as `crates/aulos-server/src/import_cmd.rs` does it.
+- **`--dry-run` uses a throwaway database file, not `:memory:`.** DESIGN §7.6.6 says `:memory:`;
+  the store's pragma set requires `journal_mode = WAL` (which an in-memory database refuses) and
+  the read pool opens its own connections, so two `:memory:` handles would be two different
+  databases. The CLI creates a scratch DB under the OS temp dir and deletes it before returning, so
+  the `--db` path is never created and `STATE_DIR` is never written to. Same rehearsal, same
+  guarantees, and the real `STRICT`/`UNIQUE` checks still run.
+- **Still owed by another package: the SC cross-crate assertion.** PLAN WP-05 asks for a test that
+  the NFO hook renders identical XML from an imported blob and from a freshly resolved one.
+  `aulos-hooks` is still a stub, and `aulos-store` must not dev-depend on a provider crate, so the
+  store side pins the translated `state` with an `insta` snapshot
+  (`crates/aulos-store/tests/snapshots/import__sc_state.snap`) and the sc-entry fixture
+  (`crates/aulos-store/tests/fixtures/state/sc-entry/queue.json`) is checked in for reuse.
+  **WP-10 (or `aulos-workspace-tests`) should add:** `ScState::from_json(imported_blob)` succeeds,
+  and `to_legacy_info_json` / the NFO XML match a freshly resolved entry.
+- **Imported rows are attributed `source = { kind: "api_v1", ref: null }` and
+  `provider = "ytdlp"`** (or `"streamingcommunity"`). Legacy persisted no attribution at all, and
+  every legacy record had already been through `extract_info`, so a null provider would say
+  "never resolved" and make an imported row's `canonical_key` disagree with a fresh add's.
+- **A legacy `shelve` file is fatal only when its JSON counterpart is missing.** Legacy never
+  deleted the shelf after migrating it (`app/ytdl.py:1149`), so a real `STATE_DIR` usually holds
+  both `queue` and `queue.json`; making mere presence fatal (a literal reading of DESIGN §7.6.1)
+  would break every real cutover. A shelf beside readable JSON is a `shelf_ignored` warning.
+- **`aulos-server serve` now installs its `SIGTERM`/`SIGINT` handlers before printing its announce
+  line** (`main.rs`). The line used to be printed first, so a supervisor that signalled immediately
+  raced the installation and killed the process instead of shutting it down; the WP-01 CLI test
+  started failing as soon as the binary grew. WP-17 should keep that ordering.

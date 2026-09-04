@@ -43,16 +43,17 @@
 mod actor;
 mod alloc;
 mod error;
+pub mod import;
 mod items;
 mod json;
 mod kv;
+mod meta;
 mod options;
 mod readers;
 mod reads;
 mod schema;
 mod subscriptions;
 mod telegram;
-// WP-05 adds `mod import;` and `mod import::legacy_model` here.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -71,6 +72,8 @@ use crate::actor::{StoreMetrics, WriteJob, WriteMsg};
 
 pub use crate::alloc::{IdWarning, ORD_BLOCK, SEQ_BLOCK};
 pub use crate::error::StoreError;
+pub use crate::import::canonical_key;
+pub use crate::meta::{IMPORT_KEYS, IMPORT_REPORT, IMPORTED_AT, IMPORTED_FROM};
 pub use crate::ops::{Durability, WriteOp, retry_ops};
 pub use crate::options::StoreOptions;
 pub use crate::reads::{BootState, Cursor, GroupCounts, GroupScope, ItemFilter, Page};

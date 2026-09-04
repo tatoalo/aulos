@@ -3,7 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 /// The closed eight-value status vocabulary. Groups use the same values (DESIGN §4.6, §8.6).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+///
+/// `Ord` is derived, so it is **declaration order** — the order [`Status::ALL`] lists and the
+/// order DESIGN §7.6.6 prints `ImportReport.items` in. Added for WP-05, whose report is a
+/// `BTreeMap<Status, u64>` (PLAN §WP-05); nothing reads it as a severity or a progression.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     /// Waiting: for a slot when `auto_start` is true, for the user when it is false.
