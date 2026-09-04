@@ -1,0 +1,13 @@
+---
+source: crates/aulos-hooks/tests/nfo.rs
+expression: xml
+---
+<?xml version="1.0" ?>
+<movie>
+  <title>Il Grande Film</title>
+  <originaltitle>Il Grande Film</originaltitle>
+  <plot/>
+  <dateadded>2026-09-04 00:00:00</dateadded>
+  <uniqueid type="streamingcommunity">sc_1234</uniqueid>
+  <website>https://sc.test/it/watch/9?e=77</website>
+</movie>

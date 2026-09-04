@@ -1,0 +1,25 @@
+{
+  "base_url": "https://streamingcommunity.test",
+  "title_id": 9,
+  "episode_id": 77,
+  "needs_m3u8_extraction": true,
+  "season_number": 1,
+  "episode_number": 2,
+  "episode": "Il segreto di Napoli",
+  "series": "Mare Fuori",
+  "ext": "mp4",
+  "extractor": "streamingcommunity",
+  "extractor_key": "StreamingCommunity",
+  "legacy": {
+    "id": "sc_9_77",
+    "title": "Mare Fuori S01E02 - Il segreto di Napoli",
+    "plot": "Scelte & conseguenze <difficili>",
+    "upload_date": "20260101",
+    "uploader": "StreamingCommunity",
+    "tags": ["dramma", "napoli", "", "carcere"],
+    "duration": 3305.5,
+    "original_url": "https://streamingcommunity.test/it/watch/9?e=77",
+    "webpage_url": "https://streamingcommunity.test/it/watch/9",
+    "_type": "video"
+  }
+}

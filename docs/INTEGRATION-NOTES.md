@@ -759,3 +759,89 @@ with your WP id.
   line** (`main.rs`). The line used to be printed first, so a supervisor that signalled immediately
   raced the installation and killed the process instead of shutting it down; the WP-01 CLI test
   started failing as soon as the binary grew. WP-17 should keep that ordering.
+
+## WP-11 — `aulos-hooks`: dispatcher, jellyfin, nfo, audio-sync, community hooks
+
+- **`HooksFinished` needs an adapter in `aulos-server`, and the engine must keep the `Outcome`.**
+  `aulos-hooks` may not depend on `aulos-queue` (DESIGN §3), so it cannot construct
+  `EngineCmd::HooksFinished`. The seam is `aulos_hooks::HookFinalizer` (one method,
+  `async fn hooks_finished(&self, id: ItemId)`). Neither crate can `impl` it for the other's type,
+  so **WP-16 must define a newtype over the engine handle in `aulos-server` and pass it to
+  `HookDispatcher::with_finalizer`** — without it the pre-terminal phase ends in a DEBUG log and a
+  `best_remux` item never finalises. The trait carries **only the id**: `DomainEvent::Finishing`
+  carries an `Arc<ItemView>` and no outcome, so the outcome never crosses the event boundary. WP-12
+  therefore has to park it engine-side (`pending_hooks: HashMap<ItemId, Box<Outcome>>`) on the
+  `Finished → Finishing` transition and pair it back up on `HooksFinished`, which is what
+  DESIGN §13's "the engine finalises with the outcome it already had" requires anyway.
+- **`Finishing` must be published only on the success path.** The dispatcher treats a `Finishing`
+  event as a prospective `TerminalStatus::Finished`, because `EngineCmd::Finished` is the success
+  command (`Failed` is a different one) and `ItemView.status` still reads `postprocessing` at that
+  point. If WP-12 ever publishes `Finishing` for a failed or cancelled job, the event needs to grow
+  the outcome (`Finishing { view, outcome }`) — otherwise `audio_sync` would re-encode a file a
+  failed download left behind. **The dispatcher always answers a `Finishing` event**, including when
+  no pre-terminal hook applies, so a disagreement about `applies()` can never wedge an item.
+- **Two deliberate signature deviations from PLAN WP-11 / DESIGN §13**, both documented in
+  `crates/aulos-hooks/src/hook.rs`:
+  1. `HookCtx.item` is `&ItemView`, not `&Item`. The dispatcher's only event source is an
+     `EventInbox`, whose `Finishing`/`Completed` payloads are `Arc<ItemView>`, and
+     `ports::HookStore` deliberately exposes no item read. Every field the four hooks need is on
+     `ItemView`.
+  2. `Hook::applies(&self, item: &ItemView, outcome: TerminalStatus)` takes the outcome explicitly.
+     DESIGN §13 says a `PreTerminal` hook's `applies()` reads "the prospective outcome carried by
+     `HookCtx.batch[0].status`", which a one-argument `applies(&item)` cannot see. The value passed
+     is the same one that lands in `BatchEntry.status`.
+- **`HookFilter::matches` (WP-10) takes `&Item` and is therefore unusable from this crate.**
+  `ManifestHook::filter_matches` reimplements the same three axes against `ItemView`, with identical
+  semantics (including "an item with no provider fails a `when.provider` filter rather than passing
+  it"). A one-line additive `HookFilter::matches_view(&ItemView)` in `aulos-provider`, with both
+  callers delegating to it, would remove the duplication; it is deliberately not done here because
+  WP-10 owns that file.
+- **`aulos_provider::proc::Child::wait` does not join the stderr drain task**, so reading
+  `child.stderr().tail(..)` the instant `wait` returns is a race — the tail came back empty about one
+  run in twenty in this crate's tests. `ffprobe::settled_stderr` works around it with a bounded
+  1 ms poll on the failure path only. Every other consumer of `proc` has the same race; an additive
+  `Child::wait_drained()` that awaits the drain's `JoinHandle` would fix it once.
+- **JSON escaping in a community `[[hook]]` applies to *string* tokens only.** DESIGN §13.4 says a
+  placeholder in a `body`/header "is JSON-escaped when the body parses as JSON"; taken literally that
+  breaks `{"count": {count}, "titles": {titles_json}}`, because `{count}` is a number and the two
+  `*_json` tokens are JSON arrays. `ManifestHook` escapes the string-valued context fields and
+  leaves the structural ones alone (`manifest_hook::ManifestHook::value_ctx`), which is what makes
+  the DESIGN §13.4 example bodies valid JSON. Whether the body is JSON is decided from the
+  *template*, once, at construction — never from a rendered value, so a title with a quote in it
+  cannot change how the next body is escaped.
+- **A phase-only progress frame would reset the aggregator's monotonic `percent` floor (WP-13).**
+  `Normalizer::apply` resets on a `source_tag` change and `ProgressCell::apply` overwrites the byte
+  counters from every frame, so a naive `{phase, phase_percent}`-only frame would drop a 99.9 %
+  item to 0 % for the whole re-encode. `audio_sync` therefore publishes a constant non-zero
+  `source_tag` (`audio_sync::SOURCE_TAG`) and repeats the finished byte counts. If WP-13 would
+  rather special-case a frame that carries only `phase`/`phase_percent`, `audio_sync::frame` is the
+  one place to simplify.
+- **`healthz` component keys are exactly the hook ids** (DESIGN §16.3): `audio_sync`, `nfo`,
+  `jellyfin`, and `hook:<dir>/<id>` per community hook. `HookDispatcher::health()` /
+  `HooksHealthHandle::health()` return them ready-made — `HooksHealth::apply(&HealthRegistry)`
+  publishes every one, and `HooksHealth::events_dropped` is what WP-14's
+  `components.events.dropped.hooks` should carry. Detail fields follow one rule: `runs_total` and
+  `failures_total` always; `last_success_at` / `last_error` when there is one; `pending` for a hook
+  with a debounce window; `phase` for a pre-terminal hook. That reproduces the three payloads in
+  DESIGN §16.3 exactly. Take `health_handle()` **before** `spawn` consumes the dispatcher.
+- **Suggested WP-16 wiring**:
+  `HookDispatcher::new(cfg, hook_specs, clock).with_finalizer(engine_adapter).with_cancel(shutdown_token)`,
+  then `.spawn(router.subscribe(SubscriberSpec::hooks()), sink_factory, Arc::new(EngineHookStore))`.
+  `hook_specs` is the concatenation of `PluginManifest.hooks` over the loaded plugin directory. The
+  dispatcher's `run` returns once every `EventSender` is dropped: each debounced hook flushes its
+  trailing batch first, unless the cancellation token is already cancelled (the DESIGN §16.4 grace
+  has expired), in which case the tail is dropped with a WARN.
+- **There is no config knob for the ffmpeg/ffprobe paths** (DESIGN §17.3 has none), so `audio_sync`
+  resolves both through `PATH`. `AudioSyncHook::with_tools(MediaTools { .. })` exists for the tests
+  and is where such a knob would land.
+- **The `notify`-driven plugin reload does not reach hooks yet.** The dispatcher takes its
+  `Vec<HookSpec>` once, at construction, so a `SIGHUP` or a `POST api/v2/plugins/reload` re-scan
+  updates providers but not community hooks. DESIGN §13.4 does not require live hook reload; if
+  WP-16 wants it, the shape is a `HookDispatcher` command channel, not a shared mutable hook list.
+- **`FakeClock::default()`'s doc comment in `aulos-core` says 2026-09-04, but its epoch value
+  (`1_772_582_400_000`) is 2026-03-04.** Harmless, but every snapshot stamped from it reads March;
+  this crate's NFO snapshots pass an explicit `now_ms` instead.
+- **`plugins/examples/media-server-hooks/plugin.toml` is now covered by a test.**
+  `crates/aulos-hooks/tests/community.rs::the_shipped_example_manifest_loads_into_four_hooks` loads
+  the shipped file through WP-10's real loader and asserts its four ids, the debounce values and the
+  `${PLEX_TOKEN}` interpolation, so an edit to the example that breaks it fails CI.

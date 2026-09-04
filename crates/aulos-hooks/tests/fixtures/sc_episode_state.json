@@ -1,0 +1,13 @@
+{
+  "base_url": "https://streamingcommunity.test",
+  "title_id": 9,
+  "episode_id": 77,
+  "needs_m3u8_extraction": true,
+  "season_number": 1,
+  "episode_number": 2,
+  "episode": "Il segreto di Napoli",
+  "series": "Mare Fuori",
+  "ext": "mp4",
+  "extractor": "streamingcommunity",
+  "extractor_key": "StreamingCommunity"
+}

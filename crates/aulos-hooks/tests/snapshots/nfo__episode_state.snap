@@ -1,0 +1,17 @@
+---
+source: crates/aulos-hooks/tests/nfo.rs
+expression: xml
+---
+<?xml version="1.0" ?>
+<episodedetails>
+  <title>Mare Fuori S01E02 - Il segreto di Napoli</title>
+  <originaltitle>Mare Fuori S01E02 - Il segreto di Napoli</originaltitle>
+  <showtitle>Mare Fuori</showtitle>
+  <season>1</season>
+  <episode>2</episode>
+  <subtitle>Il segreto di Napoli</subtitle>
+  <plot/>
+  <dateadded>2026-09-04 00:00:00</dateadded>
+  <uniqueid type="streamingcommunity">sc_9_77</uniqueid>
+  <website>https://sc.test/it/watch/9?e=77</website>
+</episodedetails>

@@ -217,6 +217,7 @@ dependencies = [
  "async-trait",
  "aulos-core",
  "aulos-provider",
+ "insta",
  "quick-xml",
  "reqwest",
  "rstest",

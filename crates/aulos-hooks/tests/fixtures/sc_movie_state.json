@@ -1,0 +1,13 @@
+{
+  "base_url": "https://streamingcommunity.test",
+  "title_id": 1234,
+  "episode_id": null,
+  "needs_m3u8_extraction": true,
+  "season_number": null,
+  "episode_number": null,
+  "episode": "",
+  "series": null,
+  "ext": "mp4",
+  "extractor": "streamingcommunity",
+  "extractor_key": "StreamingCommunity"
+}

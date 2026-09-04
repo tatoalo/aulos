@@ -1,0 +1,16 @@
+{
+  "id": "sc_1234",
+  "title": "Il Grande Film",
+  "url": "https://streamingcommunity.test/it/watch/1234",
+  "webpage_url": "https://streamingcommunity.test/it/watch/1234",
+  "ext": "mp4",
+  "_type": "video",
+  "extractor": "streamingcommunity",
+  "extractor_key": "StreamingCommunity",
+  "season_number": null,
+  "episode_number": null,
+  "episode": "",
+  "series": null,
+  "_sc_needs_m3u8_extraction": true,
+  "_sc_base_url": "https://streamingcommunity.test"
+}
