@@ -338,3 +338,65 @@ with your WP id.
   because that pattern opens with the lookbehind `(?<!%)`, which the `regex` crate cannot compile —
   and because the §3 row does not budget for `regex` here anyway. `Cargo.lock` is dirty in the
   working tree from another package's edits and was deliberately left out of this commit.
+
+## WP-04 — `aulos-store`: schema, writer actor, hi/lo allocators, typed reads
+
+- **No change was needed in `aulos-core` or any other crate.** Every type the store persists was
+  already there (`Item`, `SubscriptionRecord`, `ChatConfig`, `FieldUpdate`, `HiLoAllocator`), and
+  the store's DESIGN §3 dependency row was already spelled in `crates/aulos-store/Cargo.toml`. The
+  only manifest edits are inside the crate: the `hooks` feature on `rusqlite` (the batching test
+  counts transactions with SQLite's own `commit_hook` rather than a counter the code bumps itself)
+  and three dev-dependencies (`insta`, `proptest`, `url`), all already in
+  `[workspace.dependencies]`. `cargo test -p aulos-workspace-tests --test arch` passes.
+- **`WriteOp` has nineteen variants, not eighteen.** DESIGN §7.1 and PLAN WP-04 both say
+  "eighteen" while listing nineteen (`InsertItems`, `SetStatus`, `SetAutoStart`, `SetSource`,
+  `SetResolved`, `PromoteToGroup`, `SetOutput`, `SetSize`, `PushFile`, `DropEntryBlob`,
+  `BumpAttempt`, `SetClearAfter`, `DeleteItems`, `UpsertSubscription`, `MarkSeen`, `PruneSeen`,
+  `DeleteSubscriptions`, `UpsertTelegramChat`, `SetKv`). All nineteen are implemented and
+  round-tripped; `WriteOp::NAMES` is the authority and the round-trip test asserts it covers the
+  enum. Nothing downstream needs to change — just do not expect eighteen.
+- **`aulos-store` cannot name `url::Url`** (its DESIGN §3 row does not budget for `url`, and the
+  arch gate enforces that as the subset rule), so a `Url` column is rehydrated through the type's
+  own `Deserialize` impl in `json::from_sql_string`, with the target inferred from the struct
+  field. If a future package wants `url` here it must add the row to `tests/arch.rs` first.
+- **Types WP-04 had to define because no other package owns them**, all exported from
+  `aulos_store`: `BootState` + `GroupCounts` (DESIGN §8.9 names `boot_state()` but declares
+  neither), `ItemFilter` + `Page<T>` + `Cursor` + `GroupScope` (DESIGN §7.1 names them in the
+  signature only), `StoreOptions`, `IdWarning`. `BootState` deliberately does **not** bucket rows
+  by status — it hands back `non_terminal` in `(ord, id)` order plus the done window, the totals,
+  the per-group counters and `next_clear_at` — because the recovery table and the
+  `AULOS_RESTART_POLICY` switch are WP-12's, and duplicating either here would give two places to
+  change. WP-12 should read `Store::options()` for `done_window`/`entry_max_bytes` rather than
+  re-deriving them from `Config`.
+- **`impl HookStore for Store` deliberately does not exist** (DESIGN §7.1). `Store::entry_blob(id)`
+  is the read `aulos-queue::EngineHookStore` (WP-12) delegates here; `set_size` and
+  `drop_entry_blob` must become `EngineCmd::HookWrite`s and land as `WriteOp::SetSize` /
+  `WriteOp::DropEntryBlob`, both of which exist.
+- **`aulos-server` (WP-17) owns the periodic checkpoint and the `close()` call.**
+  `Store::close().await` writes `meta.seq_hwm_witness`, runs `PRAGMA optimize` and then
+  `wal_checkpoint(TRUNCATE)`, and stops both thread pools; it must be awaited on graceful shutdown
+  or the WAL survives the restart. DESIGN §7.1 also asks for a six-hourly checkpoint — there is no
+  timer inside the store (it owns no runtime), so the binary should schedule one; the simplest form
+  is a `Store::read(|c| ...)`-free tick that calls `close()`'s sibling, which is currently private.
+  **If WP-17 wants it, ask for a one-line `pub async fn checkpoint(&self)`** rather than reaching
+  into `schema`.
+- **`Store::open` is synchronous** (it is called once, before the listener binds, and does blocking
+  disk work). It is safe to call from inside a tokio runtime. It returns `Err` only for a corrupt
+  file, a failed migration or an unwritable directory — the DESIGN §4.1 boot consistency checks
+  **warn and continue** per the BRIEF (`repair-ids` is CUT), and `Store::id_warnings()` is what
+  `healthz` should surface.
+- **`Durability::Batched` really does wait for `AULOS_DB_FLUSH_MS`** (200 ms by default), exactly as
+  DESIGN §7.1 specifies. Anything on a latency-sensitive path should either use
+  `Durability::Sync` or accept up to one flush window; the wave-2 integration suites will want
+  `StoreOptions::with_flush_ms(5)`.
+- **WP-05 (importer) additions land in `src/import*` only**, plus a `mod import;` line in
+  `src/lib.rs` where the comment marks it. `StoreOptions::new(path).with_flush_ms(..)`,
+  `Durability::Sync` and `Store::read` are the seams it needs; `meta` keys `imported_from`,
+  `imported_at` and `import_report` are already documented in the DDL and readable through
+  `Store::meta()`.
+- **`Cargo.lock` was left out of this commit.** It is dirty in the shared working tree from another
+  package's in-flight dependency additions (`cookie`/`cookie_store` for `wreq`), whose
+  `Cargo.toml` change is not committed yet, so committing the lock would capture an inconsistent
+  graph. WP-04's own lock delta is three dev-dependency rows on `aulos-store`
+  (`insta`, `proptest`, `url`), all already pinned in `[workspace.dependencies]`; any `cargo`
+  invocation regenerates it.
