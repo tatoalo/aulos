@@ -526,3 +526,101 @@ with your WP id.
   skips it. Every other engine test uses the checked-in `sh` stand-ins in
   `crates/aulos-provider-sc/tests/fixtures/sc/bin/` — **those files must keep their executable
   bit**; a `git checkout` that drops mode 100755 turns the whole engine suite into `ToolMissing`.
+
+## WP-10 — `aulos-provider`: command plugins and the `[[hook]]` manifest
+
+- **The whole package lives in `crates/aulos-provider/src/command/`**, as one module with six
+  files (`manifest`, `template`, `progress`, `provider`, `hookspec`, `sha256`) rather than the
+  three top-level modules PLAN names. `aulos_provider::command::*` re-exports everything, and the
+  crate root re-exports the names other packages need (`CommandProvider`, `CommandPluginLoader`,
+  `PluginManifest`, `ManifestError`, `HookSpec`, `HookFilter`, `HookAction`, `Template`,
+  `TemplateCtx`, `Token`, `TokenScope`, `discover`, `load_manifest`). Only `crates/aulos-provider`
+  and `plugins/examples/` were touched.
+- **`HookAction::Http.method` is a local `HttpMethod` enum, not `http::Method`.** DESIGN §13.4
+  writes `Method`, but DESIGN §3's dependency row for `aulos-provider` budgets for no HTTP crate
+  and `tests/arch.rs` enforces that row as a subset rule. `HttpMethod` is
+  `{Get, Post, Put, Patch, Delete, Head}` with `as_str()`/`parse()`; **WP-11 maps it to
+  `reqwest::Method` in one line** (`Method::from_bytes(m.as_str().as_bytes())` or a six-arm match).
+- **WP-11 gets its hooks from one of two places.** `aulos_provider::command::discover(dir)` has the
+  PLAN signature and returns `(Vec<Arc<dyn Provider>>, Vec<HookSpec>, ReloadReport)`; the registry
+  path is `Registry::set_command_loader(Arc::new(CommandPluginLoader::with_env(env)))` plus
+  `Registry::reload_commands(dir)`, and after every such reload
+  `CommandPluginLoader::hooks() -> Vec<Arc<HookSpec>>` holds that scan's community hooks (and
+  `::warnings()` its clamps). Use the loader path in `aulos-server`: it is the one that carries the
+  `Degraded` **state** into the registry, which `discover`'s flat `Vec<Arc<dyn Provider>>` cannot.
+  `HookSpec` is deliberately not `Clone` (it owns parsed templates), hence the `Arc`.
+- **`HookSpec.id` is `hook:<dir>/<id>`**, `on` is `Vec<TerminalStatus>`, and `HookSpec::applies(&Item)`
+  already combines `on` with `HookFilter::matches`. `HookFilter` treats an empty axis as "matches
+  everything" and treats an item with **no provider yet** as *failing* a `when.provider` filter.
+- **`limits.file_size_bytes` is a key WP-10 added.** DESIGN §6.5.3 requires `RLIMIT_FSIZE` to be
+  applied but §6.5.1's table has no key for it, so there was nothing to apply. Default `0` (off);
+  the rest of `[limits]` is exactly the design table.
+- **`{cookies_file}` needs a `PluginEnv`.** `DownloadCtx` (DESIGN §6.1) carries no `Paths`, so
+  `STATE_DIR/cookies.txt` cannot be derived at download time. `CommandProvider::new(manifest, env)`
+  takes `PluginEnv { state_dir }` and `scan_with`/`CommandPluginLoader::with_env` thread it through;
+  **WP-17 must pass `PluginEnv { state_dir: cfg.paths.state.clone() }`** or `{cookies_file}` renders
+  empty. `PluginEnv::default()` is the empty-state-dir case, which is what `discover(dir)` uses.
+- **Three additive additions to `crates/aulos-provider/src/proc.rs`** (no signature changed, nothing
+  removed), all needed by the plugin download loop and all reusable:
+  - `Lines::next_chunk() -> Result<Option<Vec<u8>>, ProcError>` — raw chunks, because
+    `next_line()` deliberately does not treat a bare `\r` as a terminator, so a tool that repaints
+    for a minute without printing a newline delivers nothing through it (`progress.cr_as_newline`).
+  - `Child::take_stdout() -> Option<Lines<ChildStdout>>` — `stdout_lines()` borrows the whole
+    `Child`, which makes "read stdout **or** notice the exit, whichever first" unwritable.
+  - `SpawnSpec::stderr_tap(mpsc::Sender<Vec<u8>>)` — duplicates each stderr chunk into a channel
+    **in addition** to the bounded ring, for `progress.source = "stderr" | "both"` and for the
+    `max_output_bytes` budget (which counts stdout *and* stderr). The mandatory drain is untouched.
+    WP-09 may find the tap useful for `N_m3u8DL-RE`'s stderr repaints.
+  In the download loop the provider **drops its `SpawnSpec` right after `Child::spawn`**, leaving
+  the drain task holding the only tap sender; that is what makes the post-exit `tap.recv()` end at
+  end-of-stream instead of racing a task that may not have been polled yet, and therefore what
+  makes the stderr tail in `error.message` deterministic.
+- **No new crate dependency.** SHA-256 (`command::sha256`, the `media_id` default of §6.5.3),
+  percent-encoding and JSON string escaping (`command::template::{percent_encode, json_escape}`)
+  are implemented in-crate rather than pulling `sha2` / `percent-encoding`, because the §3
+  dependency row for `aulos-provider` does not list them and `tests/arch.rs` enforces it as a
+  subset rule. Both are covered by tests (NIST vectors for the digest). `wiremock` and `proptest`
+  were added as **dev**-dependencies, which the arch rule exempts.
+- **`Escape::{Percent, Json}` and `Template::render_escaped` implement DESIGN §13.4's escaping
+  rules** — a placeholder inside `http.url` is percent-encoded, one inside a body/header is
+  JSON-escaped. WP-11 should use them rather than re-deriving; the "JSON-escape only when the body
+  parses as JSON" decision is WP-11's to make per request, which is why `render_escaped` takes the
+  mode as an argument.
+- **A plugin's terminal `status_map` target is advisory and is dropped.** `status_map = { done =
+  "finished" }` parses into `StatusTarget::Terminal`, but the provider does **not** forward it to
+  the sink: the engine writes the terminal status from `download()`'s return value (DESIGN §6.2),
+  and a plugin cannot change an item's status. Only the three running stages reach `ProgressSink`.
+- **`capabilities.streaming_resolve` is parsed and its reading strategy honoured** (resolve stdout
+  is consumed line by line as the child prints it, so a 500-entry album does not buffer), but
+  `Provider::resolve` returns a `Vec<MediaEntry>`, so children cannot literally be published to the
+  engine before the child exits. Making that real needs a channel on `ResolveCtx`; WP-12 can add one
+  additively and this provider will fill it.
+- **Load-time warnings are a first-class output, not just a log line.** `PluginManifest.warnings`,
+  `Scan.warnings` and `CommandPluginLoader::warnings()` carry every clamp and every unset `${VAR}`
+  as `{key, message}`; **WP-14 should surface them next to `ReloadReport.failed` in `healthz` and
+  `GET api/v2/providers`**, because a mistyped `${PLEX_TOKEN}` otherwise produces a silent 401
+  forever. `CommandProvider::audit() -> Vec<Vec<String>>` is the unrendered argv list DESIGN §6.5.3
+  requires that endpoint to publish.
+- **`ManifestError::reason()` is the `Degraded(reason)` string** — one line, capped at 400
+  characters, prefixed with the dotted key (`download.command[2]: unknown token {out_dirr} at
+  offset 3`). `ManifestError::has_partial_match()` says whether a matcher could still be built from
+  the file: a semantic rejection becomes a `DegradedProvider` that **still claims its URLs** (via
+  `command::manifest::partial_match`), while an unreadable or syntactically broken file becomes a
+  `ReloadFailure` only. Both appear in the report either way.
+- **`plugins/examples/` ships two directories and a plugin-author guide.**
+  `plugins/examples/bandcamp/` is the DESIGN §6.5.4 manifest plus `resolve.py` / `download.py`, run
+  end to end against `wiremock` by `crates/aulos-provider/tests/plugin_example.rs` — that test is
+  the author's template and will go red if the example rots. It **skips itself with a printed note
+  when `python3` is not on `PATH`** rather than failing; the image and CI both have it.
+  `plugins/examples/media-server-hooks/plugin.toml` is the §13.4 Plex/Emby/ntfy/command file, and
+  `plugin_manifest.rs` loads it and asserts all four hooks.
+- **A `{` only starts a token when a token-shaped name and a `}` follow it.** `{"title": "{title}"}`
+  is therefore a usable JSON hook body with no escaping, while `{out_dirr}` is still a load-time
+  error; `{{`/`}}` remain available as explicit brace escapes. This is the one place the template
+  grammar is looser than a strict reading of §6.5.1, and it is what makes the §13.4 `body`
+  examples writable.
+- **`{headers_curl}` is the only token that changes the argv length**, and it does so from the
+  manifest's `[headers]` table, never from the entry — which is the invariant
+  `tests/plugin_template.rs` proves with a `proptest` over hostile titles. It expands to `-H`/`K: V`
+  pairs only when it *is* the whole argv element; embedded in a larger element it renders as a
+  shell-quoted joined string, for the `["/bin/sh","-c","curl {headers_curl} …"]` case.

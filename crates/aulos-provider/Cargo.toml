@@ -34,6 +34,10 @@ url = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 rstest = { workspace = true }
+# WP-10: the shipped `plugins/examples/bandcamp` plugin is exercised end-to-end against a local
+# HTTP stub, and the argv-injection invariant is a property test (PLAN WP-10 acceptance list).
+wiremock = { workspace = true }
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # The `fake` provider is exercised by this crate's own test suite, so the feature is on for tests.
 aulos-provider = { workspace = true, features = ["fake"] }

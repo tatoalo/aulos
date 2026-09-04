@@ -1,0 +1,75 @@
+manifest_version = 1
+name        = "Bandcamp"
+version     = "0.3.1"
+description = "Bandcamp albums and tracks"
+authors     = ["someone <someone@example.org>"]
+
+[match]
+hosts      = ["bandcamp.com"]
+host_regex = '^([a-z0-9-]+\.)?bandcamp\.com$'
+path_regex = '^/(album|track)/'
+schemes    = ["https"]
+
+[capabilities]
+resolve           = true
+playlists         = true
+streaming_resolve = true
+cancel            = "process_group"
+
+[limits]
+max_concurrent          = 2
+uses_global_slot        = true
+min_request_interval_ms = 400
+resolve_timeout_secs    = 45
+download_stall_secs     = 300
+max_output_bytes        = 33554432
+memory_bytes            = 1073741824
+
+[resolve]
+command = ["python3", "resolve.py", "{url}"]
+format  = "json_lines"
+
+[download]
+command = ["python3", "download.py",
+           "--url", "{url}", "--state", "{state}", "--quality", "{quality}",
+           "--out", "{out_path}", "--tmp", "{tmp_dir}"]
+expect_output = "result_frame"
+output_ext    = "flac"
+
+[progress]
+kind            = "regex"
+source          = "both"
+strip_ansi      = true
+cr_as_newline   = true
+last_match_wins = true
+min_interval_ms = 250
+patterns = [
+  '(?P<percent>[\d.]+)%\s+(?P<downloaded>[\d.]+\s*[KMG]i?B)\s*/\s*(?P<total>[\d.]+\s*[KMG]i?B)',
+  '(?P<speed>[\d.]+\s*[KMG]i?B)/s',
+  'ETA\s+(?P<eta>\d{1,2}:\d{2}(:\d{2})?)',
+  'stage=(?P<status>fetch|mux|done)',
+]
+units      = { downloaded = "auto", total = "auto", speed = "auto", eta = "hms" }
+status_map = { fetch = "downloading", mux = "postprocessing", done = "finished" }
+
+[env]
+pass = ["HTTPS_PROXY", "NO_PROXY"]
+set  = { PYTHONUNBUFFERED = "1", BC_TOKEN = "${BC_TOKEN}" }
+
+[headers]
+Referer = "https://bandcamp.com/"
+
+[[catalog.download_types]]
+id    = "audio"
+label = "Audio"
+  [[catalog.download_types.formats]]
+  id             = "flac"
+  label          = "FLAC (source)"
+  default_quality = "best"
+  qualities      = [{ id = "best", label = "Source" }]
+  [[catalog.download_types.formats]]
+  id             = "mp3"
+  label          = "MP3 (transcode)"
+  notice         = "Transcoded with ffmpeg; adds ~5 s per track."
+  default_quality = "320"
+  qualities      = [{ id = "320", label = "320 kbps" }, { id = "192", label = "192 kbps" }]

@@ -14,17 +14,12 @@
 //! | what a download produces | [`outcome`] |
 //! | the one channel a running job reports through | [`sink`] |
 //! | selection, `Degraded`, the circuit breaker, plugin reload | [`registry`] |
+//! | the `plugin.toml` schema, `command` providers, community `[[hook]]`s | [`command`] |
 //! | spawning, process-group kill, the mandatory stderr drain, bounded lines | [`proc`] |
 //! | the shared 1024-based size and `hms` parsers | [`humansize`] |
 //! | the scripted test provider (feature `fake`) | [`fake`] |
-//!
-//! # What is not here yet
-//!
-//! `manifest`, `command` and `hookspec` — the `plugin.toml` model, the `command` provider and the
-//! community `[[hook]]` spec of DESIGN §6.5 and §13.4 — are WP-10. This package provides the
-//! seam they plug into: [`registry::CommandLoader`], [`registry::LoadedPlugin`] and
-//! [`provider::DegradedProvider`].
 
+pub mod command;
 pub mod entry;
 #[cfg(feature = "fake")]
 pub mod fake;
@@ -41,6 +36,11 @@ pub mod sink;
 // module paths, which is what all five downstream packages actually do.
 // ---------------------------------------------------------------------------
 
+pub use command::{
+    CommandPluginLoader, CommandProvider, HookAction, HookFilter, HookSpec, HttpMethod,
+    ManifestError, PluginManifest, ProgressParser, ProgressSpec, Template, TemplateCtx,
+    TemplateError, Token, TokenScope, discover, load_manifest,
+};
 pub use entry::{EntryHints, EntryKind, LiveStatus, MediaEntry};
 pub use humansize::{format_bytes, format_hms, parse_bytes, parse_hms, parse_rate};
 pub use outcome::Outcome;

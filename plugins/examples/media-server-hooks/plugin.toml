@@ -1,0 +1,42 @@
+manifest_version = 1
+name    = "Media server refresh"
+version = "1.0.0"
+description = "Plex, Emby and ntfy notifications for finished downloads"
+
+# A hook-only manifest: no [match], no [download]. This is the normal shape for an integration
+# that only wants to be told when something finished (DESIGN §13.4).
+
+# Plex: exactly the GET the BRIEF names.
+[[hook]]
+id          = "plex"
+on          = ["finished"]
+debounce_ms = 30000
+max_wait_ms = 300000
+http = { method = "GET",
+         url = "http://plex:32400/library/sections/3/refresh?X-Plex-Token=${PLEX_TOKEN}" }
+
+# Emby.
+[[hook]]
+id          = "emby"
+on          = ["finished"]
+debounce_ms = 30000
+http = { method = "POST",
+         url = "http://emby:8096/Library/Refresh",
+         headers = { "X-Emby-Token" = "${EMBY_TOKEN}", Accept = "application/json" } }
+
+# ntfy: one push per outcome, no debounce.
+[[hook]]
+id = "ntfy"
+on = ["finished", "error"]
+http = { method = "POST",
+         url = "https://ntfy.sh/my-aulos-topic",
+         headers = { Title = "Aulos: {status}", Priority = "default" },
+         body = "{title}\n{filename}{error_message}" }
+
+# A local script, for anything the two shapes above cannot express.
+[[hook]]
+id       = "post-process"
+on       = ["finished"]
+when     = { download_type = ["video"], folder_prefix = ["Series/"] }
+command  = ["/config/scripts/organise.sh", "{filename}", "{folder}", "{title}"]
+timeout_ms = 60000

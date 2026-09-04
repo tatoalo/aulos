@@ -34,6 +34,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child as TokioChild, ChildStdin, ChildStdout, Command};
+use tokio::sync::mpsc;
 
 use crate::provider::ProviderError;
 
@@ -194,6 +195,7 @@ pub struct SpawnSpec {
     ring_bytes: usize,
     max_line_bytes: usize,
     kill_grace: Duration,
+    stderr_tap: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 impl SpawnSpec {
@@ -219,6 +221,7 @@ impl SpawnSpec {
             ring_bytes: STDERR_RING_BYTES,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             kill_grace: DEFAULT_KILL_GRACE,
+            stderr_tap: None,
         }
     }
 
@@ -301,6 +304,23 @@ impl SpawnSpec {
     #[must_use]
     pub const fn kill_grace(mut self, grace: Duration) -> Self {
         self.kill_grace = grace;
+        self
+    }
+
+    /// Duplicates every chunk the child writes to stderr into `tx`, **in addition** to the
+    /// bounded ring.
+    ///
+    /// Added for the `command` plugin, whose `progress.source = "stderr" | "both"` has to parse
+    /// stderr rather than merely keep its tail (DESIGN §6.5.1), and whose `max_output_bytes`
+    /// budget counts stdout **and** stderr (DESIGN §6.5.1). The ring is unaffected, so the
+    /// mandatory drain and the error tail keep working exactly as before.
+    ///
+    /// Delivery is `try_send`: a full channel drops the chunk rather than blocking the drain,
+    /// because a blocked drain is the deadlock this module exists to prevent. Progress is lossy
+    /// by design; size the channel so the budget stays approximately honest.
+    #[must_use]
+    pub fn stderr_tap(mut self, tx: mpsc::Sender<Vec<u8>>) -> Self {
+        self.stderr_tap = Some(tx);
         self
     }
 
@@ -579,6 +599,37 @@ impl<R: AsyncRead + Unpin> Lines<R> {
         }
     }
 
+    /// The next chunk of bytes, exactly as the pipe delivered it, or `None` at end of stream.
+    ///
+    /// Added for the `command` plugin progress grammar (DESIGN §6.5.1), which needs to see a bare
+    /// `\r` repaint frame: [`Self::next_line`] deliberately does **not** treat a lone `\r` as a
+    /// terminator, so a tool that repaints for a minute without printing a newline would deliver
+    /// nothing at all through it. A chunk reader has no such blind spot, and
+    /// [`crate::command::ProgressParser`] does its own framing.
+    ///
+    /// Mixing this with [`Self::next_line`] on the same stream is legal but pointless — one call
+    /// consumes what the other would have framed.
+    ///
+    /// # Errors
+    /// [`ProcError::Io`] on a read failure.
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ProcError> {
+        let available = self
+            .reader
+            .fill_buf()
+            .await
+            .map_err(|source| ProcError::Io {
+                tool: self.tool,
+                source,
+            })?;
+        if available.is_empty() {
+            return Ok(None);
+        }
+        let n = available.len();
+        let owned = available.to_vec();
+        self.reader.consume(n);
+        Ok(Some(owned))
+    }
+
     /// The next line, or `None` at end of stream.
     ///
     /// Invalid UTF-8 is replaced rather than rejected: a truncated multi-byte character in a
@@ -701,6 +752,7 @@ impl Child {
         if let Some(pipe) = child.stderr.take() {
             let ring = stderr.clone();
             let tool = spec.tool;
+            let tap = spec.stderr_tap.clone();
             // The mandatory drain (DESIGN §2.3). It ends when the pipe closes, i.e. when the child
             // exits, so it cannot outlive the job.
             let cap = spec.ring_bytes.max(4096);
@@ -725,6 +777,9 @@ impl Child {
                             break;
                         }
                     };
+                    if let Some(tap) = &tap {
+                        let _ = tap.try_send(chunk.clone());
+                    }
                     for b in chunk {
                         if b == b'\n' || line.len() >= cap {
                             ring.push(&String::from_utf8_lossy(&line));
@@ -775,6 +830,16 @@ impl Child {
     /// The child's stdout line reader, if stdout was piped.
     pub fn stdout_lines(&mut self) -> Option<&mut Lines<ChildStdout>> {
         self.stdout.as_mut()
+    }
+
+    /// Takes the stdout reader out, so it can be polled in the same `select!` as [`Self::wait`].
+    ///
+    /// [`Self::stdout_lines`] borrows the whole [`Child`], which makes "read stdout **or** notice
+    /// the child exited, whichever happens first" unwritable. The `command` provider needs exactly
+    /// that: a plugin's stall watchdog, its cancellation token, its output budget and its exit all
+    /// race in one loop (DESIGN §6.5.3). Taking the reader out is the only borrow-safe shape.
+    pub fn take_stdout(&mut self) -> Option<Lines<ChildStdout>> {
+        self.stdout.take()
     }
 
     /// A handle on the captured stderr. Cheap to clone and safe to read while the child runs.
