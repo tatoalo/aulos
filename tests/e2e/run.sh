@@ -7,12 +7,14 @@
 #   1. `healthz` is green, `pot` included -- the sidecar is supervised, which legacy could not see
 #   2. `POST api/v2/downloads` for a small CC video answers 202 before any extraction
 #   3. the WebSocket carries `added -> delta -> completed` for that id
-#   4. the produced file is in the volume, and `GET download/<name>` honours `Range`
+#   4. the produced file is in the volume with the entrypoint's PUID/PGID/UMASK applied, and
+#      `GET download/<name>` honours `Range`
 #   5. the v1 shim's `POST add` works and `GET history` has all three keys
 #   6. `socket.io` answers 501 rather than pretending
 #   7. a restart mid-download resumes rather than stranding the item
 #   8. `docker logs` contains no ERROR
-#   9. a second profile seeds a legacy STATE_DIR and asserts the import report has zero errors
+#   9. a second profile seeds a legacy STATE_DIR and asserts the import report has zero errors,
+#      does not re-import on the next boot, and runs with CHOWN_DIRS=false and UMASK=077
 #
 # Gated on AULOS_E2E=1 so a plain `cargo test` / `./run.sh` never reaches for the network.
 #
@@ -247,6 +249,14 @@ if docker exec "$NAME" test -f "/downloads/${filename}"; then
   owner="$(docker exec "$NAME" stat -c '%u:%g' "/downloads/${filename}")"
   ok "the file is in the volume, owned by ${owner}"
   [ "$owner" = "1000:1000" ] || fail "PUID/PGID were not applied (owner=$owner)"
+  # The entrypoint's `umask ${UMASK}` is inherited all the way down to yt-dlp, so the produced
+  # file's mode is the only place the knob is observable. It cannot be read back with
+  # `docker exec … umask`: `exec` does not go through the entrypoint, so that reports the daemon's
+  # own 0022 whatever UMASK is set to. Profile B asserts the other direction (UMASK=077 → 600).
+  mode="$(docker exec "$NAME" stat -c '%a' "/downloads/${filename}")"
+  [ "$mode" = "644" ] \
+    && ok "UMASK=022 reached the download (mode $mode)" \
+    || fail "UMASK=022 should make the file 644, got $mode"
 else
   docker exec "$NAME" ls -la /downloads || true
   fail "the file is not in the volume"
@@ -337,12 +347,27 @@ printf '%s' "$msg" | grep -qi 'shutdown\|restart' \
 # --- 8. no ERROR in the log --------------------------------------------------------------------
 
 log "docker logs"
-if docker logs "$NAME" 2>&1 | grep -E '(^| )ERROR( |:)' | grep -v 'bgutil_pot' > /tmp/aulos-e2e-err.$$; then
-  cat /tmp/aulos-e2e-err.$$
-  rm -f /tmp/aulos-e2e-err.$$
+# The assertion is "the SERVER logged nothing at level ERROR", so the pattern anchors on the
+# `tracing` level *field* rather than on the word appearing anywhere in a line.
+#
+#   text (`.compact()`, the default): `2026-09-04T20:56:07.681341Z  ERROR target: message`
+#   json (`LOG_FORMAT=json`):         `{…,"level":"ERROR",…}`
+#
+# Matching the word anywhere instead flags a *child's* output: `aulos-server` forwards the yt-dlp
+# shim's and `bgutil-pot`'s stderr into `tracing` at WARN/INFO, keeping each line's own text, and
+# on the shutdown of section 7 the shim writes `ERROR: ytdlp_runner protocol channel failed:
+# [Errno 32] Broken pipe` — the parent closing the pipe it was killed through, i.e. the shutdown
+# working. That line arrives as `… WARN ytdlp.child: ERROR: …`, so the level anchor skips it while
+# still catching every genuine server error, `bgutil-pot`'s terminal `failed` state included (which
+# is why this no longer excludes the `bgutil_pot` target the way a word match had to).
+errs=/tmp/aulos-e2e-err.$$
+if docker logs "$NAME" 2>&1 \
+    | grep -E '^[0-9][0-9T:.-]*Z +ERROR |"level" *: *"ERROR"' > "$errs"; then
+  cat "$errs"
+  rm -f "$errs"
   fail "the log contains ERROR lines"
 else
-  rm -f /tmp/aulos-e2e-err.$$
+  rm -f "$errs"
   ok "no ERROR lines"
 fi
 
@@ -365,7 +390,7 @@ ok "seeded $(ls "${SEED}/.metube" | tr '\n' ' ')"
 docker run -d --name "$NAME" \
   -p "127.0.0.1:${PORT}:8081" \
   -v "${SEED}:/downloads" \
-  -e PUID="$(id -u)" -e PGID="$(id -g)" -e CHOWN_DIRS=false \
+  -e PUID="$(id -u)" -e PGID="$(id -g)" -e CHOWN_DIRS=false -e UMASK=077 \
   -e AULOS_E2E=1 -e TELEGRAM_BOT_ENABLED=false \
   "$IMAGE" >/dev/null || die "docker run (profile B) failed"
 
@@ -402,6 +427,14 @@ done
 [ -f "${SEED}/.metube/.aulos-imported" ] \
   && ok "the marker file was written" \
   || fail "no .aulos-imported marker"
+
+# The other end of the UMASK knob, on a file the server itself creates: this profile runs with
+# `UMASK=077`, so the database SQLite opens must be 600 rather than profile A's 644. Together the
+# two prove the entrypoint's `umask` is what the server inherits, not a coincidence of the default.
+db_mode="$(docker exec "$NAME" stat -c '%a' /downloads/.metube/aulos.db 2>/dev/null || echo '')"
+[ "$db_mode" = "600" ] \
+  && ok "UMASK=077 reached the database (mode $db_mode)" \
+  || fail "UMASK=077 should make aulos.db 600, got ${db_mode:-<unreadable>}"
 
 # A second start must not import again: that is what stops it resurrecting deleted rows.
 docker restart -t 25 "$NAME" >/dev/null || die "profile B restart failed"

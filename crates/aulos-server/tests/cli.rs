@@ -70,6 +70,9 @@ fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("PYTHONPATH", pystub())
+        // The image sets it too. Without it two concurrent boots both compile the stub package
+        // into a shared `__pycache__`, which is wasted work in a test that runs the shim once.
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("HOST", "127.0.0.1")
         .env("PORT", "0")
         .env("DOWNLOAD_DIR", work.join("downloads"))
@@ -83,18 +86,42 @@ fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
         .spawn()
         .unwrap_or_else(|e| panic!("spawning aulos-server failed: {e}"));
 
+    // stderr is drained on a thread rather than left in the pipe: the boot log is well over a
+    // page, and a full pipe would block the child *before* it announced itself — the read below
+    // would then hang forever instead of failing. Draining it also means the log is available to
+    // put in the panic message, which is the only way a boot failure here is diagnosable.
+    let errors = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(err) = child.stderr.take() {
+        let sink = std::sync::Arc::clone(&errors);
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                if let Ok(mut buf) = sink.lock() {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            }
+        });
+    }
+    let log = || {
+        errors
+            .lock()
+            .map(|buf| buf.clone())
+            .unwrap_or_else(|_| "<stderr unavailable>".to_owned())
+    };
+
     let mut line = String::new();
     let stdout = child.stdout.take();
     match stdout {
         Some(out) => {
             let read = BufReader::new(out).read_line(&mut line);
-            assert!(read.is_ok(), "reading the announce line failed");
+            assert!(read.is_ok(), "reading the announce line failed: {}", log());
         }
         None => panic!("stdout was not piped"),
     }
     assert!(
         line.starts_with("aulos-server ") && line.contains("listening on 127.0.0.1:"),
-        "unexpected announce line: {line:?}"
+        "unexpected announce line: {line:?}; stderr was:\n{}",
+        log()
     );
     assert!(
         line.contains("(v1 shim: on)"),
@@ -134,6 +161,7 @@ fn the_announce_line_comes_after_the_database_is_open() {
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("PYTHONPATH", pystub())
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("HOST", "127.0.0.1")
         .env("PORT", "0")
         .env("DOWNLOAD_DIR", work.join("downloads"))

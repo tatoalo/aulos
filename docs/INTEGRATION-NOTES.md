@@ -1919,6 +1919,15 @@ Recorded because each is the kind of thing an integration pass would otherwise r
 
 ### Things the integrator (or the owning crate) should act on
 
+- **`aulos-provider-ytdlp`: the shim logs at ERROR when the parent kills it.** Confirmed in the
+  container: 0.1 s after `wiring` reports `the shutdown grace expired with downloads still running;
+  killing them active=1`, the Python shim writes `ERROR: ytdlp_runner protocol channel failed:
+  [Errno 32] Broken pipe` on the way out. The parent closing the pipe it is killing the child
+  through is not the child's error, and the pgid kill is DESIGN §16.4 step 6 doing exactly its job,
+  so a **`DEBUG`** (or a `BrokenPipeError` arm that exits quietly) is the honest level. Harmless as
+  it stands — `aulos-server` forwards it at WARN, and the e2e's ERROR sweep now anchors on the
+  `tracing` level field rather than the message text — but it reads as a failure in a log a user
+  is looking at after a restart, which is the one moment they *are* looking.
 - **`aulos-queue`: `Engine::run` cannot terminate.** `Engine` keeps a clone of its **own**
   `EngineCmd` sender (`Engine::tx`, handed to every job task), so `rx.recv()` never returns `None`
   however many `EngineHandle`s the process drops. Combined with the fact that the aggregator, the
@@ -2068,20 +2077,22 @@ the third option was sixty lines of framing. The script opens the socket **befor
 (`--match` latches the item id off the first `added` frame), because a socket that connects
 afterwards is correctly handed a `snapshot` and the acceptance list asks for a literal `added`.
 
-**`docker build` could not be run on this machine.** The OrbStack VM's docker data root is 41.8 GB
-and was 88–99 % full before this package started; the Rust release build (cargo-chef + a vendored
-BoringSSL for `wreq`) exhausted it three times, the third time leaving
-`/var/lib/docker` **remounted read-only** (`write /var/lib/docker/buildkit/metadata_v2.db:
-read-only file system`), after which `docker run` fails too. Only the regenerable build cache and
-*dangling* images were pruned (≈4 GB reclaimed); the user's 22 stopped containers, 21 tagged images
-and 32 volumes were left alone, and OrbStack was not restarted. **So the script has not been run
-against a real image, and the integrator must run it.** The host volume is at 96 % (18 GiB free),
-so the VM needs headroom before it will build.
+**The image now builds and the script now passes.** `docker build -f docker/Dockerfile -t
+aulos-server:dev .` produced a 796 MB `linux/arm64` image (native on this Mac; CI builds
+`linux/amd64` per BRIEF §16), and `AULOS_E2E=1 tests/e2e/run.sh` ends in `END-TO-END: PASS` —
+every assertion in both profiles, against the real container and the real CC-BY video.
 
-What *was* verified instead, and it is most of the script's surface: the **real** `aulos-server`
-binary on the host, with the pinned nightly `yt-dlp==2026.8.30.232658.dev0` in a throwaway `uv`
-venv, against the **real** CC-BY video (`https://www.youtube.com/watch?v=aqz-KE-bpKQ`) over the
-real network — YouTube is reachable from here (HTTP 200):
+The earlier pass could not get there: the OrbStack VM's docker data root had been filled to
+read-only (`write /var/lib/docker/buildkit/metadata_v2.db: read-only file system`) by three
+exhausted release builds. Restarting OrbStack (`orbctl stop && orbctl start`) remounted it
+read-write with 53.6 GB free, which is all it needed — no further pruning, and the user's stopped
+containers, tagged images and volumes were left alone. **If a future pass hits the same
+read-only failure, restart OrbStack rather than pruning.**
+
+What the previous pass verified against the host binary is kept below, because it is still the
+finer-grained record — the **real** `aulos-server` binary, with the pinned nightly
+`yt-dlp==2026.8.30.232658.dev0` in a throwaway `uv` venv, against the **real** CC-BY video
+(`https://www.youtube.com/watch?v=aqz-KE-bpKQ`) over the real network:
 
 | Assertion | Result |
 |---|---|
@@ -2106,8 +2117,53 @@ Writing profile B by hand is what caught the second real bug in this harness: th
 plausible-looking seed would have tested the importer's *error* path and passed for the wrong
 reason. It now copies `crates/aulos-store/tests/fixtures/state/v2/` verbatim.
 
-Unverified, and only a container can verify them: the image build itself, the entrypoint's
-`PUID`/`PGID`/`UMASK`/`CHOWN_DIRS`, the `HEALTHCHECK` wiring, `bgutil-pot` being supervised for
-real (the supervisor's own logic is covered by `pot.rs`'s tests, including the force-restart, the
-`failed` budget, the pgid isolation and the shutdown), `docker restart`, and the `docker logs`
-ERROR sweep.
+#### The container-only assertions, now run
+
+These are the ones the previous pass had to leave unverified, with what the real container said:
+
+| Assertion | Result |
+|---|---|
+| the image builds | ✅ 796 MB, `linux/arm64`, cargo-chef dependency layer cached |
+| `doctor` inside the image | ✅ every required *and* optional tool present: python3 3.13.5, `yt-dlp` 2026.08.30.232658, all three `getpot_bgutil` plugins, ffmpeg/ffprobe 7.1.5, `N_m3u8DL-RE` 0.5.1, deno 2.9.6, `bgutil-pot` 0.8.1 |
+| the `HEALTHCHECK` wiring | ✅ `docker inspect` reports `healthy`, i.e. the `healthcheck` subcommand ran under the image's own `CMD [… "healthcheck"]` |
+| `bgutil-pot` supervised for real | ✅ `components.pot` → `{"status":"ok","pid":43,"endpoint":"http://127.0.0.1:4416","last_probe_ok":true,"restarts":0}`, and `bgutil-pot stopped for shutdown` on `SIGTERM` |
+| the healthz roll-up in a fully-provisioned container | ✅ `ok`, with only `jellyfin` and `telegram` `disabled`; `degraded` for the first ~15 s while `pot`'s first probe is outstanding, which is why the script accepts either |
+| entrypoint `PUID`/`PGID` | ✅ the downloaded file is `1000:1000` |
+| entrypoint `UMASK` | ✅ **both directions**: profile A (`UMASK=022`) → the download is `644`; profile B (`UMASK=077`) → the `aulos.db` SQLite creates is `600` |
+| entrypoint `CHOWN_DIRS=false` | ✅ profile B runs as the host uid over a bind mount and does not chown it |
+| `docker restart` mid-download | ✅ resumed with `msg = "Interrupted by shutdown"`, never `canceled` |
+| the `docker logs` ERROR sweep | ✅ zero server-level `ERROR` lines across both profiles; the only WARNs are the two shutdown ones |
+| profile B's re-import guard, in the image | ✅ `imported_at` unchanged across a `docker restart` |
+
+Two things the container taught the script itself, both now fixed in `run.sh`:
+
+- **The ERROR sweep was matching a child's message text.** `aulos-server` forwards the yt-dlp
+  shim's stderr into `tracing` at WARN, keeping each line verbatim, and the kill in DESIGN §16.4
+  step 6 makes the shim log `ERROR: ytdlp_runner protocol channel failed: [Errno 32] Broken pipe` —
+  0.1 s after `the shutdown grace expired … killing them`, i.e. the shutdown working. `grep -E '(^|
+  )ERROR( |:)'` flagged that `… WARN ytdlp.child: ERROR: …` line and failed the run. The pattern
+  now anchors on the `tracing` **level field** (`^<ts>Z +ERROR ` or `"level":"ERROR"`), which also
+  let the blanket `grep -v bgutil_pot` exclusion go — so `bgutil-pot`'s terminal `failed` state
+  (logged at ERROR from `pot::enter_failed`) now fails the e2e as it should, where the word match
+  had been hiding it.
+- **`UMASK` is not readable with `docker exec … umask`**: `exec` does not go through the
+  entrypoint, so it reports the daemon's own `0022` whatever `UMASK` is set to. The assertions go
+  through a file the server created instead, which is the only place the inherited umask shows.
+
+#### `tests/cli.rs`: one flake, and why it was undiagnosable
+
+`explicit_serve_runs_serve` failed once, during a run that shared the machine with a 16-core
+`docker build`, with `unexpected announce line: ""` — an EOF on the child's stdout, i.e. the boot
+had failed and exited. It did not reproduce in twelve subsequent runs, three of them under a
+deliberate `yes`-per-core load, so the trigger is not pinned down. What *is* fixed is that the next
+occurrence will say why:
+
+- **stderr is now drained on a thread and quoted in the panic message.** It had been
+  `Stdio::piped()` with no reader, which threw the entire boot log away — the one thing that would
+  have named the failure — and was a hang waiting to happen besides: the boot log is well over a
+  pipe buffer, and a full pipe blocks the child *before* it announces itself, at which point the
+  `read_line` on stdout waits forever instead of failing.
+- **`PYTHONDONTWRITEBYTECODE=1`**, as the image sets, so two concurrent boots do not both compile
+  the `pystub` package into a shared `__pycache__` (CPython's write is atomic, so this was wasted
+  work rather than the race it looked like — but the test runs the shim once and has no use for a
+  cache it leaves behind in a checked-in fixture directory).
