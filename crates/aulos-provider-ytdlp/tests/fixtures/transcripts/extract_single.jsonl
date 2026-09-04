@@ -1,0 +1,6 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.8.30.232658.dev0","python":"3.13.2","pid":4821,"plugins":["bgutil_ytdlp_pot_provider"],"pot":{"available":true,"url":"http://127.0.0.1:4416"}}
+{"v":1,"t":"resolved","n":2,"ts":1772668802.0,"root":{"type":"video","id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","webpage_url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","extractor":"youtube"}}
+{"v":1,"t":"entry","n":3,"ts":1772668803.0,"index":1,"note":null,"entry":{"_type":"video","id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","webpage_url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","ext":"mp4","duration":212.0,"live_status":"not_live","uploader":"Rick Astley","thumbnail":"https://i.ytimg.com/x.jpg","filesize_approx":58720256}}
+{"v":1,"t":"info","n":4,"ts":1772668804.0,"entry":{"id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","formats":[{"format_id":"616"}]}}
+{"v":1,"t":"result","n":5,"ts":1772668805.0,"ok":true,"count":1,"truncated":false}
+{"v":1,"t":"bye","n":6,"ts":1772668806.0,"elapsed_ms":12700,"frames":6,"peak_rss_kb":91240}

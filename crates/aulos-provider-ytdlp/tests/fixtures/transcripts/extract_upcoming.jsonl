@@ -1,0 +1,5 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.8.30.232658.dev0","python":"3.13.2","pid":4821,"plugins":["bgutil_ytdlp_pot_provider"],"pot":{"available":true,"url":"http://127.0.0.1:4416"}}
+{"v":1,"t":"resolved","n":2,"ts":1772668802.0,"root":{"type":"video","id":"soon","title":"Premiere","webpage_url":"https://www.youtube.com/watch?v=soon","extractor":"youtube"}}
+{"v":1,"t":"entry","n":3,"ts":1772668803.0,"index":1,"note":"Live stream is scheduled to start at 2026-09-05 20:00:00 +0000","entry":{"_type":"video","id":"soon","title":"Premiere","webpage_url":"https://www.youtube.com/watch?v=soon","live_status":"is_upcoming","release_timestamp":1788700800}}
+{"v":1,"t":"result","n":4,"ts":1772668804.0,"ok":true,"count":1,"truncated":false}
+{"v":1,"t":"bye","n":5,"ts":1772668805.0,"elapsed_ms":12700,"frames":5,"peak_rss_kb":91240}

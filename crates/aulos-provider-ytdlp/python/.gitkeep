@@ -1,3 +1,0 @@
-WP-07 owns `ytdlp_runner.py` here (DESIGN §9). The directory exists from WP-01 so
-`docker/Dockerfile`'s `COPY crates/aulos-provider-ytdlp/python/ /app/python/` resolves before the
-shim lands.

@@ -624,3 +624,78 @@ with your WP id.
   `tests/plugin_template.rs` proves with a `proptest` over hostile titles. It expands to `-H`/`K: V`
   pairs only when it *is* the whole argv element; embedded in a larger element it renders as a
   shell-quoted joined string, for the `["/bin/sh","-c","curl {headers_curl} …"]` case.
+
+## WP-07 — `aulos-provider-ytdlp`: the Python shim and its Rust client
+
+- **`ProviderError::Unsupported`'s `Display` prefixes its message.** It is
+  `#[error("unsupported url: {0}")]` while every other message-bearing variant is `#[error("{0}")]`,
+  so `ProviderError::message()` returns `"unsupported url: Invalid/empty data was given."`.
+  DESIGN §8.4 and §11.7 require the string `Invalid/empty data was given.` **byte-identical** on the
+  wire (the v1 shim echoes it as `{"status":"error","msg":…}`, and the iOS build matches on it), and
+  the same applies to the verbatim `Unsupported resource "<etype>"`. Either
+  `aulos-provider`'s variant should become `#[error("{0}")]` — a one-line, behaviour-only change in
+  a file WP-07 does not own — or the engine must special-case `ErrorCode::UnsupportedUrl` when it
+  builds the `WireError`. The runner already produces the exact text
+  (`aulos_provider_ytdlp::runner::EMPTY_DATA`); only the `Display` impl adds the prefix.
+  `tests/replay.rs::an_extraction_that_yielded_nothing_uses_the_verbatim_legacy_message` asserts
+  `contains` rather than `==` and points here.
+- **Per-line child-stderr logging is deferred to the end of the job.** DESIGN §9.1 asks for stderr
+  lines to reach `tracing` at DEBUG (WARN for `^(ERROR|WARNING)`) with `target = "ytdlp.child"` *as
+  they arrive*. `aulos_provider::proc::Child` owns the (mandatory, deadlock-avoiding) stderr drain
+  and exposes a bounded `StderrRing` rather than a line stream, so `runner::drain_stderr` does the
+  classification once when the job ends. Same information, later. An additive
+  `SpawnSpec::stderr_line_hook(Box<dyn Fn(&str)>)` in `aulos-provider` would restore the real-time
+  behaviour for every provider at once; nothing depends on it today.
+- **`RunnerOutcome` has a fourth variant, `Selftest(ShimIdentity)`.** The PLAN interface lists
+  three. `Provider::probe` runs `mode = selftest` and needs the `hello` payload (yt-dlp version,
+  interpreter version, plugin list, POT availability), which `healthz.components.ytdlp_runner` and
+  `GET <p>version` also read. Adding a variant keeps `run_job`'s signature exactly as DESIGN §9.7
+  writes it. `RunnerHandle::identity()` is the accessor WP-14/WP-16 want; it is shared across
+  clones of a handle.
+- **`Provider::resolve` and `Provider::probe` get no `ProgressSink` from the trait**, but the runner
+  needs one to forward `log` frames. `YtdlpProvider::detached_sink()` builds one over a channel
+  whose receiver is dropped immediately — `ProgressSink` documents a closed channel as a no-op. If
+  WP-12 wants resolution logs on an item's event stream, `ResolveCtx` needs a sink field (additive).
+- **`Job::download_root` is not serialised and must be set by the caller.** `Outcome::filename` is
+  documented as relative to *the item's download root* (`DOWNLOAD_DIR` or `AUDIO_DOWNLOAD_DIR`), not
+  to `DownloadCtx::out_dir`, because `download_url = PUBLIC_HOST_URL + filename`.
+  `YtdlpProvider::download` sets it from `cfg.paths.root_for(download_type)`; a caller driving
+  `RunnerHandle` directly must do the same or the produced path degrades to a basename.
+- **Partial-file cleanup happens in this crate, for this provider only.** On cancel, timeout or any
+  contract violation the runner removes every `.part`/`.ytdl` it saw in a `progress` frame, bounded
+  to the job's own `download_dir` / `temp_dir` / download root. WP-12's `_post_download_cleanup`
+  port (Δ C18: tmp dir, SC segment dir) is still needed for the paths a provider never reports.
+- **`bot_check` is classified before `auth_required`**, one row earlier than the DESIGN §9.6 table
+  lists it. The canonical YouTube string `Sign in to confirm you're not a bot` matches both regexes;
+  `auth_required` would tell the user to upload cookies when the real signal is "the POT sidecar is
+  not working". The specific pattern wins over the generic one — worth reflecting in §9.6 if the
+  table is ever re-ordered.
+- **The stderr tail quoted inside an error *message* is the last ~360 characters, not the whole
+  8 KiB.** `ProviderError::message()` caps at 512 characters and truncates from the front, so
+  quoting the whole tail would fill the message with the oldest, least useful noise. The full
+  retained tail still reaches the logs.
+- **The shim gained two job fields DESIGN §9.2 does not list**, both optional and both defaulting to
+  the old behaviour: `policy.hard_timeout_ms` arms a `SIGALRM` watchdog inside the shim (so a wedged
+  job produces a clean `error{code:"timeout"}` transcript instead of an undiagnosed `SIGKILL` — this
+  is what §9.6's "the shim's own watchdog" row refers to), and `policy.pot_url` is echoed back in
+  `hello.pot.url` so `healthz` can report which endpoint the POT plugin will use.
+- **`RunnerHandle::with_env_var` exists for the test suite**, which points `PYTHONPATH` at
+  `tests/fixtures/pystub`. Production sets only `PYTHONUNBUFFERED` and `PYTHONDONTWRITEBYTECODE`;
+  the shim's environment is otherwise inherited, because `YTDL_*`, the proxy variables and the POT
+  plugin's own settings are part of its contract.
+- **`command-fds` needs its `tokio` feature.** `crates/aulos-provider-ytdlp/Cargo.toml` enables it
+  (`features = ["tokio"]`) so `CommandFdExt` applies to `tokio::process::Command`; the root
+  `[workspace.dependencies]` entry is untouched. The crate's `tokio` features also gained `net`
+  (for `tokio::net::unix::pipe::Receiver`, the async reader for fd 3) and `fs` (for
+  `RunnerHandle::replay`).
+- **The image must ship the shim at `/app/python/ytdlp_runner.py`.** `docker/Dockerfile` already
+  copies it there and `runner::DEFAULT_RUNNER_PATH` matches; `YtdlpProvider::new(cfg, python,
+  runner)` takes both paths so the binary can override them.
+- **CI needs no change.** The `python` job of `.github/workflows/ci.yml` already runs `ruff check` +
+  `py_compile` on `python/ytdlp_runner.py` and then `tests/shim_contract.py`; both files now exist,
+  so the two "skipping" notices go away. `shim_cli.rs` also runs `shim_contract.py` from
+  `cargo test`, so the two cannot drift.
+- **The optional real-yt-dlp smoke is `tests/real_ytdlp.rs`** and skips itself unless the chosen
+  interpreter can `import yt_dlp` *and* `ffmpeg` is on `PATH`. Run it with
+  `AULOS_TEST_PYTHON=<venv>/bin/python cargo test -p aulos-provider-ytdlp --test real_ytdlp`; it
+  generates a one-second clip with ffmpeg and extracts and downloads it over `file://`.

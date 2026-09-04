@@ -1,0 +1,11 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.8.30.232658.dev0","python":"3.13.2","pid":4821,"plugins":["bgutil_ytdlp_pot_provider"],"pot":{"available":true,"url":"http://127.0.0.1:4416"}}
+{"v":1,"t":"progress","n":2,"ts":1772668802.0,"status":"finished","filename":"/downloads/S01E02.mkv","downloaded_bytes":1000,"total_bytes":1000,"elapsed":1.0,"stream":"video"}
+{"v":1,"t":"pp","n":3,"ts":1772668803.0,"postprocessor":"SplitChapters","status":"started","filepath":"/downloads/S01E02.mkv"}
+{"v":1,"t":"artifact","n":4,"ts":1772668804.0,"role":"chapter","path":"/downloads/S01E02 - 01 - Intro.mkv","size":11,"language":null,"label":"Intro"}
+{"v":1,"t":"pp","n":5,"ts":1772668805.0,"postprocessor":"SplitChapters","status":"finished","filepath":"/downloads/S01E02.mkv","finaldir":null,"subtitles":[],"chapters":[{"path":"/downloads/S01E02 - 01 - Intro.mkv","size":11,"language":null,"label":"Intro"},{"path":"/downloads/S01E02 - 02 - Outro.mkv","size":22,"language":null,"label":"Outro"}]}
+{"v":1,"t":"pp","n":6,"ts":1772668806.0,"postprocessor":"SplitChapters","status":"finished","filepath":"/downloads/S01E02.mkv","finaldir":null,"subtitles":[],"chapters":[{"path":"/downloads/S01E02 - 01 - Intro.mkv","size":11,"language":null,"label":"Intro"}]}
+{"v":1,"t":"phase","n":7,"ts":1772668807.0,"msg":"Converting captions"}
+{"v":1,"t":"pp","n":8,"ts":1772668808.0,"postprocessor":"MoveFiles","status":"finished","filepath":"/downloads/Show/Season 01/S01E02.mkv","finaldir":"/downloads/Show/Season 01","subtitles":[{"path":"/downloads/Show/Season 01/S01E02.en.srt","size":33,"language":"en","label":null},{"path":"/downloads/Show/Season 01/S01E02.it.srt","size":44,"language":"it","label":null}],"chapters":[]}
+{"v":1,"t":"log","n":9,"ts":1772668809.0,"level":"warning","message":"Some formats were skipped","extractor":"generic"}
+{"v":1,"t":"result","n":10,"ts":1772668810.0,"ok":true,"retcode":0,"filename":"/downloads/Show/Season 01/S01E02.mkv","size":9000,"artifacts":[{"role":"media","path":"/downloads/Show/Season 01/S01E02.mkv","size":9000}]}
+{"v":1,"t":"bye","n":11,"ts":1772668811.0,"elapsed_ms":12700,"frames":11,"peak_rss_kb":91240}

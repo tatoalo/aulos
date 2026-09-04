@@ -20,10 +20,10 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 aulos-core = { workspace = true }
 aulos-provider = { workspace = true }
-tokio = { workspace = true, features = ["process", "io-util", "sync", "time"] }
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "net", "fs"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 nix = { workspace = true, features = ["signal", "process"] }
-command-fds = { workspace = true }
+command-fds = { workspace = true, features = ["tokio"] }
 url = { workspace = true }
 
 [dev-dependencies]
@@ -31,3 +31,5 @@ rstest = { workspace = true }
 insta = { workspace = true, features = ["json"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }

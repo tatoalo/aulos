@@ -1,0 +1,4 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.8.30.232658.dev0","python":"3.13.2","pid":4821,"plugins":["bgutil_ytdlp_pot_provider"],"pot":{"available":true,"url":"http://127.0.0.1:4416"}}
+{"v":1,"t":"progress","n":2,"ts":1772668802.0,"status":"downloading","tmpfilename":"/downloads/x.part","downloaded_bytes":1,"total_bytes":100,"elapsed":0.1,"stream":"video"}
+{"v":1,"t":"error","n":3,"ts":1772668803.0,"code":"internal","message":"AttributeError: nope","retryable":false,"extractor":"stub","fatal":true,"provider_code":"DownloadError","traceback":null}
+{"v":1,"t":"bye","n":4,"ts":1772668804.0,"elapsed_ms":12700,"frames":4,"peak_rss_kb":91240}
