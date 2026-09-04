@@ -487,3 +487,42 @@ with your WP id.
   episode, series, ext, extractor, extractor_key, legacy }` and `ScState::to_json()`; `legacy` is
   `#[serde(default, skip_serializing_if = "Map::is_empty")]`, and `from_json` tolerates a blob
   missing every optional field, so a row whose ids could not be derived still round-trips.
+
+## WP-09 — `aulos-provider-sc`: download engines, gapless mux, progress parsing
+
+- **No change is needed in any crate WP-09 does not own.** `aulos-provider`'s `proc::Child`,
+  `SpawnSpec`, `ProgressSink`, `Outcome` and `ProviderError` covered the whole engine surface as
+  designed; `aulos-core`'s `RawProgress`/`Normalizer`/`RelPath` covered progress and naming. The
+  only edits outside the four new engine modules are additive and inside this crate:
+  `ScProvider` gained an `engine: EngineCfg` field, `ScProvider::engine()` and
+  `ScProvider::with_engine()`, and `src/testing.rs` gained the engine fixtures.
+- **The PLAN WP-09 interfaces each take one more argument than the sketch**, all of them the same
+  thing — the binaries and knobs to run with, so the suite can drive the engines with stand-in
+  scripts and no `N_m3u8DL-RE` installed:
+  `download_nm3u8(cfg, ctx, target, names, tmp, sink)`,
+  `download_ffmpeg(cfg, ctx, target, names, tmp, sink)`,
+  `gapless_mux(ffmpeg_bin, seg_dir, out)`. `natural_cmp(a, b)` and
+  `parse_nm3u8_frame(chunk)` are exactly as specified. `EngineCfg::from_config(&Config)` is what
+  the binary should use; the three binary names default to `N_m3u8DL-RE`, `ffmpeg`, `ffprobe` and
+  are not configurable by env var (nothing in DESIGN §17.3 makes them so).
+- **`Outcome.entry_final` carries the legacy flat `.info.json` object** for every successful SC
+  download, so WP-11's NFO hook can generate its XML without re-reading the sidecar from disk.
+- **The SC engines never look at `OUTPUT_TEMPLATE`** unless `AULOS_SC_USE_OUTPUT_TEMPLATE=true`.
+  That opt-in path resolves `%(field)s` / `%(field)02d` over the entry's own fields with a small
+  in-crate renderer — this crate never runs yt-dlp, so there is no template engine to delegate to,
+  and an unknown field renders `NA` the way yt-dlp renders one. Anyone who needs the full grammar
+  should route the item through `ytdlp` instead.
+- **Partial cleanup now also runs after a *final* failure**, not only between the two engines.
+  Legacy left the truncated `.mp4` on disk, where a library scanner saw a finished-looking file for
+  an item in `error`. Cancel behaviour is unchanged (kill the process group, then clean up).
+- **`_merged.ts` is excluded from the segment scan.** Legacy would have re-concatenated its own
+  previous output if the fallback mux ran twice in one segment directory.
+- **Two of the four gates were run for this crate only.** `cargo clippy -p aulos-provider-sc
+  --all-targets -- -D warnings` and `cargo test -p aulos-provider-sc` are green (160 unit tests in the crate, plus WP-08's 5 integration tests);
+  the workspace-wide gates were not run because other crates were mid-edit.
+- **`mux::tests::a_real_ffmpeg_remuxes_the_concatenation` self-skips** when no `ffmpeg` is on
+  `PATH` or in `/opt/homebrew/bin`, printing why. It generates its own two MPEG-TS segments with
+  ffmpeg rather than checking a binary blob into the repository, so CI (which has no ffmpeg) just
+  skips it. Every other engine test uses the checked-in `sh` stand-ins in
+  `crates/aulos-provider-sc/tests/fixtures/sc/bin/` — **those files must keep their executable
+  bit**; a `git checkout` that drops mode 100755 turns the whole engine suite into `ToolMissing`.

@@ -19,7 +19,11 @@
 //! | the opaque `MediaEntry::state` blob and its legacy `.info.json` shape | [`state`] |
 //! | the one advisory "Source" catalog entry | [`catalog`] |
 //! | the [`Provider`](aulos_provider::provider::Provider) implementation | [`provider`] |
-//! | the download engines | [`engines`] (WP-09) |
+//! | output naming, the sidecar, engine selection and the ffmpeg retry | [`engines`] |
+//! | the `N_m3u8DL-RE` engine, argv-identical to legacy | [`nm3u8dl`] |
+//! | the ffmpeg engine and the `ffprobe` duration probe | [`ffmpeg`] |
+//! | the gapless natural-order segment mux | [`mux`] |
+//! | the ANSI repaint parser and the ffmpeg progress reader | [`progress`] |
 //!
 //! # The one thing to know about this provider
 //!
@@ -34,19 +38,26 @@ pub mod catalog;
 pub mod embed;
 pub mod engines;
 pub mod error;
+pub mod ffmpeg;
 pub mod http;
 pub mod inertia;
 pub mod jit;
+pub mod mux;
+pub mod nm3u8dl;
+pub mod progress;
 pub mod provider;
 pub mod season;
 pub mod state;
 pub mod watch;
 
 pub use catalog::sc_catalog;
+pub use engines::EngineCfg;
 pub use error::{ScError, ScErrorCode, ScInitError};
 pub use http::{ScHttp, ScReq, ScRes, USER_AGENT};
 pub use inertia::SiteVersions;
 pub use jit::{StreamTarget, fresh_stream};
+pub use mux::{gapless_mux, natural_cmp};
+pub use progress::{FfmpegProgress, parse_nm3u8_frame};
 pub use provider::{ScProvider, sc_matches};
 pub use state::ScState;
 

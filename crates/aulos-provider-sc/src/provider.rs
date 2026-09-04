@@ -27,6 +27,7 @@ use aulos_provider::provider::{
 use aulos_provider::sink::ProgressSink;
 use url::Url;
 
+use crate::engines::EngineCfg;
 use crate::error::{ScError, ScInitError};
 use crate::http::{ScHttp, build_client};
 use crate::inertia::SiteVersions;
@@ -77,6 +78,7 @@ pub struct ScProvider {
     extra_hosts: Vec<Box<str>>,
     meta_concurrency: usize,
     own_slots: usize,
+    engine: EngineCfg,
 }
 
 impl ScProvider {
@@ -112,7 +114,25 @@ impl ScProvider {
             extra_hosts: cfg.sc_extra_hosts.clone(),
             meta_concurrency: cfg.sc_meta_concurrency.max(1) as usize,
             own_slots: cfg.sc_max_concurrent_downloads.max(1) as usize,
+            engine: EngineCfg::from_config(cfg),
         }
+    }
+
+    /// Replaces the engine configuration (WP-09).
+    ///
+    /// The one seam the engine tests need: it points `argv[0]` at a fixture script so the whole
+    /// download path — argv, progress plumbing, the ffmpeg retry, cancellation and cleanup — is
+    /// exercised without `N_m3u8DL-RE` installed.
+    #[must_use]
+    pub fn with_engine(mut self, engine: EngineCfg) -> Self {
+        self.engine = engine;
+        self
+    }
+
+    /// The binaries and knobs [`engines::download`] runs with.
+    #[must_use]
+    pub fn engine(&self) -> &EngineCfg {
+        &self.engine
     }
 
     /// Whether the underlying client presents a Chrome fingerprint.

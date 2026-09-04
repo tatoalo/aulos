@@ -240,6 +240,7 @@ dependencies = [
  "aulos-core",
  "aulos-provider",
  "nix 0.30.1",
+ "proptest",
  "regex",
  "rstest",
  "serde",
@@ -251,6 +252,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -261,6 +263,7 @@ dependencies = [
  "aulos-core",
  "aulos-provider",
  "futures-util",
+ "proptest",
  "regex",
  "reqwest",
  "rstest",
@@ -268,6 +271,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strip-ansi-escapes",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -281,12 +285,14 @@ dependencies = [
 name = "aulos-provider-ytdlp"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "async-trait",
  "aulos-core",
  "aulos-provider",
  "command-fds",
  "insta",
  "nix 0.30.1",
+ "predicates",
  "rstest",
  "serde",
  "serde_json",
@@ -789,6 +795,7 @@ checksum = "1b60b5124979fccd9addd89d8b97a1d6eebb4950694520c75ddd722535ea443f"
 dependencies = [
  "nix 0.31.3",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
