@@ -18,8 +18,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use aulos_core::event::DomainEvent;
 use aulos_core::id::ItemId;
 use aulos_core::item::ItemView;
 use aulos_core::source::SourceKind;
@@ -27,24 +25,10 @@ use tokio::time::Instant;
 
 use crate::render::Mark;
 
-/// The APNs seam (DESIGN §12.6).
+/// The notification seam, declared in `aulos-core` where DESIGN §12.6 puts it.
 ///
-/// DESIGN §12.6 places this trait in `aulos-core::event`, next to `DomainEvent` and the
-/// `EventRouter`, so a future APNs notifier can live in its own crate and be registered as one
-/// more `EventRouter` subscriber with no change to any existing crate. `aulos-core` does not
-/// declare it yet, so it is declared here — the shape is the design's, verbatim, and moving it is
-/// a one-line change plus a re-export. See `docs/INTEGRATION-NOTES.md`, WP-16.
-#[async_trait]
-pub trait Notifier: Send + Sync {
-    /// A stable id, for logs and for `healthz`.
-    fn id(&self) -> &'static str;
-
-    /// Whether this notifier wants to hear about `item`.
-    fn interested(&self, item: &ItemView) -> bool;
-
-    /// Handle one event. Must not block.
-    async fn on_event(&self, ev: &DomainEvent);
-}
+/// Re-exported here because `aulos-telegram` is its first implementation.
+pub use aulos_core::event::Notifier;
 
 /// One job the bot is reporting on.
 #[derive(Clone, Debug)]

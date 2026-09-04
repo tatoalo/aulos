@@ -284,7 +284,8 @@ pub struct ItemsQuery {
     pub kind: Option<String>,
     /// Only the children of this group.
     pub group_id: Option<String>,
-    /// Title substring.
+    /// Case-insensitive title substring, applied in the `WHERE` clause so `total` and the
+    /// cursor describe the matching set.
     pub q: Option<String>,
     /// `ord` — the only accepted value.
     pub order: Option<String>,
@@ -336,6 +337,12 @@ pub async fn items(
             .map_err(|_| ApiError::invalid("group_id", format!("no such group: {raw}")))?;
         filter.group = GroupScope::Of(id);
     }
+    // `q` is part of the query, not a filter over the page: `ItemFilter::title_like` puts it in
+    // the `WHERE` clause, so `total` counts the matching set and every page is full. Filtering
+    // the returned page instead made `total` the unfiltered count and left mostly-empty pages.
+    if let Some(needle) = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        filter.title_like = Some(Box::from(needle));
+    }
     let limit = query.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     filter.limit = Some(limit);
     if let Some(raw) = &query.cursor {
@@ -344,19 +351,11 @@ pub async fn items(
 
     let page = state.store.items(filter).await?;
     let published = state.state.load();
-    let mut rows: Vec<Arc<ItemView>> = page
+    let rows: Vec<Arc<ItemView>> = page
         .rows
         .iter()
         .map(|row| view_of_row(&state, &published, row))
         .collect();
-    if let Some(needle) = query.q.as_deref().map(str::to_lowercase)
-        && !needle.is_empty()
-    {
-        // `q` filters the page the keyset query returned; `total` stays the unfiltered count. A
-        // store-side `LIKE` would be an additive `ItemFilter` field (recorded in
-        // docs/INTEGRATION-NOTES.md) and is the only way to page a filtered set honestly.
-        rows.retain(|v| v.title.to_lowercase().contains(&needle));
-    }
 
     Ok(Json(json!({
         "items": rows,

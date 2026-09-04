@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-04 18:20 (Europe/Rome). Update this file at every checkpoint.
+Last updated: 2026-09-04 (wave-2 integration). Update this file at every checkpoint.
 
 ## What this is
 
@@ -49,9 +49,9 @@ Read in this order when picking the project back up:
 | 12 | `aulos-queue`: engine (add, resolve, groups, slots, cancel, pause, recovery) | done | 3d793ae |
 | 13 | `aulos-queue`: aggregator, event hub, replay ring, published snapshot | done | 78da7bd |
 | 16 | `aulos-subscriptions` + `aulos-telegram` | done | 917ed7e |
-| 14 | `aulos-api`: v2 REST, WebSocket, files, health, auth | **in progress** | — |
-| 15 | `aulos-api`: v1 compatibility shim (golden corpus replay) | pending | — |
-| — | integrate wave 2 | pending | — |
+| 14 | `aulos-api`: v2 REST, WebSocket, files, health, auth | done | 29396b5 |
+| 15 | `aulos-api`: v1 compatibility shim (golden corpus replay) | done | 82c31d2 |
+| — | integrate wave 2 | green | (this commit) |
 | 17 | `aulos-server`: wiring, POT supervisor, config watcher, CLI, docker e2e | pending | — |
 | — | final integration (docker build + `AULOS_E2E=1 tests/e2e/run.sh`, README, PLAN status) | pending | — |
 
@@ -64,8 +64,9 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 
 ## Next steps (in order)
 
-1. Finish wave 2 (above), final integration, first push to `origin/main`, strip attribution
-   trailers from history.
+1. **WP-17** (`aulos-server`: wiring, POT supervisor, config watcher, CLI) and **WP-18** (docker
+   e2e), then final integration, first push to `origin/main`, strip attribution trailers from
+   history. Start from the carried-forward table at the end of INTEGRATION-NOTES.md.
 2. **Review-and-fix workflow**: parallel reviewers (DESIGN conformance, PROTOCOL conformance, legacy
    parity vs `docs/reference/legacy-backend-spec.md`, security: path containment / SSRF / process
    kill, hot-path performance), adversarial verification of each finding, fix agents, repeat until
@@ -85,6 +86,10 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 
 ## Known open items (from INTEGRATION-NOTES.md)
 
+- **Two of WP-17's wiring steps are on its critical path**, and both fail silently rather than
+  loudly: the `HookFinalizer` + `Engine::with_pre_terminal` pair (without them a `best_remux` item
+  never finalises) and `Aggregator::with_done_total` (without it a restart reports `done_total` as
+  the done-window length). The wave-2 integration section lists all eight carried-forward items.
 - Five wave-0 deviations from DESIGN are recorded only in INTEGRATION-NOTES (types hoisted into
   `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl` in `aulos-provider`,
   `FormatSpec.flags.slow` placement, `ChatConfig` key count). DESIGN.md should be updated to match.

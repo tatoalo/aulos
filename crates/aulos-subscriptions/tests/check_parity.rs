@@ -224,15 +224,92 @@ async fn an_in_flight_duplicate_is_also_rejected() {
     assert_eq!(h.list().await.len(), 1);
 }
 
-/// An empty URL is the legacy `Missing URL`.
+/// The legacy `_normalize_url` parity: surrounding whitespace is stripped, and the trimmed form
+/// is the uniqueness key.
+///
+/// The legacy `Missing URL` branch it used to share a block with is now unreachable *by
+/// construction* — [`aulos_core::SubCmd::Add`] carries a typed `Url`, which cannot be empty (see
+/// the wave-2 note in `docs/INTEGRATION-NOTES.md`). It was already unreachable over HTTP:
+/// `tests/v1_golden/MANIFEST.json` records that `parse_download_options` rejects a falsy `url`
+/// with `missing 'url', 'download_type', or 'quality'` before the manager ever sees it. The
+/// string itself is still pinned, in `aulos_api::v1::legacy`.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_empty_url_is_missing_url() {
+async fn a_padded_url_is_normalised_and_is_its_own_uniqueness_key() {
     let (h, _p) = with_feed("chan", vec![entry("a")]).await;
-    for raw in ["", "   ", "\t\n"] {
-        let err = h.subscribe(raw).await.expect_err("empty");
-        assert_eq!(err, SubError::MissingUrl);
-        assert_eq!(err.to_string(), "Missing URL");
-    }
+    let url = feed_url("chan");
+    let view = h
+        .subscribe(&format!("  {url}\t"))
+        .await
+        .expect("a padded url subscribes");
+    assert_eq!(&*view.url, url, "stored trimmed");
+    assert_eq!(
+        h.subscribe(&format!("\n{url}  ")).await.expect_err("dup"),
+        SubError::AlreadySubscribed,
+        "the trimmed form is the key"
+    );
+    assert_eq!(
+        SubError::MissingUrl.to_string(),
+        "Missing URL",
+        "the legacy string is unchanged"
+    );
+}
+
+/// The whole download template travels in `SubCmd::Add`, which is the v1 parity legacy's
+/// `POST <p>subscribe` had: it accepted every one of these fields and `add_subscription` stored
+/// them (legacy spec §7.4). Before the wave-2 integration pass the command carried only `url`,
+/// `selection` and `folder`, and the rest were silently replaced by config defaults.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_whole_download_template_and_the_interval_reach_the_record() {
+    use aulos_core::request::{DownloadRequest, SubtitleLang, SubtitleMode};
+
+    let (h, _p) = with_feed("chan", vec![entry("a")]).await;
+    let mut request = DownloadRequest::new(
+        url::Url::parse(&feed_url("chan")).unwrap(),
+        crate::support::selection(),
+    );
+    request.folder = Some(aulos_core::paths::RelDir::parse("Shows").unwrap());
+    request.custom_name_prefix = "S01 - ".into();
+    request.auto_start = false;
+    request.playlist_item_limit = 7;
+    request.split_by_chapters = true;
+    request.chapter_template = "%(section_number)s".into();
+    request.subtitle_language = SubtitleLang::parse("it").unwrap();
+    request.subtitle_mode = SubtitleMode::PreferAuto;
+    request.ytdl_options_presets = vec!["fast".into()];
+    request.ytdl_options_overrides = serde_json::from_str(r#"{"noplaylist": true}"#).unwrap();
+
+    let view = h
+        .subscribe_with(request.clone(), Some(15))
+        .await
+        .expect("subscribed");
+    assert_eq!(view.check_interval_minutes, 15, "the requested interval");
+
+    let row = h.record(&view.id).await;
+    assert_eq!(row.check_interval_minutes, 15);
+    assert_eq!(row.folder, request.folder);
+    assert_eq!(row.custom_name_prefix, request.custom_name_prefix);
+    assert!(!row.auto_start);
+    assert_eq!(row.playlist_item_limit, 7);
+    assert!(row.split_by_chapters);
+    assert_eq!(row.chapter_template, request.chapter_template);
+    assert_eq!(row.subtitle_language, request.subtitle_language);
+    assert_eq!(row.subtitle_mode, SubtitleMode::PreferAuto);
+    assert_eq!(row.ytdl_options_presets, request.ytdl_options_presets);
+    assert_eq!(row.ytdl_options_overrides, request.ytdl_options_overrides);
+}
+
+/// An empty `chapter_template` still means "use the configured default", and `None` for the
+/// interval still means `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unset_template_field_still_falls_back_to_the_effective_config() {
+    let (h, _p) = with_feed("chan", vec![entry("a")]).await;
+    let view = h.subscribe(&feed_url("chan")).await.expect("subscribed");
+    let row = h.record(&view.id).await;
+    assert!(
+        !row.chapter_template.is_empty(),
+        "the configured default was substituted"
+    );
+    assert_eq!(row.check_interval_minutes, 60, "the config default");
 }
 
 /// A URL nothing in the registry claims is the legacy `Could not resolve URL`.

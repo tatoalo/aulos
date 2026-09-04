@@ -290,7 +290,7 @@ with your WP id.
   | Build the `notice` frame from `DomainEvent::as_notice()`; assert the delta field list against `ItemView::FIELDS` | WP-13 |
   | Fill `ytdl_options_presets.choices` from `YTDL_OPTIONS_PRESETS` when serving `catalog`/`capabilities`; serve `match: null` for a `catalog?url=` that matches nothing | WP-14 |
   | Filter `Canceled` items out of `GET history` rather than relying on `Status::v1()`'s defensive `"error"` | WP-15 |
-  | Map `Registry::pick` → `None` to `ErrorCode::UnsupportedUrl` | WP-12 |
+  | ~~Map `Registry::pick` → `None` to `ErrorCode::UnsupportedUrl`~~ **DONE by WP-12** | WP-12 |
   | Implement `registry::CommandLoader`; wire `Registry::set_command_loader` at boot | WP-10 / WP-17 |
   | Spawn through `Child::spawn_command` (never `Command::spawn`) so the stderr drain is not lost; `pub use aulos_provider::OutTmpl` | WP-07 / WP-06 |
   | Add `python/ytdlp_runner.py`, `tests/shim_contract.py`, `tests/smoke_extract.sh`, `tests/e2e/run.sh` — each turns on a CI step that no-ops today | WP-07 / WP-18 |
@@ -1023,16 +1023,16 @@ All of these are addressed to packages that do not exist yet. None of them block
 | Request | Owner |
 |---|---|
 | Map `Registry::pick` → `None` to `ErrorCode::UnsupportedUrl` | WP-12 |
-| Park the `Outcome` engine-side on `Finished → Finishing` (`pending_hooks`) and pair it back on `HooksFinished`; publish `Finishing` **only** on the success path | WP-12 |
-| Delegate `aulos-queue::canonical_key` to `aulos_store::canonical_key` — never a second implementation | WP-12 |
-| Read `Store::options()` for `done_window`/`entry_max_bytes` rather than re-deriving them from `Config`; turn `set_size`/`drop_entry_blob` into `EngineCmd::HookWrite` | WP-12 |
-| Call `OutTmplJob::merge_info` with the compacted entry blob, or `%(playlist_id)s`-style fields degrade to `NA` | WP-12 |
-| Add a children channel to `ResolveCtx` if `capabilities.streaming_resolve` is to publish before the child exits; add a `ProgressSink` to `ResolveCtx` if resolution logs should reach the item's event stream | WP-12 |
-| Port `_post_download_cleanup` for the paths no provider reports (tmp dir, SC segment dir) — Δ C18 | WP-12 |
-| Build the `notice` frame from `DomainEvent::as_notice()`; assert the delta field list against `ItemView::FIELDS`; decide whether to special-case a `{phase, phase_percent}`-only frame (see `audio_sync::frame`) | WP-13 |
-| Fill `ytdl_options_presets.choices` from `YTDL_OPTIONS_PRESETS`; serve `match: null` for a `catalog?url=` that matches nothing; surface `PluginManifest.warnings` next to `ReloadReport.failed` in `healthz` and `GET api/v2/providers`; serve `import::stored_report` at `GET api/v2/import-report` | WP-14 |
-| Map any legacy video selection onto `mp4`/`best` for a provider whose catalog is advisory (the SC case), or catalog validation rejects a request legacy accepted | WP-15 |
-| Filter `Canceled` items out of `GET history` rather than relying on `Status::v1()`'s defensive `"error"`; call `get_format_raw`/`get_opts_raw`, not the typed forms | WP-15 |
+| ~~Park the `Outcome` engine-side on `Finished → Finishing` (`pending_hooks`) …~~ **DONE by WP-12** | WP-12 |
+| ~~Delegate `aulos-queue::canonical_key` to `aulos_store::canonical_key`~~ **DONE by WP-12** | WP-12 |
+| ~~Read `Store::options()` …; turn `set_size`/`drop_entry_blob` into `EngineCmd::HookWrite`~~ **DONE by WP-12** | WP-12 |
+| ~~Call `OutTmplJob::merge_info` with the compacted entry blob~~ **APPLIED (wave 2)** — see below | WP-12 |
+| Add a children channel / a `ProgressSink` to `ResolveCtx` — **still open, and still conditional**: nothing in v1.0 publishes children before the resolve returns | WP-12 |
+| ~~Port `_post_download_cleanup` … — Δ C18~~ **DONE by WP-12** (the per-item `tmp_dir` makes it one `remove_dir_all`; the boot orphan scan covers the rest) | WP-12 |
+| ~~Build the `notice` frame …; assert the delta field list against `ItemView::FIELDS`; decide the `{phase, phase_percent}`-only frame~~ **DONE by WP-13** (`DIFF_FIELDS` is declared with `ItemView::FIELDS.len()`, so an unclassified field is a compile error) | WP-13 |
+| Four requests: `ytdl_options_presets.choices`, `match: null`, `import-report` — **DONE by WP-14**. `PluginManifest.warnings` in `healthz`/`providers` — **APPLIED (wave 2)**, see below | WP-14 |
+| ~~Map any legacy video selection onto `mp4`/`best` for an advisory catalog~~ **APPLIED (wave 2)** — see below | WP-15 |
+| ~~Filter `Canceled` out of `GET history`~~ **DONE by WP-15** (`v1_status` returns `None`). `get_format_raw`/`get_opts_raw` — **satisfied by other means**, see below | WP-15 |
 | Define the `HookFinalizer` newtype over the engine handle in `aulos-server` and pass it to `HookDispatcher::with_finalizer` — without it a `best_remux` item never finalises | WP-16 |
 | Take `health_handle()` **before** `spawn`; wire the dispatcher as the WP-11 note spells out | WP-16 |
 | Call `config::load_with_warnings()` **and** `YtdlOptions::load(...)`, merging both reports before the single exit-2 step | WP-17 |
@@ -1068,7 +1068,11 @@ All of these are addressed to packages that do not exist yet. None of them block
   `tick()` runs the 1 Hz maintenance pass on demand — for a caller that has just moved the clock,
   and it is what makes every timer in this crate's tests instant instead of wall-clock bound.
 - **WP-13 must call `EngineHandle::heartbeats().frame(id, now_ms)` on every progress frame it
-  receives.** That is the whole input to the stall watchdog (DESIGN §8.11). DESIGN §4.7 asks for
+  receives.** **VERIFIED (wave-2 integration):** the aggregator does, and `Engine::handle_stage`
+  beats as well. The additive per-item beat on `ProgressSink` this bullet proposes is **not** done:
+  `watchdog::tests::a_drop_storm_does_not_trip_the_stall_watchdog` proves the factory-wide counter
+  already reproduces the discrimination DESIGN §4.7 asks for, so the change would be a tidier
+  spelling of a property that already holds. Recorded, not applied. That is the whole input to the stall watchdog (DESIGN §8.11). DESIGN §4.7 asks for
   `last_frame_at` to be bumped "before the drop decision", but the drop decision is made inside
   `ProgressSink::progress` (`aulos-provider`), whose per-item state neither the engine nor the
   aggregator can see — only the factory-wide `ProgressSinkFactory::dropped()` counter is
@@ -1078,7 +1082,9 @@ All of these are addressed to packages that do not exist yet. None of them block
   per-item beat on `ProgressSink` — one `Arc<AtomicI64>` bumped before the `try_send` — would let
   the sink record it exactly where DESIGN §4.7 says, and would make the global counter
   unnecessary. That is an `aulos-provider` change (WP-03's file), so it is not done here.
-- **WP-16 must wire `Engine::with_pre_terminal(...)`.** The engine cannot evaluate
+- **WP-16 must wire `Engine::with_pre_terminal(...)`.** **STILL OPEN — owner is WP-17**, which
+  has not landed: the wiring lives in `aulos-server`, and `aulos-server` is still the WP-01
+  skeleton. Without it a `best_remux` item never finalises, so this is on WP-17's critical path. The engine cannot evaluate
   `aulos_hooks::Hook::applies` (`aulos-queue` must not depend on `aulos-hooks`, DESIGN §3), so the
   seam is `aulos_queue::PreTerminalHooks` — one method,
   `fn label_for(&self, view: &ItemView) -> Option<Box<str>>`, returning the `msg` the engine writes
@@ -1102,7 +1108,21 @@ All of these are addressed to packages that do not exist yet. None of them block
   has to apply `PUBLIC_HOST_URL`/`PUBLIC_HOST_AUDIO_URL` plus percent-encoding when it serves a
   view — including views read straight out of WP-13's published snapshot — and the same goes for
   `FileRef.download_url` on the two artifact lists.
-- **`OutTmpl` is built from the config templates only.** `Engine::outtmpl_for` reproduces legacy's
+- **`OutTmpl` is built from the config templates only.** **APPLIED (wave-2 integration).** The
+  pre-resolution now happens in the `ytdlp` provider, which is the only place that holds both the
+  entry blob and the shim, exactly as this bullet proposes. Three coordinated pieces:
+  `aulos_provider::outtmpl_info` is the shared DESIGN §7.5 key filter (`^(playlist|channel)`,
+  `n_entries`, `__last_playlist_index`); `aulos_provider_ytdlp::outtmpl_job(cfg, req, entry)` is
+  `build_outtmpl` plus `merge_info` over that subset; and `YtdlpProvider::download` calls it and
+  `resolve_outtmpl` instead of using `ctx.outtmpl`. `DownloadCtx::outtmpl`'s doc no longer claims
+  the fields are pre-resolved, because for the engine's copy they are not.
+
+  **This exposed a second, larger DESIGN §7.5 violation, also fixed here.** `compact_entry`
+  persisted the *whole* `state` object for a plain provider — for a yt-dlp playlist child that is
+  the entire raw info dict, tens of kilobytes per row, bounded only by the 256 KB
+  `AULOS_ENTRY_MAX_BYTES` cap. §7.5's table allows only the key set above, which is precisely what
+  `outtmpl_job` needs, so the two problems had one fix. A non-object `state` is still kept
+  verbatim (nothing in §7.5's rules applies to it, and the `fake` provider's script state is one). `Engine::outtmpl_for` reproduces legacy's
   prefix handling and the `OUTPUT_TEMPLATE_PLAYLIST`/`_CHANNEL` swap, but **not** legacy's
   `_resolve_outtmpl_fields` pre-resolution: that is `aulos_provider_ytdlp::outtmpl::OutTmplJob`,
   and `aulos-queue` may not depend on that crate (DESIGN §3, `tests/arch.rs`). The natural home for
@@ -1147,8 +1167,10 @@ All of these are addressed to packages that do not exist yet. None of them block
   legacy bug §8.5 exists to close. `Engine::drop_dedupe` is therefore a value scan, bounded by the
   live queue.
 - **`canonical_key` delegates to `aulos_store::canonical_key`** (WP-05's note), and
-  `aulos_queue::DedupeKey` implements `Hash` by hand because `aulos_core::Selection` derives `Eq`
-  but not `Hash`. A one-line `#[derive(Hash)]` on `Selection` would remove the hand-written impl.
+  `aulos_queue::DedupeKey` implemented `Hash` by hand because `aulos_core::Selection` derived `Eq`
+  but not `Hash`. **APPLIED (wave-2 integration):** `Selection` now derives `Hash` — all four of
+  its fields already did, and they are all canonical, so the derived hash and the hand-written one
+  are the same function — and `DedupeKey` derives it too. Twelve lines and one import gone.
 - **`AddError` is one variant per HTTP status, not DESIGN §8.3's six.** `Invalid { index, errors }`
   carries every failing field as a `WireError`, so the API layer maps `errors[0].code` straight onto
   the §8.3 table (`validation_failed`, `unknown_preset`, `overrides_disabled`, `folder_invalid`,
@@ -1218,7 +1240,15 @@ All of these are addressed to packages that do not exist yet. None of them block
   believes its history was truncated to 500 rows. After the seed the counter moves on its own: `+1`
   when a known non-terminal row becomes terminal, `-1` when a terminal row is removed or retried,
   and unchanged when one is evicted from the window or first appears already terminal.
-- **`RemoveReason`'s wire strings differ from PROTOCOL §5.7.** PROTOCOL and DESIGN §15.1 spell the
+- **`RemoveReason`'s wire strings differ from PROTOCOL §5.7.** **DECIDED AND APPLIED (wave-2
+  integration): the documents win.** DESIGN §15.1 and PROTOCOL §5.7 both spell the four reasons
+  `deleted`, `cleared`, `auto_cleared`, `group_cascade`, and BRIEF is silent, so the design docs
+  decide (BRIEF's own precedence rule). `aulos_core::RemoveReason` keeps the variant names
+  `Expired`/`Replaced` — they say what happened to the row — and gains
+  `#[serde(rename = "auto_cleared")]` / `#[serde(rename = "group_cascade")]`, an `as_str` and a
+  `Display`. One test now walks all four in PROTOCOL's order and asserts serde, `as_str`,
+  `Display` and the round trip agree, so they cannot drift. Three assertions in `aulos-queue`
+  updated. **Decided before the iOS client shipped, which is what the note asked for.** PROTOCOL and DESIGN §15.1 spell the
   four reasons `deleted`, `cleared`, `auto_cleared`, `group_cascade`; `aulos_core::RemoveReason`
   (WP-02) names the last two `Expired` and `Replaced`, so the frames say `"expired"` and
   `"replaced"`. The **order** is the same, and `aulos_queue::REASON_ORDER` is the single source of
@@ -1273,7 +1303,17 @@ All of these are addressed to packages that do not exist yet. None of them block
   `items`, or `items.len() + i` for the `i`-th entry of `done`, and `Published::get` / `all()` hide
   that. `by_id` is pointer-equal across a tick with no membership change, which is the DESIGN §15.2
   reuse optimisation.
-- **`ViewExtras.download_url` is still `None` in the published snapshot.** The aggregator only
+- **`ViewExtras.download_url` is still `None` in the published snapshot.** **DECIDED (wave-2
+  integration): the patching stays; the engine-side formatter is not built.** `aulos-api` fills the
+  field on every surface and `stress_consistency` proves the paths agree, so the wire is correct
+  today. The proposed formatter is a pure optimisation — one parse per frame per socket, for three
+  of fourteen frame kinds — with a *silent* failure mode: it is wiring a build can forget, and
+  forgetting it turns every `download_url` on every surface `null`. The one part that looked like a
+  real correctness gap is not one: a `delta` is only emitted for an id whose full object has
+  already gone out, and that publish marks the state dirty, so `Published` always holds it by then
+  — the `DownloadType::Video` fallback is unreachable defensive code, in the same sense as
+  `SkipReason::NotCancelable`, and `aulos_api::view`'s module docs now say so. Revisit if the WS
+  fan-out ever shows up in a profile. The aggregator only
   merges progress over what the engine gave it, so WP-14 must apply
   `PUBLIC_HOST_URL`/`PUBLIC_HOST_AUDIO_URL` plus percent-encoding when it serves an `ItemView` —
   including views taken straight out of `StateView::load()` and out of the `added`/`completed`
@@ -1292,7 +1332,23 @@ All of these are addressed to packages that do not exist yet. None of them block
 
 ### Things the integrator must act on
 
-- **`SubCmd::Add` carries only `url`, `selection` and `folder`.** `aulos-core::subscription`
+- **`SubCmd::Add` carries only `url`, `selection` and `folder`.** **APPLIED (wave-2
+  integration).** It now carries `request: Box<DownloadRequest>` and
+  `check_interval_minutes: Option<u32>` — PLAN WP-16's `create(req: DownloadRequest, interval:
+  u32)`, which is what the note asked for. `custom_name_prefix`, `auto_start`,
+  `split_by_chapters`, `playlist_item_limit`, both subtitle fields and both `ytdl_options_*` reach
+  the record instead of being replaced by config defaults, so **the v1 parity gap on
+  `POST <p>subscribe` is closed**; an empty `chapter_template` still means "use the configured
+  default" and a `None` interval still means `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`. Both API routes
+  dropped their follow-up `SubCmd::Update` workaround (v1 and v2). `NewSubscription` shrank to the
+  two resolved fields plus the template.
+
+  One consequence worth knowing: the command now carries a **typed `Url`**, so
+  `SubError::MissingUrl` is unreachable by construction. It was already unreachable over HTTP —
+  `tests/v1_golden/MANIFEST.json` records that `parse_download_options` rejects a falsy `url`
+  first — and the string is still pinned in `aulos_api::v1::legacy`. The test that drove that
+  branch was retargeted onto the `_normalize_url` trim/uniqueness parity it shared a block with,
+  which *is* still reachable, rather than deleted. `aulos-core::subscription`
   (WP-02) declares it that way, but legacy's `POST <p>subscribe` accepted the whole download
   template — `check_interval_minutes`, `custom_name_prefix`, `auto_start`, `playlist_item_limit`,
   `split_by_chapters`, `chapter_template`, `subtitle_language`, `subtitle_mode`,
@@ -1311,7 +1367,12 @@ All of these are addressed to packages that do not exist yet. None of them block
   `PATCH`/`POST` bodies through once that lands. Not done here because changing an existing
   `aulos-core` signature is outside WP-16's ownership.
 
-- **`Notifier` is declared in `aulos-telegram::watch`, not in `aulos-core::event`.** DESIGN §12.6
+- **`Notifier` is declared in `aulos-telegram::watch`, not in `aulos-core::event`.**
+  **APPLIED (wave-2 integration):** moved to `aulos-core::event`, next to `DomainEvent` and
+  `EventRouter` where DESIGN §12.6 puts it, with `pub use aulos_core::event::Notifier;` left in
+  `aulos-telegram::watch`. `aulos-core` already had `async-trait`, so no dependency and no `§3`
+  row changed, and no call site moved. A future APNs crate can now implement it without depending
+  on `aulos-telegram`. DESIGN §12.6
   wants it next to `DomainEvent` and the `EventRouter` so a future APNs crate can implement it
   without depending on `aulos-telegram`; `aulos-core` does not declare it yet, and adding a trait
   there is another crate's file. The shape is the design's verbatim
@@ -1320,7 +1381,12 @@ All of these are addressed to packages that do not exist yet. None of them block
   `TelegramActor` consumes its `EventInbox` directly (DESIGN §12.1), so nothing dispatches
   *through* the trait yet.
 
-- **`aulos-api` (WP-14/WP-15) needs its own copy of the two subscription projections.** It cannot
+- **`aulos-api` (WP-14/WP-15) needs its own copy of the two subscription projections.**
+  **VERIFIED, no change.** `aulos-api` has them and `v1_golden` plus
+  `v1_routes::the_subscription_routes_answer_the_legacy_thirteen_keys` pin the shapes. The
+  suggested lift of `parse_enabled` into `aulos-core::subscription` is **not** done: `aulos-api`'s
+  own `parse_bool` already implements the legacy `_coerce_bool` token set and is exercised by the
+  golden corpus, so the lift would move code without removing any. It cannot
   depend on `aulos-subscriptions` (DESIGN §3), so `aulos-subscriptions::public` is the *reference*
   implementation and its tests are the normative shapes: `to_v1_dict` (exactly
   `SubscriptionView::V1_KEYS`, with `last_checked` divided by 1000 into a **float**), `v2_frame`
@@ -1405,7 +1471,9 @@ All of these are addressed to packages that do not exist yet. None of them block
 ### Things the integrator must act on
 
 - **`aulos-api` now declares `aulos-provider`, and `tests/arch.rs`'s table was amended by one
-  line.** DESIGN §3's `aulos-api` row omits the crate, while PLAN WP-14's `ApiState` types
+  line.** **APPLIED (wave-2 integration):** DESIGN §3's `aulos-api` row now lists the crate, and
+  `arch.rs`'s amendment comment became a plain explanation, since the document and the table agree
+  again. No §3 rule changed. DESIGN §3's `aulos-api` row omits the crate, while PLAN WP-14's `ApiState` types
   `registry: Arc<RwLock<Registry>>` and `GET api/v2/{catalog,providers,resolve-preview}` and the
   add path's catalog defaults are all projections of it. No §3 *rule* forbids the edge (A1 is about
   provider crates depending on the store or the queue; A2–A5 are untouched), so the row gained
@@ -1414,7 +1482,20 @@ All of these are addressed to packages that do not exist yet. None of them block
   `aulos-server` over the registry — would have mirrored `Match`, `MatchReason`, `ProviderState`
   and `FormatCatalog` for no architectural gain.
 - **`CancelScope::Generation` cannot isolate one add today, and one line in `aulos-queue` fixes
-  it.** `Engine::handle_add` reads `self.add_generation` without incrementing it, and only
+  it.** **APPLIED (wave-2 integration), but it took more than one line, and the one-line version
+  would have been a bug.** `add_generation` was doing two jobs: stamping an add *and* answering
+  "has a blanket cancel happened since this work was spawned?" (the `self.add_generation >
+  meta.generation` checks). Bumping it per add would make a *later add* condemn an earlier one's
+  in-flight resolution. So the two jobs are now two counters: `Engine::add_generation` is the
+  per-add stamp (`handle_add` increments it, so the first add is generation 1 and 0 means "no
+  add"), and `Engine::cancel_epoch` is bumped only by `CancelScope::All` and is what the `>` checks
+  compare against. `ResolveMeta` and `Expansion` carry the epoch they were spawned under. A retry
+  mints a fresh generation rather than borrowing the last add's, so only `All` can condemn it.
+
+  Three tests changed: `add::a_single_add_…` now expects generation 1;
+  `resolve::cancel_resolve_by_generation_leaves_a_concurrent_add_running` finally asserts what its
+  name says (and that `All` still gets the survivor); and `rest_queue`'s `todo(WP-12)` assertion
+  flipped to `assert_ne!` plus a check that the concurrent add is untouched. `Engine::handle_add` reads `self.add_generation` without incrementing it, and only
   `CancelScope::All` bumps it, so two adds that race share a generation and
   `POST api/v2/downloads/cancel-resolve {"generation": n}` cancels both. The wire side is complete
   — the `202` carries `generation`, the route maps `{"generation": n}` → `Generation(n)` and `{}` →
@@ -1422,29 +1503,45 @@ All of these are addressed to packages that do not exist yet. None of them block
   += 1` (or a separate per-add counter) in `crates/aulos-queue/src/add.rs`, which is a WP-12 file.
   `rest_queue::cancel_resolve_scopes_by_generation_and_falls_back_to_everything` asserts today's
   behaviour and carries a `todo(WP-12)` on the one assertion that will flip.
-- **`ServerInfo.yt_dlp` is `None` until the binary fills it in.** `capabilities.yt_dlp`,
+- **`ServerInfo.yt_dlp` is `None` until the binary fills it in.** **STILL OPEN — owner is
+  WP-17.** `capabilities.yt_dlp`, `GET <p>version`'s `yt-dlp` and `healthz.yt_dlp` all say `null`
+  until `aulos-server` calls `ApiState::with_info(...)` with the shim's answer. `capabilities.yt_dlp`,
   `GET <p>version`'s `yt-dlp` and `healthz.yt_dlp` all read it, and `aulos-api` may not depend on
   `aulos-provider-ytdlp` (DESIGN §3). WP-17 should call
   `ApiState::with_info(ServerInfo::new(&cfg, clock).with_yt_dlp(runner.identity().yt_dlp))` once
   the shim has answered; until then the three surfaces say `null`, which is honest.
 - **`healthz` synthesises `store` and `queue` when the registry has none, and nothing else.**
+  **VERIFIED, no change.** The other thirteen components remain WP-17's probes.
   The other thirteen components of DESIGN §16.3 are WP-17's probes; `rest_meta::
   the_healthz_payload_is_stable_for_the_stock_component_set` seeds the full stock set by hand and
   snapshot-tests the payload, so the document and the wire are pinned to each other. The 503 rule
   is implemented here: `HealthView::is_fatal()` (a `down` store) **or** a WAL over 256 MB.
-- **`GET api/v2/items?q=` filters the page, not the query.** `aulos_store::ItemFilter` has no title
+- **`GET api/v2/items?q=` filters the page, not the query.** **APPLIED (wave-2 integration).**
+  `ItemFilter` gained `title_like: Option<Box<str>>` and `where_clause` a
+  `title LIKE ? ESCAPE '\\'` term, so `q` is part of the query: `total` counts the matching set,
+  every page is full and the cursor continues the *filtered* set. `%`, `_` and `\\` in the needle
+  are escaped, so a title containing a wildcard is matched literally; an empty or whitespace needle
+  is no predicate at all. `title` is `TEXT`, so SQLite's `LIKE` is already ASCII-case-insensitive
+  and no `lower()` is needed on either side. The page-side `retain` is gone. `aulos_store::ItemFilter` has no title
   predicate, so `q` is applied to the rows the keyset query returned and `total` stays the
   unfiltered count. An additive `ItemFilter.title_like: Option<Box<str>>` plus a `LIKE` clause in
   `aulos-store` (a WP-04 file) is what makes a filtered set pageable honestly.
-- **`POST api/v2/items/clear` is an addition to PROTOCOL §4.7.** DESIGN §8.10 defines
+- **`POST api/v2/items/clear` is an addition to PROTOCOL §4.7.** **APPLIED (wave-2
+  integration): PROTOCOL §4.7 adopted the row**, with a paragraph on why a v2-only deployment
+  needs it and on the `reason: "cleared"` frames it produces. DESIGN §8.10 defines
   `EngineCmd::Clear` and the v1 shim's `POST <p>delete {"where":"done"}` needs it, but the §4.7
   table has no v2 clear route, which would leave a v2-only deployment deleting history one id at a
   time. It answers `{"removed": [ids], "seq": n}`. **PROTOCOL §4.7 should adopt the row.**
-- **`GET api/v2/catalog` (no `?url=`) reports `provider: "merged"`.** §4.6 defines `provider` as
+- **`GET api/v2/catalog` (no `?url=`) reports `provider: "merged"`.** **APPLIED (wave-2
+  integration): PROTOCOL §4.6 now says so**, on the `provider` row of the field table, together
+  with a paragraph stating that a `?url=` matching nothing answers the merged catalog with
+  `match: null` rather than an error. §4.6 defines `provider` as
   "the provider whose catalog this is" and says nothing about the union. `"merged"` is not a legal
   `ProviderId`, and `match` is `null` on the same payload, so the two facts together are
   unambiguous — but PROTOCOL should say so.
-- **`GET api/v2/providers` fills `version`, `capabilities` and `argv` with `null`/`[]`.** The
+- **`GET api/v2/providers` fills `version`, `capabilities` and `argv` with `null`/`[]`.**
+  **Kept as it is.** `Provider::describe()` is a real improvement but it is new surface on a trait
+  five crates implement, not an integration fix; `null` remains more honest than an invention. The
   `Provider` trait exposes none of the three (DESIGN §6.1), and inventing them would be worse than
   saying nothing. An additive `Provider::describe() -> ProviderDescription` would fill them for
   every provider at once; `limits.slots` already comes from `Provider::own_slots()` and
@@ -1627,3 +1724,157 @@ WP-15's interface block.
 - **`filename` and `size` are always present** (legacy omitted the keys until a file existed) and
   **`folder` is `""` rather than `null`** when there is none, which is what legacy's subscription
   path emitted and what the fixture records.
+
+---
+
+## Wave-2 integration pass (integrator, 2026-09-04)
+
+### The tree
+
+**Nothing was uncommitted and no code was discarded.** `git status` was clean after WP-12/13/14/15
+(in progress)/16 landed; the only ignored path in the tree was `target/`, which `.gitignore`
+already covers. No build artefacts, no tool caches, no strays. The `sh`/`py` fixture stand-ins
+still carry mode 100755.
+
+### Gates, all green on `rustc 1.95.0 (59807616e 2026-04-14)`
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all` | no diff |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the CI form) | clean |
+| `cargo test --workspace` / `--locked` | **1 624 passed, 0 failed**, 76 test binaries |
+| `cargo test -p aulos-workspace-tests` | 12 arch + 10 packaging + 3 Δ C9 + 1 SC-equivalence |
+| `cargo test -p aulos-provider-sc --no-default-features` (the `plain` client) | 165 passed |
+| `python3 crates/aulos-provider-ytdlp/tests/shim_contract.py` | every check passed |
+| `python3 tools/capture/verify.py` | `OK — … 131 v1 case(s) verified` |
+
+**No test was deleted, weakened or `#[ignore]`d.** The single "ignored" line is the same
+```` ```ignore ```` documentation block in `aulos-store`'s `import::canonical` module doc that
+wave 1 recorded; it now *could* compile, since WP-12 created `aulos_queue::canonical_key`, but
+turning a doc example into a cross-crate dev-dependency of `aulos-store` is not worth it.
+
+Three tests were **retargeted** and two **strengthened**; each is justified where it appears
+above and again under "Tests changed" below. Nothing was retargeted to dodge a failure that was
+really a product bug.
+
+### What was applied
+
+Ten requests were real changes; five were verified as already delivered by the package they were
+addressed to; three were decided *not* to do, with the reasoning recorded inline; and eight are
+carried forward, all of them to WP-17/WP-18, which have not landed.
+
+| Request (owner) | Change |
+|---|---|
+| `CancelScope::Generation` cannot isolate one add (WP-14 → WP-12's file) | `add_generation` split into a per-add stamp plus a `cancel_epoch`; the "one line" the note asked for would have made a later add condemn an earlier one's resolve |
+| `SubCmd::Add` carries only three fields, a v1 parity gap (WP-16 → `aulos-core`) | it now carries `DownloadRequest` + `check_interval_minutes`; ten legacy `POST subscribe` fields stop being silently dropped, and both API routes lost their follow-up `Update` |
+| `OutTmplJob::merge_info` with the compacted entry blob (WP-12/WP-06 → the ytdlp provider) | `aulos_provider::outtmpl_info` (the shared §7.5 filter) + `aulos_provider_ytdlp::outtmpl_job` + one call in `YtdlpProvider::download`; **and** `compact_entry` stopped persisting whole raw info dicts |
+| `#[derive(Hash)]` on `Selection` (WP-12 → `aulos-core`) | derived; `DedupeKey`'s hand-written `Hash` deleted |
+| `Notifier` belongs in `aulos-core::event` (WP-16 → `aulos-core`, DESIGN §12.6) | moved, re-exported from `aulos-telegram::watch`; no dependency and no call site changed |
+| `RemoveReason`'s wire strings differ from PROTOCOL §5.7 (WP-13 → `aulos-core`) | serde renames to `auto_cleared`/`group_cascade` plus `as_str`/`Display`, all four pinned by one test |
+| `PluginManifest.warnings` are visible nowhere (WP-14 → `aulos-provider`/`aulos-core`) | `ReloadReport.warnings`, `CommandLoadResult.warnings`, `Registry::command_warnings()`, `GET api/v2/providers`'s `warnings` and `healthz.plugin_warnings` |
+| `GET api/v2/items?q=` filters the page, not the query (WP-14 → `aulos-store`) | `ItemFilter.title_like` + a `LIKE ? ESCAPE '\'` term, so `total` and the cursor describe the matching set |
+| A legacy add for an advisory catalog is rejected (WP-15 → the v1 shim) | `v1::request::snap_to_advisory_catalog`, called from `POST <p>add` — a **confirmed** v1 parity break, reproduced by a test before it was fixed |
+| DESIGN §3 omits `aulos-api → aulos-provider` (WP-14 → the docs) | the §3 row gained the crate; `arch.rs`'s amendment comment became a plain explanation |
+
+### Decisions taken, where the note asked for one
+
+- **`ViewExtras.download_url` stays patched in `aulos-api`; the engine-side formatter is not
+  built.** Both WP-13 and WP-14 proposed it and both called it "the cheaper fix". It is cheaper on
+  CPU — one parse per frame per socket, three of fourteen frame kinds — but it is wiring a build
+  can forget, and forgetting it silently nulls the field on every surface, whereas `aulos-api`
+  always holds the `Config`. The correctness gap the notes worried about does not exist: the
+  aggregator emits a `delta` only for an id whose full object has already gone out, and that
+  publish marks the state dirty, so `Published` always holds it. The `DownloadType::Video`
+  fallbacks are unreachable defensive code and now say so.
+- **`RemoveReason`: the documents win, not the implementation.** DESIGN §15.1 and PROTOCOL §5.7
+  agree with each other and BRIEF is silent, so per BRIEF's own precedence rule the wire strings
+  changed rather than the two documents. Decided before the iOS client shipped, which is the
+  deadline the WP-13 note set.
+- **A `command` plugin's warnings are keyed by directory, not by provider id**, because a
+  hook-only manifest can warn without registering a provider, and they are **outside**
+  `ReloadReport::is_empty` so a no-op rescan cannot publish a `providers` frame.
+- **The advisory-catalog snap is confined to a download type the catalog declares.** `audio` on a
+  StreamingCommunity URL still answers `400`: SC serves no audio-only rendition, and a refusal is
+  more honest than silently handing back a video file. `v2` is untouched — a v2 client reads
+  `GET api/v2/catalog?url=` first and deserves the honest error if it ignores it.
+
+### Requests deliberately not applied
+
+Each is a genuine improvement rather than an integration fix, and each is recorded inline at its
+bullet: the additive per-item beat on `ProgressSink` (the factory-wide counter already gives
+DESIGN §4.7's discrimination, proven by a test); `Provider::describe()` and
+`Provider::partials_resumable()`/`keeps_entry_after_success()` (new surface on a trait five crates
+implement); lifting `parse_enabled` into `aulos-core` (would move code without removing any); and
+having the `seq` allocator hand out `1` first so `Seq(0)` means "no frame" (an `aulos-store` change
+whose only current beneficiary is a comment).
+
+### Tests changed, and why
+
+| Test | Change |
+|---|---|
+| `aulos-queue add::a_single_add_inserts_resolving_and_acks_before_resolution` | expected generation `0` → `1`; it pinned the behaviour the WP-14 request asked to change |
+| `aulos-queue resolve::cancel_resolve_by_generation_leaves_a_concurrent_add_running` | asserted the *opposite* of its own name ("both adds are in that generation"); now asserts the name, plus that `All` still condemns the survivor |
+| `aulos-api rest_queue::cancel_resolve_scopes_by_generation_…` | the `todo(WP-12)` `assert_eq!` flipped to `assert_ne!`, plus a check that the concurrent add is untouched |
+| `aulos-subscriptions check_parity::an_empty_url_is_missing_url` | **retargeted**, not deleted: `SubCmd::Add` now carries a typed `Url`, so the branch is unreachable by construction, and it was already unreachable over HTTP (the golden corpus says so). It now covers the `_normalize_url` trim/uniqueness parity it shared a block with, and still pins the legacy string |
+| `aulos-core reload::an_empty_report_serialises_four_arrays` | five arrays now; a companion test pins that a warning alone is not a change |
+| `aulos-core event::notice_and_reason_enums_serialise_snake_case` | **strengthened** to walk all four `RemoveReason`s and cross-check serde, `as_str`, `Display` and the round trip |
+| `aulos-provider plugin_example::the_example_plugin_resolves_and_downloads_end_to_end` | see below |
+| `aulos-api v1_routes` history assertions (5) | see below |
+
+### Two flaky tests fixed, both load-sensitive, both pre-existing
+
+Neither was caused by this pass; both surfaced because a full `cargo test --workspace` run puts 76
+test binaries on the machine at once, and both passed in isolation every time.
+
+1. **`plugin_example::the_example_plugin_resolves_and_downloads_end_to_end`** asserted
+   `stages.contains(&Stage::Postprocessing)` — which the plugin's own
+   `[progress] last_match_wins = true` explicitly does not guarantee, as the comment *two lines
+   below the assertion* already said: `stage=mux` and `stage=done` can arrive in one read, and then
+   only `done` survives. The racy assertion is gone; the `mux → postprocessing` mapping is now
+   pinned deterministically off the shipped manifest's `status_map`, and each leg is already driven
+   per line by `command::progress::tests::status_map_translates_mux_to_postprocessing` against the
+   same spec. The runtime assertion is the one the contract guarantees: the item leaves `preparing`
+   and only ever into a stage the `status_map` declares.
+2. **Five `v1_routes` assertions read `GET history` immediately after `rig.settle()`**, which is six
+   fixed 20 ms sleeps. `GET history` sources `queue`/`pending` from the **published snapshot**
+   (DESIGN §11.4), which the aggregator refreshes on its own tick, so a row that
+   `GET api/v2/items/{id}` already reports terminal can still sit in the last published generation
+   — that is the documented ordering ("a REST reader's cursor is never newer than the socket"), not
+   a bug. All five now poll for the condition through one `until_history_lacks` helper.
+
+### DESIGN.md / PROTOCOL.md edits made here
+
+- **DESIGN §3**: the `aulos-api` row lists `aulos-provider` (WP-14's request).
+- **DESIGN §16.3**: the `healthz` payload gained `plugin_warnings`, with a paragraph on how it
+  relates to `ReloadReport.failed` and `GET api/v2/providers`.
+- **PROTOCOL §4.6**: `provider` may be the literal `"merged"`, and a `?url=` matching nothing
+  answers the merged catalog with `match: null` rather than an error (WP-14's two requests).
+- **PROTOCOL §4.7**: adopted the `POST api/v2/items/clear` row (WP-14's request), and documented
+  the `warnings` key on `api/v2/providers` and `plugins/reload`.
+
+**Still documentation debt**, unchanged from wave 1: the five wave-0 deviations (`ProviderId`/
+`FileSlot` hoisted into `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl`
+in `aulos-provider`, `FormatSpec.flags.slow` on `mp4`, `ChatConfig`'s twelve keys) and the wave-1
+ones recorded in prose here. This pass paid for its own changes and did not grow the debt.
+
+### Carried forward — every request in this file that is still open
+
+All eight are addressed to `aulos-server` (WP-17) or the e2e scripts (WP-18), neither of which has
+landed. **None of them blocks WP-17 starting; two of them are on its critical path**, marked ⚠.
+
+| Request | Owner |
+|---|---|
+| ⚠ Define the `HookFinalizer` newtype over the engine handle and pass it to `HookDispatcher::with_finalizer`, and wire `Engine::with_pre_terminal(...)` over `HookDispatcher`'s hook list — **without both, a `best_remux` item never finalises** | WP-17 |
+| ⚠ Call `Aggregator::with_done_total(RecoveryReport::terminal_total)`, or a restart reports `done_total` as the window length and every client believes its history was truncated | WP-17 |
+| Take `telegram_actor.incoming()` and `health_handle()` **before** `spawn` consumes the actor; spawn `transport::poll_updates(...)` next to `actor.spawn(inbox)` | WP-17 |
+| `ApiState::with_info(ServerInfo::new(&cfg, clock).with_yt_dlp(runner.identity().yt_dlp))` once the shim has answered, or `capabilities.yt_dlp`, `GET <p>version` and `healthz.yt_dlp` stay `null` | WP-17 |
+| Implement `aulos_subscriptions::check::OptionsSource` over the `Arc<ArcSwap<YtdlOptions>>` (four lines) | WP-17 |
+| Call `config::load_with_warnings()` **and** `YtdlOptions::load(...)`, merging both reports before the single exit-2 step | WP-17 |
+| `Registry::set_command_loader(CommandPluginLoader::with_env(PluginEnv { state_dir }))` at boot, or `{cookies_file}` renders empty | WP-17 |
+| Schedule the six-hourly checkpoint and `await store.close()` on shutdown (ask for `pub async fn checkpoint(&self)` rather than reaching into `schema`); run the importer only when the DB file did not exist, handling `ImportFatal` as WP-05's note describes | WP-17 |
+| Add `crates/aulos-provider-ytdlp/tests/smoke_extract.sh` and `tests/e2e/run.sh` — each turns on a CI step that no-ops today | WP-18 |
+
+One request is carried forward **conditionally**: a children channel and a `ProgressSink` on
+`ResolveCtx`. Nothing in v1.0 publishes children before a resolve returns or routes resolution logs
+to an item's event stream, so it stays a design note rather than a gap.

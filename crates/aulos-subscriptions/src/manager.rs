@@ -17,8 +17,7 @@ use aulos_core::clock::Clock;
 use aulos_core::config::Config;
 use aulos_core::event::{DomainEvent, EventSender};
 use aulos_core::id::{ItemId, SubId, UnixMs};
-use aulos_core::paths::RelDir;
-use aulos_core::selection::Selection;
+use aulos_core::request::DownloadRequest;
 use aulos_core::subscription::{
     SubChanges, SubCmd, SubError, SubsHealth, SubscriptionRecord, SubscriptionView,
 };
@@ -91,17 +90,14 @@ struct Slot {
     checking: bool,
 }
 
-/// What `subscribe` needs. Every field except `url`, `selection` and `folder` currently comes from
-/// the effective config, because [`SubCmd::Add`] carries only those three (see
-/// `docs/INTEGRATION-NOTES.md`, WP-16).
+/// What `subscribe` needs: the whole download template [`SubCmd::Add`] carries, with the two
+/// fields the caller may leave to the effective config already resolved.
 #[derive(Clone, Debug)]
 struct NewSubscription {
     url: Box<str>,
-    selection: Selection,
-    folder: Option<RelDir>,
+    request: Box<DownloadRequest>,
     check_interval_minutes: u32,
     chapter_template: Box<str>,
-    playlist_item_limit: u32,
 }
 
 /// A finished subscribe probe, on its way back to the loop.
@@ -228,22 +224,24 @@ impl Manager {
     async fn on_cmd(&mut self, cmd: SubCmd) {
         match cmd {
             SubCmd::Add {
-                url,
-                selection,
-                folder,
+                request,
+                check_interval_minutes,
                 ack,
             } => {
+                // An empty `chapter_template` means "use the configured default"
+                // (`DownloadRequest::new`'s contract), and the record stores the effective value.
+                let chapter_template: Box<str> = if request.chapter_template.is_empty() {
+                    self.deps.cfg.default_chapter_template().into()
+                } else {
+                    request.chapter_template.clone()
+                };
                 let req = NewSubscription {
-                    url,
-                    selection: *selection,
-                    folder,
-                    check_interval_minutes: self
-                        .deps
-                        .cfg
-                        .subscription_default_check_interval
+                    url: Box::from(request.url.as_str()),
+                    request,
+                    check_interval_minutes: check_interval_minutes
+                        .unwrap_or(self.deps.cfg.subscription_default_check_interval)
                         .max(1),
-                    chapter_template: self.deps.cfg.default_chapter_template().into(),
-                    playlist_item_limit: self.deps.cfg.default_option_playlist_item_limit,
+                    chapter_template,
                 };
                 self.begin_subscribe(req, ack);
             }
@@ -337,11 +335,19 @@ impl Manager {
         let backfill = feed.backfill_ids();
         let name = feed.name.unwrap_or_else(|| req.url.clone());
 
-        let mut record = SubscriptionRecord::new(SubId::new(), name, parsed, req.selection);
+        let template = *req.request;
+        let mut record = SubscriptionRecord::new(SubId::new(), name, parsed, template.selection);
         record.check_interval_minutes = req.check_interval_minutes.max(1);
-        record.folder = req.folder;
+        record.folder = template.folder;
         record.chapter_template = req.chapter_template;
-        record.playlist_item_limit = req.playlist_item_limit;
+        record.playlist_item_limit = template.playlist_item_limit;
+        record.custom_name_prefix = template.custom_name_prefix;
+        record.auto_start = template.auto_start;
+        record.split_by_chapters = template.split_by_chapters;
+        record.subtitle_language = template.subtitle_language;
+        record.subtitle_mode = template.subtitle_mode;
+        record.ytdl_options_presets = template.ytdl_options_presets;
+        record.ytdl_options_overrides = template.ytdl_options_overrides;
         record.last_checked = Some(now);
         record.next_due = Some(self.timing.next_due(
             now,

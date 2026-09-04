@@ -890,6 +890,10 @@ This is what lets a share sheet be honest: paste a StreamingCommunity link and t
 collapses to a single "Source" entry with an explanation; paste a YouTube link and the full matrix
 appears — with no client release.
 
+A `?url=` that **nothing** matches is not an error: the answer is the merged catalog with
+`provider: "merged"` and `match: null`, so a picker always has something to render. A URL no
+provider will take is reported when you try to add it, as `unsupported_url` (§4.1).
+
 Use `capabilities.formats` for the picker's static defaults and `catalog?url=` to refine it once a
 URL is known.
 
@@ -903,7 +907,7 @@ Every key below is **always present**; the same "optional means `null`, never ab
 | Key | Type | Notes |
 |---|---|---|
 | `etag` | `string` | also sent as the `ETag` header |
-| `provider` | `string` | the provider whose catalog this is |
+| `provider` | `string` | the provider whose catalog this is, or the literal `"merged"` for a query with no `?url=`. `"merged"` is not a legal provider id, and `match` is `null` on that same payload, so the two facts together are unambiguous. |
 | `match` | `{ score: integer, reason: string }` | `reason` ∈ `"host_contains" \| "host_regex" \| "path_regex" \| "forced" \| "fallback"`; only present for `?url=` queries, `null` for the merged catalog |
 | `runner_up` | `{ provider: string, score: integer } \| null` | the provider that would have been chosen next |
 | `naming` | `"template" \| "provider"` | `"template"` = the file name comes from `OUTPUT_TEMPLATE*`, so `custom_name_prefix` and `chapter_template` are meaningful. `"provider"` = the provider names the file itself and ignores those templates (StreamingCommunity does), so a picker should grey them out. Those are the only two values. |
@@ -1031,8 +1035,9 @@ always correct because every option has a server-side default.
 | GET | `api/v2/ytdl-options` | — | `200 {"ok":true,"msg":"","update_time":1757000200.412,"keys":[…],"presets":[…]}` (values are redacted) | — |
 | POST | `api/v2/ytdl-options/reload` | — | `200 {"ok":true,"msg":"","update_time":…}` | — |
 | GET | `api/v2/import-report` | — | `200` the importer's report (DESIGN §7.6.6) | 404 when nothing was imported |
-| GET | `api/v2/providers` | — | `200 {"providers":[{id,state,reason,version,capabilities,limits,argv}]}` | — |
-| POST | `api/v2/plugins/reload` | — | `200 {"added":[],"updated":[],"removed":[],"failed":[]}` | — |
+| POST | `api/v2/items/clear` | `{"where":"done"}` or `{}` | `200 {"removed":[ids],"seq":…}` | 400 |
+| GET | `api/v2/providers` | — | `200 {"providers":[{id,state,reason,version,capabilities,limits,argv}],"warnings":[…]}` | — |
+| POST | `api/v2/plugins/reload` | — | `200 {"added":[],"updated":[],"removed":[],"failed":[],"warnings":[]}` | — |
 | GET | `api/v2/resolve-preview` | `?url=` | `200 {"provider":…,"score":…,"reason":…,"runner_up":{…}}` | 400 |
 | GET | `api/v2/debug/options` | `?item_id=` or an add body | `200` the merged yt-dlp option dict, each key annotated with the layer it came from | 404 |
 | GET | `<p>download/*`, `<p>audio_download/*` | — | the file, with `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `Content-Type` | 404 |
@@ -1049,9 +1054,20 @@ resolution tasks and pending expansions it stopped; items already created keep t
 follow it with a `delete` if you want them gone. Whether it is available is advertised as the
 `cancel_resolve` feature in `capabilities.features`.
 
+`POST api/v2/items/clear` is how a v2 client clears history in one call — the counterpart of the
+v1 `POST <p>delete {"where":"done"}`. Without it a v2-only deployment would have to delete rows one
+id at a time. `{"where":"done"}` and `{}` both mean "every terminal row"; the response lists the
+ids that went, and each one also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
+
 `api/v2/debug/options` is worth knowing about: it answers "why did my `YTDL_OPTIONS` not take
 effect?" by showing the fully merged dict with a per-key `source` label
 (`env` / `file` / `preset:<name>` / `request` / `aulos`).
+
+`api/v2/providers`' `warnings` and `plugins/reload`'s are the **non-fatal** problems of the last
+plugin scan, as `<dir>: <key>: <message>` — a clamped `limits.max_concurrent`, an auto-anchored
+`host_regex`, a `{cookies_file}` with nothing to point at. The fatal ones are elsewhere: a
+directory that produced nothing at all is in `failed`, and a manifest that produced only a matcher
+is a `degraded` entry in `providers`. `healthz` carries the same list as `plugin_warnings`.
 
 The file routes support `Range` and `If-Range`, so a client can stream or resume. They are behind
 the same auth as everything else.

@@ -27,6 +27,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use aulos_core::catalog::FormatCatalog;
 use aulos_core::{SourceKind, SourceRef};
 use aulos_queue::{AddError, AddOutcome, CancelScope, ResolveReport};
 use axum::extract::State;
@@ -92,7 +93,15 @@ pub async fn add(
 ) -> Result<Json<Value>, ApiError> {
     let root = super::read_json_object(&body)?;
     let presets = super::known_presets(&state);
-    let request = request::parse_download_options(&state.cfg, &presets, root)?;
+    let mut request = request::parse_download_options(&state.cfg, &presets, root)?;
+
+    // Legacy had no per-provider catalog, so it accepted every matrix-legal selection for every
+    // URL. A provider whose catalog is *advisory* (`streamingcommunity`: one HLS rendition, one
+    // `mp4`/`best` entry) would otherwise reject a request legacy accepted — see
+    // `request::snap_to_advisory_catalog`.
+    if let Some(catalog) = catalog_for(&state, &request.url) {
+        request::snap_to_advisory_catalog(&mut request, &catalog);
+    }
 
     let source = SourceRef::bare(SourceKind::ApiV1);
     let outcome = match state.engine.add(vec![request], source).await {
@@ -104,6 +113,19 @@ pub async fn add(
     };
 
     Ok(Json(answer(&state, outcome).await))
+}
+
+/// The catalog of the provider that would take this URL, if any.
+///
+/// `None` when nothing matches: the engine answers that with `unsupported_url`, which is the
+/// error the client should see rather than a validation failure invented here.
+fn catalog_for(state: &ApiState, url: &url::Url) -> Option<std::sync::Arc<FormatCatalog>> {
+    let registry = match state.registry.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let picked = registry.pick(url, None)?;
+    registry.by_id(&picked.id).map(|p| p.catalog())
 }
 
 /// The response body, after the bounded pre-resolve.

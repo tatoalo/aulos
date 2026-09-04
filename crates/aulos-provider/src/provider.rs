@@ -421,7 +421,13 @@ pub struct DownloadCtx<'a> {
     pub out_dir: PathBuf,
     /// The scratch directory: absolute and already created.
     pub tmp_dir: PathBuf,
-    /// The output-name templates, playlist/channel fields pre-resolved.
+    /// The output-name templates, as the engine built them from the effective config.
+    ///
+    /// The `playlist*`/`channel*` **field pre-resolution** legacy also did is *not* applied here:
+    /// evaluating a yt-dlp template needs yt-dlp, and `aulos-queue` may not depend on a provider
+    /// crate (DESIGN §3). A provider that wants it does it itself —
+    /// `aulos_provider_ytdlp::outtmpl_job` plus `YtdlpProvider::resolve_outtmpl` — and for a
+    /// provider whose templates reference no such field the two are identical.
     pub outtmpl: OutTmpl,
     /// Cancelled on user cancel and on shutdown. **Must** be observed, and must kill the whole
     /// process group (DESIGN §6.5.3).

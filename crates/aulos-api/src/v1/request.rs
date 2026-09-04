@@ -19,9 +19,10 @@
 
 use std::collections::BTreeSet;
 
+use aulos_core::catalog::FormatCatalog;
 use aulos_core::{
-    Config, DownloadRequest, ErrorCode, FormatId, QualityId, RelDir, Selection, SubtitleLang,
-    SubtitleMode,
+    Codec, Config, DownloadRequest, ErrorCode, FormatId, QualityId, RelDir, Selection,
+    SubtitleLang, SubtitleMode,
 };
 use serde_json::{Map, Value};
 use url::Url;
@@ -443,6 +444,63 @@ fn invalid(field: &str, message: impl AsRef<str>) -> ApiError {
 /// [`invalid`] with a `&'static str` field, for the subscribe helpers.
 fn invalid_field(field: &'static str, message: &str) -> ApiError {
     invalid(field, message)
+}
+
+/// Snaps a legacy selection onto an **advisory** catalog's only offering (DESIGN §6.6).
+///
+/// Legacy had one hard-coded format matrix and no per-provider catalog, so it accepted every
+/// matrix-legal `(download_type, codec, format, quality)` for *every* URL and let the downloader
+/// do whatever it could. `streamingcommunity` serves exactly one HLS rendition and advertises one
+/// **advisory** `mp4`/`best` entry — the word means "the server records your choice but does not
+/// honour it" — so an unmodified legacy client asking for `1080`/`any`/`h264` on an SC link would
+/// be rejected by the engine's catalog check for a request legacy accepted. That is a v1 parity
+/// break, and this is the WP-15 request in `docs/INTEGRATION-NOTES.md`.
+///
+/// The rule is narrow on purpose: only a download type the catalog **does** declare, and only
+/// when that type's default format is `advisory`. A download type the catalog does not declare at
+/// all keeps its `400` — SC cannot produce audio-only, and saying so is better than silently
+/// handing back a video file. `v2` is untouched: a v2 client reads
+/// `GET api/v2/catalog?url=` first and gets an honest error if it ignores it.
+pub fn snap_to_advisory_catalog(request: &mut DownloadRequest, catalog: &FormatCatalog) {
+    let Some(spec) = catalog.spec_for(request.selection.download_type) else {
+        return;
+    };
+    let Some(default) = spec.format(&spec.default_format) else {
+        return;
+    };
+    if !default.flags.advisory {
+        return;
+    }
+    if spec
+        .format(request.selection.format.as_str())
+        .is_some_and(|f| {
+            f.qualities
+                .iter()
+                .any(|q| &*q.id == request.selection.quality.as_str())
+        })
+    {
+        // Already something this catalog offers; leave it exactly as asked.
+        return;
+    }
+    let Ok(format) = FormatId::parse(&default.id) else {
+        return;
+    };
+    let Ok(quality) = QualityId::parse(&default.default_quality) else {
+        return;
+    };
+    tracing::debug!(
+        provider = %catalog.provider,
+        from = %request.selection.format,
+        to = %format,
+        "v1: snapped a legacy selection onto the provider's advisory catalog"
+    );
+    // The codec control is hidden when `codecs` is empty, so `auto` is the only honest value.
+    let codec = if default.codecs.is_empty() {
+        Codec::Auto
+    } else {
+        request.selection.codec
+    };
+    request.selection = Selection::new(request.selection.download_type, codec, format, quality);
 }
 
 #[cfg(test)]

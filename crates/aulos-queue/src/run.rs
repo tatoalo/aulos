@@ -98,7 +98,8 @@ impl Engine {
     ///
     /// The playlist/channel **field pre-resolution** legacy also did (`_resolve_outtmpl_fields`)
     /// is not applied here: it lives in `aulos_provider_ytdlp::outtmpl`, and `aulos-queue` may not
-    /// depend on that crate (DESIGN §3). See `docs/INTEGRATION-NOTES.md`, WP-12.
+    /// depend on that crate (DESIGN §3). The `ytdlp` provider applies it to these templates
+    /// itself, in `download` — see `docs/INTEGRATION-NOTES.md`, WP-12.
     pub(crate) fn outtmpl_for(&self, item: &Item) -> OutTmpl {
         let base = &*self.cfg.output_template;
         let prefix = &*item.request.custom_name_prefix;

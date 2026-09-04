@@ -467,6 +467,9 @@ impl Harness {
     }
 
     /// `SubCmd::Add` with the harness defaults.
+    ///
+    /// `url` must parse: [`SubCmd::Add`] carries a typed `Url`, so the API layer is what rejects
+    /// a missing or malformed one (the wave-2 note in `docs/INTEGRATION-NOTES.md`).
     pub async fn subscribe(
         &self,
         url: &str,
@@ -474,9 +477,29 @@ impl Harness {
         let (ack, reply) = oneshot::channel();
         self.handle
             .send(SubCmd::Add {
-                url: url.into(),
-                selection: Box::new(selection()),
-                folder: None,
+                request: Box::new(aulos_core::request::DownloadRequest::new(
+                    url::Url::parse(url).expect("the harness subscribes to a parseable url"),
+                    selection(),
+                )),
+                check_interval_minutes: None,
+                ack,
+            })
+            .await
+            .unwrap();
+        reply.await.unwrap().map(|v| *v)
+    }
+
+    /// `SubCmd::Add` with a caller-supplied template and interval.
+    pub async fn subscribe_with(
+        &self,
+        request: aulos_core::request::DownloadRequest,
+        check_interval_minutes: Option<u32>,
+    ) -> Result<SubscriptionView, aulos_core::subscription::SubError> {
+        let (ack, reply) = oneshot::channel();
+        self.handle
+            .send(SubCmd::Add {
+                request: Box::new(request),
+                check_interval_minutes,
                 ack,
             })
             .await

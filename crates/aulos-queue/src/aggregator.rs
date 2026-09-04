@@ -1734,7 +1734,7 @@ mod tests {
         );
         assert_eq!(frames[0].1["reason"], "deleted");
         assert_eq!(frames[0].1["ids"].as_array().unwrap().len(), 2);
-        assert_eq!(frames[1].1["reason"], "expired");
+        assert_eq!(frames[1].1["reason"], "auto_cleared");
 
         // One reason in a window is one frame.
         let d = view(Status::Finished, 4);

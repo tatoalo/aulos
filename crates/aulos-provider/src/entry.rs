@@ -169,6 +169,41 @@ impl EntryHints {
     pub const fn in_playlist(&self) -> bool {
         self.playlist_index.is_some()
     }
+
+    /// Whether this entry is part of a channel listing, the other half of that swap.
+    #[must_use]
+    pub const fn in_channel(&self) -> bool {
+        self.channel_index.is_some()
+    }
+}
+
+/// The two info keys DESIGN §7.5 names alongside the `^(playlist|channel)` prefix match.
+const OUTTMPL_INFO_EXTRA: [&str; 2] = ["n_entries", "__last_playlist_index"];
+
+/// The subset of a provider's raw info dict that the output-name templates need
+/// (DESIGN §7.5, §9.8).
+///
+/// Keys matching `^(playlist|channel)` plus `n_entries` and `__last_playlist_index` — which is
+/// exactly what legacy's `_resolve_outtmpl_fields` evaluated a template against, and exactly what
+/// §7.5 keeps in `items.entry_json` so it survives a restart. Everything else is dropped: the raw
+/// yt-dlp info dict for one video runs to tens of kilobytes, and §7.5 exists to bound that field.
+///
+/// A non-object `state` yields an empty map, so a provider whose blob is not a dict costs nothing.
+#[must_use]
+pub fn outtmpl_info(state: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let Some(object) = state.as_object() else {
+        return out;
+    };
+    for (key, value) in object {
+        if key.starts_with("playlist")
+            || key.starts_with("channel")
+            || OUTTMPL_INFO_EXTRA.contains(&key.as_str())
+        {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -190,6 +225,40 @@ mod tests {
         assert_eq!(serde_json::from_value::<MediaEntry>(json).unwrap(), e);
         assert!(!e.is_playlist());
         assert!(e.children().is_empty());
+    }
+
+    #[test]
+    fn outtmpl_info_keeps_exactly_the_design_7_5_key_set() {
+        let state = serde_json::json!({
+            "playlist_id": "PL1",
+            "playlist_uploader": "Someone",
+            "playlist_index": 3,
+            "channel_id": "UC1",
+            "channel": "A channel",
+            "n_entries": 12,
+            "__last_playlist_index": 12,
+            "title": "Episode 7",
+            "formats": [{ "format_id": "137" }],
+            "description": "x".repeat(4096),
+        });
+        let kept = outtmpl_info(&state);
+        let mut keys: Vec<&str> = kept.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "__last_playlist_index",
+                "channel",
+                "channel_id",
+                "n_entries",
+                "playlist_id",
+                "playlist_index",
+                "playlist_uploader",
+            ]
+        );
+        assert_eq!(kept["playlist_id"], "PL1");
+        assert!(outtmpl_info(&Value::Null).is_empty());
+        assert!(outtmpl_info(&Value::String("opaque".into())).is_empty());
     }
 
     #[test]

@@ -69,7 +69,20 @@ pub fn compact_entry(provider: &ProviderId, entry: &MediaEntry) -> Option<EntryB
         obj.insert(HINTS_KEY.to_owned(), hints_json(&entry.hints));
     }
     if !entry.state.is_null() {
-        obj.insert(STATE_KEY.to_owned(), entry.state.clone());
+        // DESIGN §7.5 keeps `^(playlist|channel)`, `n_entries` and `__last_playlist_index` — the
+        // fields `_resolve_outtmpl_fields` evaluates a template against — and drops the rest of
+        // the raw info dict, which for one yt-dlp video runs to tens of kilobytes. Storing it
+        // whole is what §7.5 exists to prevent.
+        let info = aulos_provider::outtmpl_info(&entry.state);
+        if entry.state.is_object() {
+            if !info.is_empty() && (entry.hints.in_playlist() || entry.hints.in_channel()) {
+                obj.insert(STATE_KEY.to_owned(), Value::Object(info));
+            }
+        } else {
+            // Not a dict, so §7.5's key rules do not apply and the provider's own opaque blob is
+            // kept verbatim — a `fake` provider's script state, for instance.
+            obj.insert(STATE_KEY.to_owned(), entry.state.clone());
+        }
     }
     (!obj.is_empty()).then(|| EntryBlob::new(Value::Object(obj)))
 }
@@ -231,6 +244,55 @@ mod tests {
         assert_eq!(rebuilt.hints, entry.hints);
         assert!(rebuilt.hints.in_playlist());
         assert_eq!(&*rebuilt.media_id, "m7");
+    }
+
+    #[test]
+    fn a_playlist_child_keeps_only_the_design_7_5_info_keys() {
+        let mut entry = MediaEntry::video("m7", "Episode 7", url());
+        entry.hints = EntryHints {
+            playlist_index: Some(3),
+            ..EntryHints::default()
+        };
+        entry.state = serde_json::json!({
+            "playlist_id": "PL1",
+            "playlist_uploader": "Someone",
+            "n_entries": 12,
+            "__last_playlist_index": 12,
+            "formats": [{ "format_id": "137" }],
+            "description": "x".repeat(8192),
+        });
+        let blob = compact_entry(&provider("ytdlp"), &entry).expect("a playlist child");
+        let state = blob.as_value()[STATE_KEY].as_object().expect("an object");
+        let mut keys: Vec<&str> = state.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "__last_playlist_index",
+                "n_entries",
+                "playlist_id",
+                "playlist_uploader"
+            ],
+            "the raw info dict is not persisted whole (DESIGN §7.5)"
+        );
+        assert_eq!(
+            rebuild_entry(&row("ytdlp", Some(blob)))
+                .state
+                .get("playlist_uploader")
+                .and_then(Value::as_str),
+            Some("Someone"),
+            "and it survives a restart, so `%(playlist_uploader)s` still resolves"
+        );
+    }
+
+    #[test]
+    fn a_non_playlist_child_persists_no_info_dict() {
+        let mut entry = MediaEntry::video("m7", "Episode 7", url());
+        entry.state = serde_json::json!({ "title": "Episode 7", "playlist_id": null });
+        assert!(
+            compact_entry(&provider("ytdlp"), &entry).is_none(),
+            "DESIGN §7.5: a ytdlp non-playlist child keeps nothing"
+        );
     }
 
     #[test]

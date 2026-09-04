@@ -34,6 +34,129 @@ fn with(ord: Ord0, status: Status) -> Item {
 // items / paging
 // ---------------------------------------------------------------------------
 
+/// `title_like` is a `WHERE` predicate, so `total` counts the *matching* set and a page of the
+/// filtered set is full — which is what makes `GET api/v2/items?q=` pageable (the WP-14 request
+/// in `docs/INTEGRATION-NOTES.md`).
+#[tokio::test]
+async fn title_like_filters_the_query_not_the_page() {
+    let h = support::harness();
+    let mut rows = Vec::new();
+    for ord in 0..6 {
+        let mut i = with(ord, Status::Queued);
+        i.title = if ord % 2 == 0 {
+            format!("Lo-fi beats {ord}").into()
+        } else {
+            format!("Something else {ord}").into()
+        };
+        rows.push(i);
+    }
+    insert(&h.store, rows).await;
+
+    let hits = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("lo-fi".into()),
+            ..ItemFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(hits.total, 3, "the count is of the matching set");
+    assert_eq!(hits.rows.len(), 3, "and `LIKE` is case-insensitive");
+
+    // A page of two is full, and its cursor continues the *filtered* set.
+    let first = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("Lo-fi".into()),
+            limit: Some(2),
+            ..ItemFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.rows.len(), 2);
+    assert_eq!(first.total, 3);
+    let next = first.next.expect("a cursor");
+    let second = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("Lo-fi".into()),
+            limit: Some(2),
+            after: Some(next),
+            ..ItemFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.rows.len(), 1, "the tail of the filtered set");
+    assert_eq!(&*second.rows[0].title, "Lo-fi beats 4");
+
+    // It composes with the other predicates.
+    let none = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("Lo-fi".into()),
+            ..ItemFilter::terminal()
+        })
+        .await
+        .unwrap();
+    assert_eq!(none.total, 0, "no terminal row matches");
+
+    // An empty or whitespace needle is no predicate at all.
+    for needle in ["", "   "] {
+        let all = h
+            .store
+            .items(ItemFilter {
+                title_like: Some(needle.into()),
+                ..ItemFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.total, 6, "{needle:?} must not filter");
+    }
+}
+
+/// A `%`, `_` or backslash in the needle is matched literally, not as a wildcard.
+#[tokio::test]
+async fn title_like_escapes_the_sql_wildcards() {
+    let h = support::harness();
+    let mut a = with(0, Status::Queued);
+    a.title = "100% Real".into();
+    let mut b = with(1, Status::Queued);
+    b.title = "100 Fake".into();
+    let mut c = with(2, Status::Queued);
+    c.title = "a_b".into();
+    let mut d = with(3, Status::Queued);
+    d.title = "axb".into();
+    insert(&h.store, vec![a, b, c, d]).await;
+
+    let percent = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("100%".into()),
+            ..ItemFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        percent.total, 1,
+        "`%` is a literal, so `100 Fake` must not match"
+    );
+    assert_eq!(&*percent.rows[0].title, "100% Real");
+
+    let underscore = h
+        .store
+        .items(ItemFilter {
+            title_like: Some("a_b".into()),
+            ..ItemFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        underscore.total, 1,
+        "`_` is a literal, so `axb` must not match"
+    );
+    assert_eq!(&*underscore.rows[0].title, "a_b");
+}
+
 #[tokio::test]
 async fn items_are_ordered_by_ord_and_can_be_filtered_and_paged() {
     let h = support::harness();

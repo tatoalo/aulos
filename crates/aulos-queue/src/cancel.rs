@@ -232,6 +232,9 @@ impl Engine {
                     None,
                 )
                 .await;
+                // A retry belongs to no add, so it gets a generation of its own rather than
+                // borrowing the last add's — only `CancelScope::All` can condemn it.
+                self.add_generation += 1;
                 let generation = self.add_generation;
                 self.spawn_resolve(id, generation, None).await;
             } else {
@@ -381,8 +384,9 @@ impl Engine {
 
         if scope == CancelScope::All {
             // Legacy's `cancel_add()` bumped a process-global generation and took no argument, so
-            // this is what a v1 caller gets.
-            self.add_generation += 1;
+            // this is what a v1 caller gets. The epoch — not the per-add generation — is what
+            // condemns work that is already in flight.
+            self.cancel_epoch += 1;
         }
 
         let doomed: Vec<ItemId> = self

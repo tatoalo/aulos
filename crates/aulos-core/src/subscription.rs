@@ -17,7 +17,7 @@ use url::Url;
 use crate::error::{ErrorCode, WireError};
 use crate::id::{SubId, UnixMs};
 use crate::paths::RelDir;
-use crate::request::{SubtitleLang, SubtitleMode};
+use crate::request::{DownloadRequest, SubtitleLang, SubtitleMode};
 use crate::selection::Selection;
 
 /// The persisted subscription row. Mirrors the legacy `SubscriptionInfo` dataclass field for
@@ -242,13 +242,17 @@ pub struct SubsHealth {
 #[non_exhaustive]
 pub enum SubCmd {
     /// Create a subscription from a feed URL, resolving its name and suppressing the backfill.
+    ///
+    /// The whole download template travels with the command, as PLAN WP-16's
+    /// `create(req: DownloadRequest, interval: u32)` asks: legacy's `POST <p>subscribe` accepted
+    /// every one of these fields, and a subset would silently drop the rest.
     Add {
-        /// The feed URL, already trimmed.
-        url: Box<str>,
-        /// The selection new entries are queued with.
-        selection: Box<Selection>,
-        /// Optional custom directory.
-        folder: Option<RelDir>,
+        /// The download template new entries are queued with. `url` is the feed URL; the API
+        /// layer has already trimmed, validated and containment-checked it.
+        request: Box<DownloadRequest>,
+        /// The schedule, in minutes. `None` means `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`; the
+        /// manager clamps to `max(1, n)`.
+        check_interval_minutes: Option<u32>,
         /// Answered with the created record's view.
         ack: oneshot::Sender<Result<Box<SubscriptionView>, SubError>>,
     },

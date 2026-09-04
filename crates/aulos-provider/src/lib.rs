@@ -41,7 +41,7 @@ pub use command::{
     ManifestError, PluginManifest, ProgressParser, ProgressSpec, Template, TemplateCtx,
     TemplateError, Token, TokenScope, discover, load_manifest,
 };
-pub use entry::{EntryHints, EntryKind, LiveStatus, MediaEntry};
+pub use entry::{EntryHints, EntryKind, LiveStatus, MediaEntry, outtmpl_info};
 pub use humansize::{format_bytes, format_hms, parse_bytes, parse_hms, parse_rate};
 pub use outcome::Outcome;
 pub use proc::{Child, EnvPolicy, Lines, ProcError, Rlimits, SpawnSpec, StderrRing, strip_ansi};

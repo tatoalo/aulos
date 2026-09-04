@@ -67,39 +67,20 @@ pub async fn subscribe(
     let parsed = request::parse_download_options(&state.cfg, &presets, root.clone())?;
     let interval = request::parse_check_interval(&state.cfg, &root)?;
 
-    let url: Box<str> = Box::from(parsed.url.as_str());
-    let selection = Box::new(parsed.selection.clone());
-    let folder = parsed.folder.clone();
-    let created = match send(&state, move |ack| SubCmd::Add {
-        url,
-        selection,
-        folder,
+    // Legacy passed the whole download template plus the interval to `add_subscription`, and so
+    // does `SubCmd::Add` — `custom_name_prefix`, `auto_start`, `split_by_chapters`, the two
+    // subtitle fields and both `ytdl_options_*` reach the record rather than being dropped.
+    let request = Box::new(parsed);
+    let view = match send(&state, move |ack| SubCmd::Add {
+        request,
+        check_interval_minutes: Some(interval),
         ack,
     })
     .await
     {
-        Ok(view) => view,
+        Ok(view) => *view,
         Err(Business(message)) => return Ok(Json(status_error(&message))),
         Err(Fatal(err)) => return Err(err),
-    };
-
-    // `SubCmd::Add` carries no interval — the manager fills it from
-    // `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL` (docs/INTEGRATION-NOTES.md, WP-16) — so an explicit
-    // one is applied as an immediate edit. Legacy passed it to `add_subscription` directly; one
-    // extra message on a rare route is the price of not depending on `aulos-subscriptions`.
-    let view = if interval == created.check_interval_minutes {
-        *created
-    } else {
-        let id = created.id.clone();
-        let changes = Box::new(SubChanges {
-            check_interval_minutes: Some(interval),
-            ..SubChanges::default()
-        });
-        match send(&state, move |ack| SubCmd::Update { id, changes, ack }).await {
-            Ok(view) => *view,
-            Err(Business(_)) => *created,
-            Err(Fatal(err)) => return Err(err),
-        }
     };
 
     Ok(Json(

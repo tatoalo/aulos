@@ -359,6 +359,7 @@ pub async fn presets(State(state): State<ApiState>) -> Json<Value> {
 /// `GET api/v2/providers` (PROTOCOL §4.7).
 pub async fn providers(State(state): State<ApiState>) -> Json<Value> {
     let registry = read_registry(&state);
+    let warnings: Vec<&str> = registry.command_warnings().iter().map(|w| &**w).collect();
     let list: Vec<Value> = registry
         .iter()
         .map(|(id, provider, provider_state)| {
@@ -378,7 +379,11 @@ pub async fn providers(State(state): State<ApiState>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "providers": list }))
+    // The non-fatal manifest problems of the last plugin scan, next to the fatal ones a
+    // `plugins/reload` reports as `failed` — clamps and auto-anchors a plugin author needs to see
+    // (the WP-14 request in `docs/INTEGRATION-NOTES.md`). Keyed by directory, because a
+    // hook-only manifest can warn without registering a provider at all.
+    Json(json!({ "providers": list, "warnings": warnings }))
 }
 
 /// `POST api/v2/plugins/reload` — rescan `AULOS_PLUGINS_DIR` (PROTOCOL §4.7, §5.9).

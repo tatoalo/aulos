@@ -284,7 +284,7 @@ async fn the_id_ladder_resolves_a_ulid_a_url_and_a_legacy_media_id() {
             .await;
         assert_eq!(status, 200);
         rig.settle().await;
-        assert!(!history_contains(&rig, "by-ulid").await, "deleted by ULID");
+        until_history_lacks(&rig, "by-ulid").await; // deleted by ULID
 
         // A url — what the shipped `clearCompleted` sends, and what `item.url ?? item.id`
         // resolves to for every row that has one.
@@ -298,7 +298,7 @@ async fn the_id_ladder_resolves_a_ulid_a_url_and_a_legacy_media_id() {
             .await;
         assert_eq!(status, 200);
         rig.settle().await;
-        assert!(!history_contains(&rig, "by-url").await, "deleted by url");
+        until_history_lacks(&rig, "by-url").await; // deleted by url
 
         // A legacy media id — the `fake:` prefixed id the fake provider mints.
         let id = rig.add("https://fake.test/by-media").await;
@@ -312,10 +312,7 @@ async fn the_id_ladder_resolves_a_ulid_a_url_and_a_legacy_media_id() {
             .await;
         assert_eq!(status, 200);
         rig.settle().await;
-        assert!(
-            !history_contains(&rig, "by-media").await,
-            "deleted by media id"
-        );
+        until_history_lacks(&rig, "by-media").await; // deleted by media id
 
         // An unknown token is silently skipped, as legacy did.
         let (status, body) = rig
@@ -403,7 +400,7 @@ async fn a_queue_delete_cancels_a_running_item_before_dropping_the_row() {
 
     let (code, _) = rig.get(&format!("api/v2/items/{id}")).await;
     assert_eq!(code, 404, "the row is gone, not merely cancelled");
-    assert!(!history_contains(&rig, "running").await);
+    until_history_lacks(&rig, "running").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -643,10 +640,8 @@ async fn cancel_add_ignores_its_body_and_aborts_in_flight_resolution() {
             )
             .await;
         assert_eq!(item["status"], "canceled");
-        assert!(
-            !history_contains(&rig, "slow").await,
-            "a cancelled row vanishes from v1, as legacy made cancels vanish"
-        );
+        // A cancelled row vanishes from v1, as legacy made cancels vanish.
+        until_history_lacks(&rig, "slow").await;
     })
     .await;
 }
@@ -1097,8 +1092,7 @@ fn assert_subscription(row: &Value) {
 }
 
 /// Whether any of the three arrays holds an item whose URL contains `needle`.
-async fn history_contains(rig: &Rig, needle: &str) -> bool {
-    let (_, body) = rig.get("history").await;
+fn history_body_contains(body: &Value, needle: &str) -> bool {
     ["queue", "pending", "done"].into_iter().any(|key| {
         body[key]
             .as_array()
@@ -1106,6 +1100,25 @@ async fn history_contains(rig: &Rig, needle: &str) -> bool {
             .flatten()
             .any(|i| i["url"].as_str().unwrap_or_default().contains(needle))
     })
+}
+
+/// Waits until `GET history` no longer mentions `needle`, or panics.
+///
+/// `GET history` sources `queue`/`pending` from the **published snapshot** (DESIGN §11.4), which
+/// the aggregator refreshes on its own tick — so a row that `GET api/v2/items/{id}` already
+/// reports as terminal can still be in the last published generation for up to one tick. That is
+/// the documented ordering ("a REST reader's cursor is never newer than the socket"), not a bug,
+/// so a test must wait for the condition it means rather than for a fixed number of sleeps.
+async fn until_history_lacks(rig: &Rig, needle: &str) {
+    for _ in 0..600 {
+        let (_, body) = rig.get("history").await;
+        if !history_body_contains(&body, needle) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, body) = rig.get("history").await;
+    panic!("timed out waiting for {needle} to leave v1 history; it is {body}");
 }
 
 /// Inserts `count` `finished` rows straight into the store, titled `Row NNNN` in `ord` order.
@@ -1175,4 +1188,86 @@ fn terminal_item(ord: Ord0, title: &str, url: &str) -> Item {
         children_total: None,
         clear_after: None,
     }
+}
+
+/// A legacy `POST add` for a provider whose catalog is **advisory** must be accepted, because
+/// legacy had no per-provider catalog and accepted every matrix-legal combination for every URL.
+/// The WP-15 request in `docs/INTEGRATION-NOTES.md`.
+#[tokio::test]
+async fn a_legacy_add_for_an_advisory_catalog_is_accepted() {
+    let rig = Rig::start("/").await;
+    // Only a download type the advisory catalog declares is snapped. `audio` is *not*: SC serves
+    // no audio-only rendition, and a `400` is more honest than silently handing back a video
+    // file. See `v1::request::snap_to_advisory_catalog`.
+    // Only a download type the advisory catalog declares is snapped. `audio` is *not*: SC serves
+    // no audio-only rendition, and a `400` is more honest than silently handing back a video
+    // file. See `v1::request::snap_to_advisory_catalog`.
+    for (i, (quality, format, codec)) in [
+        ("1080", "any", "h264"),
+        ("best", "mp4", "auto"),
+        ("720", "any", "auto"),
+        ("2160", "any", "vp9"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = rig
+            .post(
+                "add",
+                &json!({
+                    "url": format!("https://streamingcommunity.test/watch/{i}"),
+                    "download_type": "video",
+                    "quality": quality,
+                    "format": format,
+                    "codec": codec,
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "{quality}/{format}/{codec}: {body}");
+        assert_eq!(body["status"], "ok", "{quality}/{format}/{codec}: {body}");
+
+        // And it was snapped to the catalog's one offering, not merely waved through.
+        let id = body["ids"][0].as_str().expect("an id");
+        let (_, item) = rig.get(&format!("api/v2/items/{id}")).await;
+        assert_eq!(item["selection"]["format"], "mp4", "{item}");
+        assert_eq!(item["selection"]["quality"], "best", "{item}");
+        assert_eq!(
+            item["selection"]["codec"], "auto",
+            "the codec control is hidden for this catalog: {item}"
+        );
+    }
+
+    // `audio` is not declared by that catalog and still answers the legacy validation error.
+    let (status, body) = rig
+        .post(
+            "add",
+            &json!({
+                "url": "https://streamingcommunity.test/watch/audio",
+                "download_type": "audio",
+                "quality": "best",
+                "format": "m4a",
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+}
+
+/// The snap is confined to the advisory case: a `ytdlp` URL still gets the full catalog check,
+/// so a selection the catalog does not offer is still a `400` with the legacy string.
+#[tokio::test]
+async fn the_advisory_snap_does_not_loosen_a_real_catalog() {
+    let rig = Rig::start("/").await;
+    let (status, body) = rig
+        .post(
+            "add",
+            &json!({
+                "url": "https://youtube.test/watch?v=1",
+                "download_type": "video",
+                "quality": "1080",
+                "format": "nonsense",
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["field"], "format");
 }

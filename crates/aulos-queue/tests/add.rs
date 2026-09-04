@@ -25,7 +25,10 @@ async fn a_single_add_inserts_resolving_and_acks_before_resolution() {
         .unwrap();
     assert_eq!(out.ids.len(), 1);
     assert!(out.duplicates.is_empty());
-    assert_eq!(out.generation, 0, "the first add generation");
+    assert_eq!(
+        out.generation, 1,
+        "one generation per add, counted from 1 so 0 means \"no add\""
+    );
 
     let id = out.ids[0];
     // Insert status is always `resolving` (DESIGN §8.3), and the row is already persisted when the

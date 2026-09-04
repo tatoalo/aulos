@@ -89,6 +89,7 @@ impl Engine {
 
         let mut next = meta.unwrap_or(ResolveMeta {
             generation,
+            epoch: self.cancel_epoch,
             depth: 0,
             fell_through: false,
             provider: selected.id.clone(),
@@ -96,6 +97,7 @@ impl Engine {
             seen: Vec::new(),
         });
         next.generation = generation;
+        next.epoch = self.cancel_epoch;
         next.provider = selected.id.clone();
         next.runner_up = selected
             .runner_up
@@ -151,8 +153,9 @@ impl Engine {
             self.notify_resolved(id);
             return;
         }
-        if self.add_generation > meta.generation {
-            // A `CancelScope::All` landed while this was in flight.
+        if self.cancel_epoch > meta.epoch {
+            // A `CancelScope::All` landed while this was in flight. Note the epoch, not the
+            // generation: a *later add* must not condemn this one's resolution.
             self.cancel_one(id).await;
             self.notify_resolved(id);
             return;
@@ -349,6 +352,7 @@ impl Engine {
             id,
             Expansion {
                 generation: meta.generation,
+                epoch: meta.epoch,
                 remaining: children,
                 next_index: 1,
                 provider,
@@ -363,7 +367,7 @@ impl Engine {
         let Some(state) = self.expansions.get_mut(&group) else {
             return;
         };
-        if self.add_generation > state.generation {
+        if self.cancel_epoch > state.epoch {
             self.expansions.remove(&group);
             return;
         }

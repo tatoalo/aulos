@@ -16,9 +16,19 @@
 //! Patching the serialised frame rather than the view costs one parse per frame per socket, which
 //! is why it is confined to the three kinds that can carry a file name: `added`, `completed` and
 //! `delta`. A `delta` frame is the only case where the object itself does not carry the item's
-//! `selection`, so the download type is read from [`Published`]; when the record is not there
-//! (a patch for an id the published generation has not caught up with) the video root is used,
-//! which is the correct answer for every download type but `audio`.
+//! `selection`, so the download type is read from [`Published`].
+//!
+//! **On filling the field in the engine instead** (the WP-13/WP-14 proposal in
+//! `docs/INTEGRATION-NOTES.md`): an additive formatter passed to `Engine::new` would fill
+//! `ViewExtras.download_url` once, at the source, and this module's frame patching could go. The
+//! wave-2 integration pass **kept the patching**, because it is unconditionally correct — this
+//! crate always holds the `Config` — whereas an engine-side formatter is wiring that a build can
+//! forget, and forgetting it is silent: every `download_url` on every surface goes `null`. The
+//! [`Published`] lookup below is the only part that could have been a real gap, and it is not:
+//! the aggregator emits a `delta` only for an id it has already sent a full object for, and
+//! publishing a new item always marks the state dirty, so the id is in `Published` by then. The
+//! `DownloadType::Video` fallbacks are therefore unreachable defensive defaults, in the same
+//! sense as `SkipReason::NotCancelable`.
 
 use std::sync::Arc;
 
@@ -159,6 +169,9 @@ fn patch_delta_json(cfg: &Config, published: &Published, patch: &mut Value) {
     if !carries_file {
         return;
     }
+    // Unreachable in practice: a `delta` is only emitted for an id whose full object has already
+    // gone out, and that publish marked the state dirty, so `published` holds it. See the module
+    // docs for why this is a defensive default rather than a fallback.
     let download_type = patch
         .get("id")
         .and_then(Value::as_str)

@@ -23,6 +23,15 @@ pub struct ReloadReport {
     pub removed: Vec<ProviderId>,
     /// Directories whose manifest could not be loaded, with the reason.
     pub failed: Vec<ReloadFailure>,
+    /// Non-fatal load problems from the manifests that *did* load — clamped limits, auto-anchored
+    /// regexes, a `{cookies_file}` with nothing to point at — as `<dir>: <key>: <message>`.
+    ///
+    /// A plugin author needs these and they were previously visible nowhere; `healthz` and
+    /// `GET api/v2/providers` both carry them (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
+    /// Deliberately **not** part of [`ReloadReport::is_empty`]: an unchanged manifest re-derives
+    /// the same warnings on every scan, and a scan that changed nothing must not publish a frame.
+    #[serde(default)]
+    pub warnings: Vec<Box<str>>,
 }
 
 impl ReloadReport {
@@ -63,13 +72,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_report_serialises_four_arrays() {
+    fn an_empty_report_serialises_five_arrays() {
         let v = serde_json::to_value(ReloadReport::empty()).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({ "added": [], "updated": [], "removed": [], "failed": [] })
+            serde_json::json!({
+                "added": [], "updated": [], "removed": [], "failed": [], "warnings": []
+            }),
+            "PROTOCOL §4.7: every list is present and `[]`, never absent and never null"
         );
         assert!(ReloadReport::empty().is_empty());
+    }
+
+    /// `warnings` is deliberately outside `is_empty`: an unchanged manifest re-derives the same
+    /// warnings on every scan, so counting them would make every no-op reload publish a frame.
+    #[test]
+    fn a_warning_alone_is_not_a_change() {
+        let r = ReloadReport {
+            warnings: vec!["loud: limits.max_concurrent: clamped to 1".into()],
+            ..ReloadReport::empty()
+        };
+        assert!(r.is_empty());
+        assert_eq!(r.touched(), 0);
     }
 
     #[test]

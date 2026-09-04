@@ -644,7 +644,7 @@ mod tests {
                     .to_owned()
             })
             .collect();
-        assert_eq!(reasons, ["deleted", "expired"]);
+        assert_eq!(reasons, ["deleted", "auto_cleared"]);
         assert!(frames.iter().all(|f| f.seq == to));
         assert_eq!(merged.removed, 2);
         assert_eq!(merged.delta_items, 1);

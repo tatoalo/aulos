@@ -110,6 +110,10 @@ impl Engine {
             return;
         }
 
+        // One generation per add, so `CancelScope::Generation(n)` isolates this add from a
+        // concurrent one (the WP-14 request in `docs/INTEGRATION-NOTES.md`). The first add is
+        // generation 1, which leaves 0 meaning "no add" for any reader of `AddOutcome`.
+        self.add_generation += 1;
         let generation = self.add_generation;
         let mut views = Vec::with_capacity(items.len());
         for (item, key) in items.into_iter().zip(keys) {

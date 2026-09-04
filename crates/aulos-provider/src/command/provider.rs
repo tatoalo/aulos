@@ -1427,6 +1427,7 @@ pub fn discover(dir: &Path) -> (Vec<Arc<dyn Provider>>, Vec<HookSpec>, ReloadRep
         updated: Vec::new(),
         removed: Vec::new(),
         failed: scan.failed,
+        warnings: scan.warnings,
     };
     (providers, scan.hooks, report)
 }
@@ -1490,10 +1491,11 @@ impl CommandLoader for CommandPluginLoader {
         *self
             .warnings
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = scan.warnings;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scan.warnings.clone();
         CommandLoadResult {
             plugins: scan.plugins,
             failed: scan.failed,
+            warnings: scan.warnings,
         }
     }
 }

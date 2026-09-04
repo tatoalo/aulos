@@ -236,7 +236,7 @@ Workspace `resolver = "3"`, edition 2024, `rust-version = "1.95"`.
 | `aulos-provider-ytdlp` | aulos-core, aulos-provider, tokio, tokio-util, nix, command-fds, url | `lib`, `formats`, `opts`, `runner`, `progress`, `outtmpl`, `errmap`, `python/ytdlp_runner.py` (shipped asset) |
 | `aulos-provider-sc` | aulos-core, aulos-provider, tokio, tokio-util, wreq + wreq-util \| reqwest, scraper, regex, strip-ansi-escapes, url, futures-util | `lib`, `http` (`ScHttp` trait), `inertia`, `watch`, `season`, `embed`, `jit`, `nm3u8dl`, `ffmpeg`, `mux`, `progress` |
 | `aulos-queue` | aulos-core, aulos-store, aulos-provider, tokio, tokio-util, arc-swap, bytes, smallvec, indexmap, rand, url | `engine`, `cmd`, `slots`, `priority`, `resolve`, `run`, `cancel`, `recovery`, `groups`, `clear`, `aggregator`, `hub`, `publish`, `ring`, `hookstore` (`EngineHookStore`, §13.3) |
-| `aulos-api` | aulos-core, aulos-store, aulos-queue, axum, axum-server, tower, tower-http, tokio, tokio-util, arc-swap, bytes, mime_guess, percent-encoding, sha2, url, rustls, rustls-pemfile, metrics, metrics-exporter-prometheus | `lib`, `v2/*`, `ws`, `v1`, `files`, `health`, `metrics`, `error`, `cors`, `trace`, `auth` |
+| `aulos-api` | aulos-core, aulos-store, aulos-queue, aulos-provider, axum, axum-server, tower, tower-http, tokio, tokio-util, arc-swap, bytes, mime_guess, percent-encoding, sha2, url, rustls, rustls-pemfile, metrics, metrics-exporter-prometheus | `lib`, `v2/*`, `ws`, `v1`, `files`, `health`, `metrics`, `error`, `cors`, `trace`, `auth` |
 | `aulos-telegram` | aulos-core, aulos-store, aulos-queue, teloxide, governor, indexmap, rand, tokio, tokio-util, url | `bot`, `commands`, `config_ui`, `urls`, `watch`, `render`, `limiter` |
 | `aulos-subscriptions` | aulos-core, aulos-store, aulos-provider, aulos-queue, tokio, tokio-util, rand, url | `manager`, `scheduler`, `check`, `detect`, `model`, `public` |
 | `aulos-hooks` | aulos-core, aulos-provider, reqwest, quick-xml, time, tokio, tokio-util, url | `dispatcher`, `jellyfin`, `nfo`, `audio_sync`, `ffprobe`, `manifest_hook` (community `[[hook]]`) — reaches item state **only** through `aulos_core::ports::HookStore` (§13), never through `aulos-store` or `aulos-queue` |
@@ -3858,6 +3858,7 @@ the one condition that makes the service useless. The Docker `HEALTHCHECK` uses 
                  { "id":"streamingcommunity", "state":"ready", "impersonating":true, "slots":1 },
                  { "id":"command:bandcamp", "state":"degraded",
                    "reason":"download.command[0] not executable" } ],
+  "plugin_warnings": [ "loud: limits.max_concurrent: 0 is not a concurrency; clamped to 1" ],
   "ws": { "clients":2, "frames_total":10293, "lagged_total":0, "slow_disconnects":0 } }
 ```
 
@@ -3868,6 +3869,14 @@ snapshot-tests: one entry per built-in hook (`jellyfin`, `nfo`, `audio_sync`) be
 one further entry keyed `hook:<dir>/<id>`, and a `command` plugin adds nothing here (plugins appear
 under `providers`). §16.7 and this payload are asserted against each other in **both** directions,
 so neither can grow a row the other lacks.
+
+`plugin_warnings` is the last plugin scan's **non-fatal** manifest problems, as
+`<dir>: <key>: <message>` — clamped limits, auto-anchored regexes, a `{cookies_file}` with nothing
+to point at. It is the counterpart of `ReloadReport.failed`, which carries the *fatal* ones, and
+`GET api/v2/providers` serves the same list as its own `warnings` key (PROTOCOL §4.7). Warnings are
+keyed by directory rather than by provider id because a hook-only manifest can warn without
+registering a provider at all, and they are re-derived on every scan, so a warning alone is not a
+change and never publishes a `providers` frame.
 
 `GET <p>healthz?probe=deep` additionally re-runs the tool probes live (used by `doctor` and by the
 runbook), rate-limited to one per 10 s. `GET <p>livez` returns `200 {"ok":true}` doing no work at

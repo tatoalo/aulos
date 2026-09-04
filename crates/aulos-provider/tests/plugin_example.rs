@@ -124,6 +124,14 @@ async fn the_example_plugin_resolves_and_downloads_end_to_end() {
         .await;
 
     let example = shipped_example("bandcamp");
+    // The three `status_map` legs, read off the shipped manifest itself. At runtime
+    // `last_match_wins` may collapse two of them into one chunk, so this is where the mapping is
+    // pinned; `command::progress`'s own tests then drive each leg per line.
+    let manifest = example.load().expect("the shipped manifest must load");
+    let map = &manifest.progress.status_map;
+    assert_eq!(map["fetch"].as_str(), "downloading");
+    assert_eq!(map["mux"].as_str(), "postprocessing");
+    assert_eq!(map["done"].as_str(), "finished");
     let provider = example.provider();
 
     let base_dir = tempfile::tempdir().unwrap();
@@ -204,17 +212,23 @@ async fn the_example_plugin_resolves_and_downloads_end_to_end() {
         }
     }
     assert_eq!(stages.first(), Some(&Stage::Preparing));
-    assert!(
-        stages.contains(&Stage::Postprocessing),
-        "`stage=mux` maps to postprocessing: {stages:?}"
-    );
-    // A 40 KiB download finishes inside one read, so `last_match_wins` collapses `stage=fetch`,
-    // `stage=mux` and `stage=done` into the newest status the chunk carried — which is the point
-    // of the option. The `fetch → downloading` and `done → finished` legs of the `status_map` are
-    // asserted per-line in `command::progress`'s own tests.
+    // A 40 KiB download finishes inside one or two reads, so `last_match_wins` collapses
+    // `stage=fetch`, `stage=mux` and `stage=done` into the newest status each chunk carried —
+    // which is the point of the option, and which makes *which* of the three survives a function
+    // of how the pipe happens to chunk. So the runtime assertion is the one the contract
+    // guarantees: the item leaves `preparing`. Each leg of the `status_map`, `mux →
+    // postprocessing` included, is asserted per-line against this very spec in
+    // `command::progress::tests::status_map_translates_mux_to_postprocessing`.
     assert!(
         stages.iter().any(|s| *s != Stage::Preparing),
         "the item must leave `preparing`: {stages:?}"
+    );
+    assert!(
+        stages.iter().all(|s| matches!(
+            s,
+            Stage::Preparing | Stage::Downloading | Stage::Postprocessing
+        )),
+        "and only ever into a stage the `status_map` declares: {stages:?}"
     );
     let best = frames
         .iter()

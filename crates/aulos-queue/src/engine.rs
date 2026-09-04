@@ -84,6 +84,8 @@ pub(crate) struct RunSlot {
 /// One playlist expansion, mid-flight (DESIGN §8.4).
 pub(crate) struct Expansion {
     pub(crate) generation: u64,
+    /// The cancel epoch this expansion was started under (see [`Engine::cancel_epoch`]).
+    pub(crate) epoch: u64,
     pub(crate) remaining: VecDeque<MediaEntry>,
     pub(crate) next_index: u32,
     pub(crate) provider: ProviderId,
@@ -140,7 +142,15 @@ pub struct Engine {
     pub(crate) expansions: HashMap<GroupId, Expansion>,
     pub(crate) slots: Slots,
     pub(crate) dedupe: HashMap<crate::dedupe::DedupeKey, ItemId>,
+    /// The generation stamped on the **next** add (DESIGN §8.1, [`crate::CancelScope`]).
+    ///
+    /// One generation per `Add`, so `CancelScope::Generation(n)` isolates a single add. It is
+    /// *not* the "has a blanket cancel happened" counter — that is [`Engine::cancel_epoch`],
+    /// which two racing adds must not share (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
     pub(crate) add_generation: u64,
+    /// Bumped by [`crate::CancelScope::All`] only, and compared against the epoch a resolution or
+    /// an expansion was started under to drop work a blanket cancel has already condemned.
+    pub(crate) cancel_epoch: u64,
     pub(crate) waits: Vec<PendingWait>,
     pub(crate) pending_hooks: HashMap<ItemId, PendingHooks>,
     /// Items whose `size` a hook has rewritten through the port, so the terminal write keeps the
@@ -164,6 +174,7 @@ impl std::fmt::Debug for Engine {
             .field("running", &self.running.len())
             .field("groups", &self.groups.len())
             .field("generation", &self.add_generation)
+            .field("cancel_epoch", &self.cancel_epoch)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +223,7 @@ impl Engine {
             slots,
             dedupe: HashMap::new(),
             add_generation: 0,
+            cancel_epoch: 0,
             waits: Vec::new(),
             pending_hooks: HashMap::new(),
             hook_sized: std::collections::HashSet::new(),

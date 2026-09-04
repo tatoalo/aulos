@@ -242,7 +242,13 @@ impl std::fmt::Debug for EngineCmd {
 #[derive(Clone, Debug)]
 pub struct ResolveMeta {
     /// The add generation this work belongs to (DESIGN §8.1, [`CancelScope`]).
+    ///
+    /// One per `Add`, so `CancelScope::Generation(n)` isolates a single add.
     pub generation: u64,
+    /// The cancel epoch the attempt was spawned under, so a result that a [`CancelScope::All`]
+    /// has already condemned is dropped instead of applied. Distinct from `generation`: a later
+    /// add must not condemn an earlier one's in-flight resolution.
+    pub epoch: u64,
     /// How many redirects deep this resolution is, capped at `AULOS_RESOLVE_MAX_DEPTH`.
     pub depth: u32,
     /// Whether the one documented runner-up fall-through has already been used (DESIGN §6.4).

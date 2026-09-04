@@ -63,7 +63,7 @@ pub use formats::{
 pub use frames::{Body, Frame, MAX_LINE_BYTES, PROTOCOL};
 pub use job::{ExtractOpts, Job, Mode, Policy, shim_watchdog_ms};
 pub use opts::{get_opts, get_opts_raw, normalize_caption_mode, normalize_subtitle_language};
-pub use outtmpl::{OutTmpl, OutTmplError, OutTmplJob, build_outtmpl};
+pub use outtmpl::{OutTmpl, OutTmplError, OutTmplJob, build_outtmpl, outtmpl_job};
 pub use progress::{FrameStatus, ProgressState};
 pub use provider::YtdlpProvider;
 pub use runner::{

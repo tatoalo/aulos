@@ -99,6 +99,8 @@ pub struct CommandLoadResult {
     pub plugins: Vec<LoadedPlugin>,
     /// The directories that produced nothing at all — not even a matcher.
     pub failed: Vec<ReloadFailure>,
+    /// Non-fatal load problems from the manifests that loaded, as `<dir>: <key>: <message>`.
+    pub warnings: Vec<Box<str>>,
 }
 
 /// Discovers `command:` providers in a plugin directory.
@@ -129,6 +131,9 @@ pub struct Registry {
     by_id: HashMap<ProviderId, usize>,
     clock: Arc<dyn Clock>,
     loader: Option<Arc<dyn CommandLoader>>,
+    /// The last plugin scan's non-fatal warnings, so `healthz` and `GET api/v2/providers` can
+    /// report them without rescanning the directory.
+    command_warnings: Vec<Box<str>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -142,6 +147,7 @@ impl std::fmt::Debug for Registry {
                     .map(|e| (e.id.as_str().to_owned(), e.state.clone()))
                     .collect::<Vec<_>>(),
             )
+            .field("command_warnings", &self.command_warnings.len())
             .finish_non_exhaustive()
     }
 }
@@ -168,6 +174,7 @@ impl Registry {
             by_id: HashMap::new(),
             clock,
             loader: None,
+            command_warnings: Vec::new(),
         }
     }
 
@@ -238,6 +245,15 @@ impl Registry {
         self.providers
             .iter()
             .map(|e| (&e.id, &e.provider, &e.state))
+    }
+
+    /// The last plugin scan's non-fatal manifest warnings, as `<dir>: <key>: <message>`.
+    ///
+    /// Empty until [`Registry::reload_commands`] has run at least once. Reported by `healthz` and
+    /// `GET api/v2/providers`, next to [`ReloadReport::failed`].
+    #[must_use]
+    pub fn command_warnings(&self) -> &[Box<str>] {
+        &self.command_warnings
     }
 
     /// Every registered id, in registration order.
@@ -352,8 +368,10 @@ impl Registry {
             .map(|e| (e.id.clone(), e.fingerprint))
             .collect();
 
+        self.command_warnings = result.warnings.clone();
         let mut report = ReloadReport {
             failed: result.failed,
+            warnings: result.warnings,
             ..ReloadReport::empty()
         };
 
@@ -394,6 +412,7 @@ impl Registry {
                 updated = report.updated.len(),
                 removed = report.removed.len(),
                 failed = report.failed.len(),
+                warnings = report.warnings.len(),
                 "plugins reloaded"
             );
         }
@@ -932,8 +951,34 @@ mod tests {
                     name: "broken".into(),
                     reason: "download.command[0] not executable".into(),
                 }],
+                warnings: vec!["clamped: limits.max_concurrent: clamped to 8".into()],
             }
         }
+    }
+
+    /// The scan's non-fatal warnings reach the report *and* stay readable on the registry, which
+    /// is how `healthz` and `GET api/v2/providers` show them without rescanning.
+    #[test]
+    fn reload_commands_carries_the_scans_warnings() {
+        let mut r = Registry::with_clock(Arc::new(FakeClock::default()));
+        assert!(r.command_warnings().is_empty(), "nothing scanned yet");
+        r.set_command_loader(Arc::new(FakeLoader(std::sync::Mutex::new(vec![(
+            "command:a",
+            Some(1),
+            None,
+        )]))));
+        let report = r.reload_commands(Path::new("/plugins"));
+        assert_eq!(
+            report.warnings,
+            ["clamped: limits.max_concurrent: clamped to 8".into()]
+        );
+        assert_eq!(r.command_warnings(), report.warnings);
+        // A warning alone is not a change, so it cannot make a no-op scan publish a frame.
+        let quiet = ReloadReport {
+            warnings: vec!["a: b: c".into()],
+            ..ReloadReport::empty()
+        };
+        assert!(quiet.is_empty());
     }
 
     #[test]

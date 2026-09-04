@@ -13,7 +13,7 @@ use aulos_core::config::{Config, RawEnv, load};
 use aulos_core::request::DownloadRequest;
 use aulos_core::selection::{Codec, DownloadType, FormatId, QualityId, Selection};
 use aulos_provider::entry::EntryHints;
-use aulos_provider_ytdlp::{OutTmplError, build_outtmpl};
+use aulos_provider_ytdlp::{OutTmplError, build_outtmpl, outtmpl_job};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -310,4 +310,80 @@ fn the_info_dict_carries_the_aliases_yt_dlp_children_have() {
     // so yt-dlp resolves it to `NA` unless the engine supplies it via `merge_info`.
     assert!(!info.contains_key("playlist_id"));
     assert_eq!(Value::Object(info.clone()).as_object().unwrap().len(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// `outtmpl_job`: `build_outtmpl` plus the entry blob (DESIGN §7.5, §9.8)
+// ---------------------------------------------------------------------------
+
+fn entry_at(index: u32) -> aulos_provider::entry::MediaEntry {
+    let mut entry = aulos_provider::entry::MediaEntry::video(
+        "m7",
+        "Episode 7",
+        Url::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap(),
+    );
+    entry.hints = in_playlist("Season 1", index);
+    entry.state = json!({
+        "playlist_id": "PL1",
+        "playlist_uploader": "Someone",
+        "n_entries": 12,
+        "title": "Episode 7",
+        "description": "not an outtmpl field",
+    });
+    entry
+}
+
+/// A playlist child whose template reaches for a field only the info dict has resolves it, rather
+/// than degrading to yt-dlp's `NA`. This is the wave-2 half of the WP-06/WP-12 request in
+/// `docs/INTEGRATION-NOTES.md`.
+#[test]
+fn the_entry_blob_supplies_the_fields_hints_cannot() {
+    let cfg = config(
+        "%(playlist_id)s/%(playlist_uploader)s - %(playlist_index)s.%(ext)s",
+        "%(channel)s/%(title)s.%(ext)s",
+    );
+    let job = outtmpl_job(&cfg, &request(), &entry_at(3));
+    assert!(!job.is_ready(), "three references need the shim");
+    let info = job.info();
+    assert_eq!(info["playlist_id"], "PL1", "from the blob");
+    assert_eq!(info["playlist_uploader"], "Someone", "from the blob");
+    assert_eq!(info["playlist_index"], 3, "from the hints");
+    assert!(
+        !info.contains_key("description"),
+        "and nothing outside the §7.5 key set is shipped to the shim: {info:?}"
+    );
+    assert_eq!(
+        job.templates(),
+        [
+            "%(playlist_id)s",
+            "%(playlist_uploader)s",
+            "%(playlist_index)s"
+        ],
+        "in template order"
+    );
+}
+
+/// The blob never overrides a reference the hints already answer differently — `merge_info`
+/// overwrites, so the blob is authoritative where both have the key. Here they agree, which is
+/// the case that matters: the hints are derived from the same dict.
+#[test]
+fn the_blob_and_the_hints_agree_on_a_shared_key() {
+    let cfg = config("%(playlist_title)s/%(n_entries)s.%(ext)s", "");
+    let job = outtmpl_job(&cfg, &request(), &entry_at(3));
+    assert_eq!(job.info()["n_entries"], 12);
+    assert_eq!(job.info()["playlist_title"], "Season 1");
+}
+
+/// A single video needs no blob and no shim: the job is ready as built.
+#[test]
+fn a_ready_job_ignores_the_entry_blob() {
+    let mut entry = entry_at(3);
+    entry.hints = EntryHints::default();
+    let job = outtmpl_job(&default_config(), &request(), &entry);
+    assert!(job.is_ready());
+    assert!(
+        job.info().is_empty(),
+        "a ready job carries no info dict at all"
+    );
+    assert!(job.ready().is_some());
 }

@@ -386,7 +386,7 @@ async fn a_terminal_transition_produces_completed_then_removal_produces_removed(
         .await;
     let (kind, _, body) = rig.next_frame(start).await;
     assert_eq!(kind, FrameKind::Removed);
-    assert_eq!(body["reason"], "expired");
+    assert_eq!(body["reason"], "auto_cleared");
     assert_eq!(body["ids"][0], v.id.to_string());
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(rig.state.load().is_empty());

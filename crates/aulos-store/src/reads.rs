@@ -56,6 +56,28 @@ pub struct ItemFilter {
     pub after: Option<Cursor>,
     /// Newest first instead of oldest first.
     pub newest_first: bool,
+    /// Case-insensitive substring match on `title`, or `None` for no title predicate.
+    ///
+    /// This is what `GET api/v2/items?q=` needs to page honestly: filtering the page the keyset
+    /// query returned would make `total` the *unfiltered* count and leave a page that is mostly
+    /// empty (the WP-14 request in `docs/INTEGRATION-NOTES.md`). The needle is bound as a
+    /// parameter and `%`/`_`/`\` in it are escaped, so a title containing a wildcard is matched
+    /// literally.
+    pub title_like: Option<Box<str>>,
+}
+
+/// Escapes the three characters SQLite's `LIKE ... ESCAPE '\'` treats specially.
+fn like_needle(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('%');
+    for ch in raw.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
 }
 
 impl ItemFilter {
@@ -205,6 +227,17 @@ fn where_clause(f: &ItemFilter) -> (String, Vec<SqlValue>) {
             sql.push_str(" AND group_id = ?");
             args.push(SqlValue::Text(g.to_string()));
         }
+    }
+    if let Some(needle) = f
+        .title_like
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        // `title` is `TEXT`, so SQLite's `LIKE` is already ASCII-case-insensitive; `lower()` on
+        // both sides would defeat any index and still not fold non-ASCII.
+        sql.push_str(" AND title LIKE ? ESCAPE '\\'");
+        args.push(SqlValue::Text(like_needle(needle)));
     }
     (sql, args)
 }

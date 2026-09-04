@@ -41,14 +41,38 @@ pub enum AddReason {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoveReason {
-    /// An explicit delete.
+    /// An explicit delete. Wire: `"deleted"`.
     Deleted,
-    /// `POST <p>api/v2/items/clear` or the v1 equivalent.
+    /// `POST <p>api/v2/items/clear` or the v1 equivalent. Wire: `"cleared"`.
     Cleared,
-    /// The `CLEAR_COMPLETED_AFTER` sweeper.
+    /// The `CLEAR_COMPLETED_AFTER` sweeper. Wire: `"auto_cleared"`.
+    ///
+    /// The variant reads `Expired` because that is what happened to the row; the wire string is
+    /// PROTOCOL §5.7's, which is what a client matches on.
+    #[serde(rename = "auto_cleared")]
     Expired,
-    /// A playlist parent was replaced by its children.
+    /// A playlist parent was replaced by its children. Wire: `"group_cascade"`.
+    #[serde(rename = "group_cascade")]
     Replaced,
+}
+
+impl RemoveReason {
+    /// The wire string (PROTOCOL §5.7).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::Cleared => "cleared",
+            Self::Expired => "auto_cleared",
+            Self::Replaced => "group_cascade",
+        }
+    }
+}
+
+impl std::fmt::Display for RemoveReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Severity of a notice. `warn` is spelled `"warning"` on the wire (PROTOCOL §5.8).
@@ -689,6 +713,24 @@ impl EventRouter {
     }
 }
 
+/// The notification seam (DESIGN §12.6).
+///
+/// It lives next to [`DomainEvent`] and [`EventRouter`] so a future APNs notifier can be a crate
+/// of its own, registered as one more subscriber, without depending on `aulos-telegram` or
+/// forcing any existing crate to change. `aulos-telegram` is the first implementation and
+/// re-exports this trait; BRIEF's "out of scope" list keeps APNs itself for later.
+#[async_trait::async_trait]
+pub trait Notifier: Send + Sync {
+    /// A stable id, for logs and for `healthz`.
+    fn id(&self) -> &'static str;
+
+    /// Whether this notifier wants to hear about `item`.
+    fn interested(&self, item: &ItemView) -> bool;
+
+    /// Handle one event. Must not block.
+    async fn on_event(&self, ev: &DomainEvent);
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -928,10 +970,27 @@ mod tests {
 
     #[test]
     fn notice_and_reason_enums_serialise_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&RemoveReason::Expired).unwrap(),
-            "\"expired\""
-        );
+        // PROTOCOL §5.7's four strings, in PROTOCOL's order. The last two variants are named for
+        // what happened to the row; the wire strings are the ones a client matches on, and
+        // `as_str` and serde must not drift apart.
+        for (reason, wire) in [
+            (RemoveReason::Deleted, "deleted"),
+            (RemoveReason::Cleared, "cleared"),
+            (RemoveReason::Expired, "auto_cleared"),
+            (RemoveReason::Replaced, "group_cascade"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(reason.as_str(), wire);
+            assert_eq!(reason.to_string(), wire);
+            assert_eq!(
+                serde_json::from_str::<RemoveReason>(&format!("\"{wire}\"")).unwrap(),
+                reason,
+                "and it round-trips"
+            );
+        }
         assert_eq!(
             serde_json::to_string(&AddReason::Expanded).unwrap(),
             "\"expanded\""

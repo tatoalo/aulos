@@ -533,19 +533,13 @@ async fn cancel_resolve_scopes_by_generation_and_falls_back_to_everything() {
         assert_eq!(body["canceled"], 0);
         assert_eq!(body["generation"], 999_999);
 
-        // The generation from a `202` cancels that add's in-flight resolution.
-        //
-        // **Known gap, recorded in docs/INTEGRATION-NOTES.md (WP-14):** the engine's
-        // `add_generation` is bumped by `CancelScope::All`, not by each add, so two adds that
-        // race share an epoch and `Generation(n)` cancels both. PLAN WP-14 asks for "cancels that
-        // add only and leaves a concurrent add running", which needs one line in
-        // `aulos_queue::add::handle_add` (a WP-12 file). The wire contract — the `generation` in
-        // the `202`, the scoped route, the `canceled` count — is complete on this side, so the
-        // assertion below is what the engine does today.
-        assert_eq!(
+        // The generation from a `202` cancels that add's in-flight resolution and leaves a
+        // concurrent add running (PLAN WP-14). The engine mints one generation per `Add` since
+        // the wave-2 integration pass.
+        assert_ne!(
             gen_one,
             second["generation"].as_u64().unwrap(),
-            "todo(WP-12): one generation per add"
+            "one generation per add"
         );
         let (status, body) = rig
             .post(
@@ -554,8 +548,13 @@ async fn cancel_resolve_scopes_by_generation_and_falls_back_to_everything() {
             )
             .await;
         assert_eq!(status, 200, "{body}");
-        assert!(body["canceled"].as_u64().unwrap() >= 1, "{body}");
+        assert_eq!(body["canceled"], 1, "{body}");
         rig.until_status(&id_one, "canceled").await;
+        assert_eq!(
+            rig.status_of(&id_two).await,
+            "resolving",
+            "the concurrent add is untouched"
+        );
 
         // `{}` cancels everything still in flight — what the legacy `cancel-add` did.
         let (status, body) = rig
@@ -860,6 +859,55 @@ async fn items_pages_by_cursor_and_filters_by_status() {
         assert_eq!(body["error"]["field"], "cursor");
     })
     .await;
+}
+
+/// `?q=` is part of the query, not a filter over the page, so `total` counts the matching set and
+/// a page of it is full (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
+#[tokio::test]
+async fn q_filters_the_query_so_total_and_the_cursor_describe_the_matching_set() {
+    let rig = Rig::start("/").await;
+    // The `fake` provider titles an item after its URL until it resolves, and resolution names it
+    // after the media id, so the URL path is what `q` has to match on.
+    for n in 0..3 {
+        let id = rig.add(&format!("https://fake.test/lofi-{n}")).await;
+        rig.until_status(&id, "finished").await;
+    }
+    for n in 0..2 {
+        let id = rig.add(&format!("https://fake.test/other-{n}")).await;
+        rig.until_status(&id, "finished").await;
+    }
+    rig.settle().await;
+
+    let (status, all) = rig.get("api/v2/items").await;
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(all["total"], 5);
+
+    let (status, hits) = rig.get("api/v2/items?q=lofi").await;
+    assert_eq!(status, 200, "{hits}");
+    assert_eq!(hits["total"], 3, "the count is of the matching set: {hits}");
+    assert_eq!(hits["items"].as_array().unwrap().len(), 3);
+
+    // A page of two is full, not "two rows minus the ones that did not match".
+    let (_, first) = rig.get("api/v2/items?q=lofi&limit=2").await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2, "{first}");
+    assert_eq!(first["total"], 3);
+    let cursor = first["next_cursor"].as_str().expect("a cursor").to_owned();
+    let (_, second) = rig
+        .get(&format!("api/v2/items?q=lofi&limit=2&cursor={cursor}"))
+        .await;
+    assert_eq!(second["items"].as_array().unwrap().len(), 1, "{second}");
+    assert!(second["next_cursor"].is_null());
+
+    // Case-insensitive, composes with `status`, and an empty `q` is no filter.
+    let (_, upper) = rig.get("api/v2/items?q=LOFI").await;
+    assert_eq!(upper["total"], 3);
+    let (_, both) = rig.get("api/v2/items?q=lofi&status=queued").await;
+    assert_eq!(both["total"], 0, "{both}");
+    let (_, empty) = rig.get("api/v2/items?q=").await;
+    assert_eq!(empty["total"], 5, "an empty q is not a filter");
+    let (_, miss) = rig.get("api/v2/items?q=nothing-matches-this").await;
+    assert_eq!(miss["total"], 0);
+    assert_eq!(miss["items"], json!([]));
 }
 
 #[tokio::test]

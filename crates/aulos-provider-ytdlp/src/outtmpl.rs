@@ -50,7 +50,7 @@
 use aulos_core::config::Config;
 use aulos_core::paths::sanitize_path_component;
 use aulos_core::request::DownloadRequest;
-use aulos_provider::entry::EntryHints;
+use aulos_provider::entry::{EntryHints, MediaEntry};
 use serde_json::{Map, Value, json};
 
 pub use aulos_provider::provider::OutTmpl;
@@ -257,6 +257,30 @@ pub fn build_outtmpl(cfg: &Config, req: &DownloadRequest, hints: &EntryHints) ->
         info,
         prefixes,
     }
+}
+
+/// [`build_outtmpl`] for one resolved entry, with the entry blob's info fields merged in.
+///
+/// This is the whole of legacy's `_resolve_outtmpl_fields` input: `build_outtmpl` derives what
+/// [`EntryHints`] carries, and the DESIGN §7.5 subset of the provider's raw info dict
+/// (`^(playlist|channel)`, `n_entries`, `__last_playlist_index`) supplies the rest — so a template
+/// using `%(playlist_id)s` or `%(playlist_uploader)s` resolves instead of yielding yt-dlp's `NA`.
+///
+/// The result still has to be evaluated: [`OutTmplJob::ready`] when nothing needs the shim,
+/// otherwise the `mode = "outtmpl"` round trip
+/// ([`crate::YtdlpProvider::resolve_outtmpl`] does both).
+#[must_use]
+pub fn outtmpl_job(cfg: &Config, req: &DownloadRequest, entry: &MediaEntry) -> OutTmplJob {
+    let mut job = build_outtmpl(cfg, req, &entry.hints);
+    if job.is_ready() {
+        // Nothing to splice, so no info field can change the answer.
+        return job;
+    }
+    let info = aulos_provider::outtmpl_info(&entry.state);
+    if !info.is_empty() {
+        job.merge_info(&info);
+    }
+    job
 }
 
 /// The info dict [`build_outtmpl`] can derive from [`EntryHints`], string values sanitised.

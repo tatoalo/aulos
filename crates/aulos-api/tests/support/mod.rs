@@ -82,6 +82,8 @@ pub struct RigBuilder {
     env: Vec<(String, String)>,
     providers: Vec<Arc<dyn Provider>>,
     with_defaults: bool,
+    /// `(directory name, plugin.toml body)`, written into `AULOS_PLUGINS_DIR` before the scan.
+    plugins: Vec<(String, String)>,
 }
 
 impl RigBuilder {
@@ -89,6 +91,14 @@ impl RigBuilder {
     #[must_use]
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Drops a `plugin.toml` into `AULOS_PLUGINS_DIR` and installs the real command loader, so
+    /// the rig exercises manifest discovery rather than a stub.
+    #[must_use]
+    pub fn plugin(mut self, name: &str, manifest: &str) -> Self {
+        self.plugins.push((name.to_owned(), manifest.to_owned()));
         self
     }
 
@@ -139,6 +149,13 @@ impl RigBuilder {
         )
         .unwrap();
 
+        let plugins_dir = dir.path().join("plugins");
+        for (name, manifest) in &self.plugins {
+            let plugin_dir = plugins_dir.join(name);
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+        }
+
         let mut registry = Registry::new();
         if self.with_defaults {
             registry.register(Arc::new(ytdlp_like()));
@@ -147,6 +164,12 @@ impl RigBuilder {
         }
         for provider in self.providers {
             registry.register(provider);
+        }
+        if !self.plugins.is_empty() {
+            registry.set_command_loader(Arc::new(
+                aulos_provider::command::CommandPluginLoader::default(),
+            ));
+            registry.reload_commands(&plugins_dir);
         }
         let registry = Arc::new(RwLock::new(registry));
 
@@ -252,6 +275,7 @@ impl Rig {
             env: Vec::new(),
             providers: Vec::new(),
             with_defaults: true,
+            plugins: Vec::new(),
         }
     }
 
@@ -323,6 +347,13 @@ impl Rig {
             id,
         )
         .await
+    }
+
+    /// The item's current `status`, without waiting.
+    pub async fn status_of(&self, id: &str) -> String {
+        let (code, body) = self.get(&format!("api/v2/items/{id}")).await;
+        assert_eq!(code, 200, "{body}");
+        body["status"].as_str().unwrap().to_owned()
     }
 
     /// Waits until the item satisfies `pred`.
@@ -637,11 +668,13 @@ impl SubsFake {
     fn handle(&self, cmd: SubCmd) {
         match cmd {
             SubCmd::Add {
-                url,
-                selection,
-                folder,
+                request,
+                check_interval_minutes,
                 ack,
             } => {
+                let url: Box<str> = Box::from(request.url.as_str());
+                let selection = &request.selection;
+                let folder = request.folder.as_ref();
                 let mut rows = self.rows.lock().unwrap();
                 let answer = if url.contains("watch?v=") {
                     Err(SubError::VideoOnly)
@@ -653,14 +686,12 @@ impl SubsFake {
                         name: Arc::from("Veritasium"),
                         url: Arc::from(&*url),
                         enabled: true,
-                        check_interval_minutes: 60,
+                        check_interval_minutes: check_interval_minutes.unwrap_or(60).max(1),
                         download_type: selection.download_type,
                         codec: selection.codec,
                         format: selection.format.as_arc(),
                         quality: selection.quality.as_arc(),
-                        folder: folder
-                            .as_ref()
-                            .map_or_else(|| Arc::from(""), |f| Arc::from(f.as_str())),
+                        folder: folder.map_or_else(|| Arc::from(""), |f| Arc::from(f.as_str())),
                         last_checked: None,
                         seen_count: 0,
                         error: None,

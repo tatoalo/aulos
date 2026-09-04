@@ -48,34 +48,17 @@ pub async fn create(
         Some(value) => Some(parse_u32("check_interval_minutes", value)?.max(1)),
     };
 
-    let url: Box<str> = Box::from(request.url.as_str());
-    let selection = Box::new(request.selection.clone());
-    let folder = request.folder.clone();
-    let created = send(&state, move |ack| SubCmd::Add {
-        url,
-        selection,
-        folder,
+    // The whole download template and the interval travel in the one `SubCmd::Add`, so every
+    // documented body field reaches the record instead of being silently dropped.
+    let request = Box::new(request);
+    let view = send(&state, move |ack| SubCmd::Add {
+        request,
+        check_interval_minutes: interval,
         ack,
     })
     .await?;
 
-    // `SubCmd::Add` carries no interval (docs/INTEGRATION-NOTES.md, WP-16: the manager fills it
-    // from `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`), so an explicit one is applied as an immediate
-    // edit. That is one extra message on a rare route, and it keeps the documented body honest
-    // instead of silently ignoring the field.
-    let view = match interval.filter(|i| *i != created.check_interval_minutes) {
-        None => *created,
-        Some(minutes) => {
-            let id = created.id.clone();
-            let changes = Box::new(SubChanges {
-                check_interval_minutes: Some(minutes),
-                ..SubChanges::default()
-            });
-            *send(&state, move |ack| SubCmd::Update { id, changes, ack }).await?
-        }
-    };
-
-    Ok((StatusCode::CREATED, Json(view)).into_response())
+    Ok((StatusCode::CREATED, Json(*view)).into_response())
 }
 
 /// `PATCH api/v2/subscriptions/{id}` — `{name?, enabled?, check_interval_minutes?}`.

@@ -96,6 +96,7 @@ pub async fn healthz(State(state): State<ApiState>, Q(query): Q<HealthQuery>) ->
         "probe": probe_label,
         "components": components,
         "providers": providers(&state),
+        "plugin_warnings": plugin_warnings(&state),
         "ws": {
             "clients": state.live.clients.load(std::sync::atomic::Ordering::Relaxed),
             "frames_total": state.hub.frames_published(),
@@ -151,6 +152,27 @@ fn queue_component(state: &ApiState) -> Value {
 fn providers(state: &ApiState) -> Value {
     let body = v2::meta::capabilities_providers(state);
     Value::Array(body)
+}
+
+/// The last plugin scan's non-fatal manifest warnings.
+///
+/// The fatal ones are already visible: a directory that produced nothing is a
+/// `ReloadReport.failed`, and a manifest that produced only a matcher is a `degraded` provider in
+/// the `providers` array. Clamped limits and auto-anchored regexes were visible nowhere, which is
+/// the WP-14 request in `docs/INTEGRATION-NOTES.md`. Keyed by directory, because a hook-only
+/// manifest can warn without registering a provider.
+fn plugin_warnings(state: &ApiState) -> Value {
+    let registry = match state.registry.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Value::Array(
+        registry
+            .command_warnings()
+            .iter()
+            .map(|w| Value::String(w.to_string()))
+            .collect(),
+    )
 }
 
 /// Re-probes every provider and folds the answer back into the registry (DESIGN §6.4, §16.3).

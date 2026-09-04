@@ -95,6 +95,7 @@ expression: body
     "queued": 0,
     "resolving": 0
   },
+  "plugin_warnings": [],
   "probe": "shallow",
   "providers": [
     {

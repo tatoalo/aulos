@@ -463,12 +463,16 @@ async fn cancel_resolve_by_generation_leaves_a_concurrent_add_running() {
         )
         .await
         .unwrap();
-    assert_eq!(
+    assert_ne!(
         doomed.generation, survivor.generation,
-        "same generation so far"
+        "one generation per add"
     );
 
     h.until(doomed.ids[0], "resolving", |i| {
+        i.status == Status::Resolving
+    })
+    .await;
+    h.until(survivor.ids[0], "resolving", |i| {
         i.status == Status::Resolving
     })
     .await;
@@ -476,7 +480,16 @@ async fn cancel_resolve_by_generation_leaves_a_concurrent_add_running() {
         .handle
         .cancel_resolve(CancelScope::Generation(doomed.generation))
         .await;
-    assert_eq!(result.applied.len(), 2, "both adds are in that generation");
+    assert_eq!(
+        result.applied, doomed.ids,
+        "only the add that owns that generation"
+    );
+    h.until_status(doomed.ids[0], Status::Canceled).await;
+    assert_eq!(
+        h.item(survivor.ids[0]).await.unwrap().status,
+        Status::Resolving,
+        "the concurrent add is still resolving"
+    );
 
     // A generation that nothing belongs to touches nothing, and does not bump the counter.
     let after = h.add("https://fake.test/watch/fresh").await;
@@ -486,6 +499,10 @@ async fn cancel_resolve_by_generation_leaves_a_concurrent_add_running() {
         .await;
     assert!(none.applied.is_empty());
     h.until_resolved(after).await;
+
+    // And `All` still condemns everything left in flight, including the survivor.
+    h.handle.cancel_resolve(CancelScope::All).await;
+    h.until_status(survivor.ids[0], Status::Canceled).await;
 }
 
 #[tokio::test]

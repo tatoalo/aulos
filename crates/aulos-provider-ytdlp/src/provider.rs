@@ -116,6 +116,30 @@ impl YtdlpProvider {
         self.runner.identity()
     }
 
+    /// The output templates for one download, playlist/channel fields pre-resolved.
+    ///
+    /// [`DownloadCtx::outtmpl`] arrives built from the config templates alone: `aulos-queue` may
+    /// not depend on this crate (DESIGN §3), so it reproduces legacy's prefix handling and the
+    /// `OUTPUT_TEMPLATE_PLAYLIST`/`_CHANNEL` swap but *not* `_resolve_outtmpl_fields`. This is
+    /// where that pre-resolution happens, because this is the only place that holds both the
+    /// entry blob and the shim (the WP-12 request in `docs/INTEGRATION-NOTES.md`). Without it a
+    /// template using `%(playlist_id)s` or `%(playlist_uploader)s` degrades to yt-dlp's `NA`.
+    ///
+    /// A single video, or a template with no `playlist*`/`channel*` reference, is
+    /// [`OutTmplJob::is_ready`] and spawns nothing.
+    ///
+    /// # Errors
+    /// Anything [`YtdlpProvider::resolve_outtmpl`] can fail with.
+    async fn download_outtmpl(
+        &self,
+        ctx: &DownloadCtx<'_>,
+        sink: &ProgressSink,
+    ) -> Result<aulos_provider::provider::OutTmpl, ProviderError> {
+        let job = crate::outtmpl::outtmpl_job(&self.cfg, ctx.request, ctx.entry);
+        self.resolve_outtmpl(ctx.item_id, &job, sink, &ctx.cancel)
+            .await
+    }
+
     /// Pre-resolves the `playlist*` / `channel*` fields of an output template.
     ///
     /// A job that is already [`OutTmplJob::is_ready`] spawns nothing; otherwise this is the one
@@ -261,13 +285,16 @@ impl Provider for YtdlpProvider {
         // switch, now read from the typed config instead of from a global logger.
         let debug_logging = self.debug_logging();
 
+        // Legacy's `_resolve_outtmpl_fields`, which the engine structurally cannot do.
+        let outtmpl = self.download_outtmpl(&ctx, &sink).await?;
+
         // Legacy's base dict, then the user options merged over it (`**self.ytdl_opts` last).
         let mut options: Map<String, Value> = serde_json::from_value(json!({
             "quiet": !debug_logging,
             "verbose": debug_logging,
             "no_color": true,
             "paths": { "home": ctx.out_dir, "temp": ctx.tmp_dir },
-            "outtmpl": { "default": ctx.outtmpl.default, "chapter": ctx.outtmpl.chapter },
+            "outtmpl": { "default": outtmpl.default, "chapter": outtmpl.chapter },
             "format": selector,
             "socket_timeout": SOCKET_TIMEOUT,
             "ignore_no_formats_error": true,
@@ -288,11 +315,8 @@ impl Provider for YtdlpProvider {
 
         if ctx.request.split_by_chapters {
             // Legacy appended this after everything else and pinned the chapter template.
-            if let Some(outtmpl) = options.get_mut("outtmpl").and_then(Value::as_object_mut) {
-                outtmpl.insert(
-                    "chapter".to_owned(),
-                    Value::String(ctx.outtmpl.chapter.clone()),
-                );
+            if let Some(templates) = options.get_mut("outtmpl").and_then(Value::as_object_mut) {
+                templates.insert("chapter".to_owned(), Value::String(outtmpl.chapter.clone()));
             }
             let list = options
                 .entry("postprocessors".to_owned())

@@ -519,9 +519,9 @@ fn forget_removal(removed: &mut IndexMap<RemoveReason, IndexSet<ItemId>>, id: It
 
 /// The fixed order a flush and a fold emit `removed` frames in (DESIGN §15.1, PROTOCOL §5.7).
 ///
-/// DESIGN and PROTOCOL spell the four reasons `deleted`, `cleared`, `auto_cleared`,
-/// `group_cascade`; `aulos_core::RemoveReason` names the last two `Expired` and `Replaced` and
-/// puts them in the same order, so this is the declaration order of the enum.
+/// `aulos_core::RemoveReason` names the last two variants `Expired` and `Replaced` and serialises
+/// them as PROTOCOL's `auto_cleared` and `group_cascade`; the declaration order of the enum is
+/// this order.
 pub const REASON_ORDER: [RemoveReason; 4] = [
     RemoveReason::Deleted,
     RemoveReason::Cleared,

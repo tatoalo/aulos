@@ -330,6 +330,73 @@ async fn the_provider_inventory_names_the_fallback() {
     .await;
 }
 
+/// A manifest that loads with a clamped limit is visible on both operator surfaces.
+///
+/// The fatal cases were already visible — a directory that produces nothing is
+/// `ReloadReport.failed`, a matcher-only manifest is a `degraded` provider — but clamps and
+/// auto-anchors were reported nowhere, which is the WP-14 request in
+/// `docs/INTEGRATION-NOTES.md`.
+#[tokio::test]
+async fn a_clamped_plugin_manifest_warns_on_healthz_and_on_the_provider_inventory() {
+    let rig = Rig::builder("/")
+        .plugin(
+            "loud",
+            r#"
+            manifest_version = 1
+            name = "Loud"
+            version = "1.0.0"
+
+            [match]
+            hosts = ["loud.test"]
+
+            [limits]
+            max_concurrent = 0
+
+            [download]
+            command = ["/bin/echo", "{url}"]
+            "#,
+        )
+        .start()
+        .await;
+
+    let (status, body) = rig.get("api/v2/providers").await;
+    assert_eq!(status, 200, "{body}");
+    let warnings = body["warnings"].as_array().expect("an array");
+    assert!(
+        warnings.iter().any(|w| {
+            let w = w.as_str().unwrap_or_default();
+            w.contains("loud") && w.contains("limits.max_concurrent")
+        }),
+        "the clamp is reported: {body:?}"
+    );
+    assert!(
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "command:loud"),
+        "and the plugin still loaded: {body}"
+    );
+
+    let (status, body) = rig.get("healthz").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["plugin_warnings"].as_array(),
+        Some(warnings),
+        "healthz reports the same list"
+    );
+}
+
+/// With no plugin directory to scan, both surfaces carry an empty array rather than omitting it.
+#[tokio::test]
+async fn the_warning_lists_are_present_and_empty_with_no_plugins() {
+    let rig = Rig::start("/").await;
+    let (_, body) = rig.get("api/v2/providers").await;
+    assert_eq!(body["warnings"], json!([]));
+    let (_, body) = rig.get("healthz").await;
+    assert_eq!(body["plugin_warnings"], json!([]));
+}
+
 #[tokio::test]
 async fn presets_and_a_plugin_reload_answer_their_documented_shapes() {
     for_each_prefix(|prefix| async move {
@@ -343,7 +410,7 @@ async fn presets_and_a_plugin_reload_answer_their_documented_shapes() {
 
         let (status, body) = rig.post("api/v2/plugins/reload", &json!({})).await;
         assert_eq!(status, 200, "{body}");
-        for key in ["added", "updated", "removed", "failed"] {
+        for key in ["added", "updated", "removed", "failed", "warnings"] {
             assert!(body[key].is_array(), "{key} must be an array: {body}");
         }
     })

@@ -201,7 +201,11 @@ id_newtype!(QualityId, "quality", 32);
 id_newtype!(ProviderId, "provider", 64);
 
 /// The four-field selection: what to download and in what shape (DESIGN §4.3).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// `Hash` is derived because [`Selection`] is half of `aulos-queue`'s dedupe key: all four fields
+/// are already `Hash` and already canonical, so hashing the struct and hashing the four string
+/// forms by hand are the same thing (the WP-12 request in `docs/INTEGRATION-NOTES.md`).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Selection {
     /// Video, audio, captions or thumbnail.
     pub download_type: DownloadType,

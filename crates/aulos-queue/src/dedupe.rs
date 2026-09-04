@@ -6,8 +6,6 @@
 //! runtime-shaped wrapper DESIGN §8.5 and PLAN WP-12 declare, plus the `(canonical, selection)`
 //! pair the engine indexes on.
 
-use std::hash::{Hash, Hasher};
-
 use aulos_core::{ProviderId, Selection};
 use url::Url;
 
@@ -28,7 +26,7 @@ pub fn canonical_key(provider: &ProviderId, url: &Url, media_id: Option<&str>) -
 ///
 /// The `selection` half is what makes re-adding the same video as `mp3` after pulling it as `mp4` a
 /// legitimate new item rather than a duplicate.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct DedupeKey {
     /// The canonical target, from [`canonical_key`].
     pub canonical: Box<str>,
@@ -50,18 +48,6 @@ impl DedupeKey {
     #[must_use]
     pub fn for_url(provider: &ProviderId, url: &Url, selection: Selection) -> Self {
         Self::new(canonical_key(provider, url, None), selection)
-    }
-}
-
-/// Hand-written because [`Selection`] derives `Eq` but not `Hash`, and hashing its four already
-/// canonical string forms is both stable and cheap.
-impl Hash for DedupeKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.canonical.hash(state);
-        self.selection.download_type.as_str().hash(state);
-        self.selection.codec.as_str().hash(state);
-        self.selection.format.as_str().hash(state);
-        self.selection.quality.as_str().hash(state);
     }
 }
 
