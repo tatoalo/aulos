@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-04 (wave-2 integration). Update this file at every checkpoint.
+Last updated: 2026-09-04 22:45 (paused after WP-17; final integration interrupted). Update this file at every checkpoint.
 
 ## What this is
 
@@ -23,8 +23,7 @@ Read in this order when picking the project back up:
 - Gates: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`, `cargo test -p aulos-workspace-tests` (architecture + packaging rules).
 - **No AI attribution in commit messages or PRs** (no `Co-Authored-By: Claude`, no "Generated with"
-  lines). Commits made before 2026-09-04 22:00 still carry a trailer and will be rewritten before
-  the history is considered final.
+  lines). History was rewritten on 2026-09-04 to remove the trailers the first build agents added.
 - CI builds `linux/amd64` only for now (`ubuntu-latest`); the Dockerfile stays `TARGETARCH`-aware.
 - Never run a Telegram bot with the production token from a dev machine (polling conflict, 409).
 
@@ -52,8 +51,23 @@ Read in this order when picking the project back up:
 | 14 | `aulos-api`: v2 REST, WebSocket, files, health, auth | done | 29396b5 |
 | 15 | `aulos-api`: v1 compatibility shim (golden corpus replay) | done | 82c31d2 |
 | — | integrate wave 2 | green | (this commit) |
-| 17 | `aulos-server`: wiring, POT supervisor, config watcher, CLI, docker e2e | pending | — |
-| — | final integration (docker build + `AULOS_E2E=1 tests/e2e/run.sh`, README, PLAN status) | pending | — |
+| 17 | `aulos-server`: wiring, POT supervisor, config watcher, CLI, docker e2e | done — image built, `AULOS_E2E=1 tests/e2e/run.sh` PASS (real YouTube download via POT, restart-resume, legacy import) | 652396b |
+| — | final integration (workspace gates, README quickstart, PLAN status table, docker build + e2e rerun) | **interrupted** — partial edits committed as WIP, gates not re-verified | (wip commit) |
+
+
+## ▶ RESUME HERE — the very last step of the build
+
+The build was paused at 22:45 on 2026-09-04 while the *final integration* agent was mid-way. Its
+partial edits are committed as `wip: final integration pass (interrupted…)`. To finish (≈30–60 min
+for one agent):
+
+1. `cd ~/Development/aulos_server && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo test -p aulos-workspace-tests` — fix whatever the WIP commit broke (the integrator was touching CI workflows, telegram/store/queue glue, `crates/aulos-queue/tests/shutdown.rs`, `crates/aulos-provider-ytdlp/tests/smoke_extract.sh`).
+2. Apply any still-open bullets in `docs/INTEGRATION-NOTES.md`.
+3. `docker build -f docker/Dockerfile -t aulos-server:dev .` then `AULOS_E2E=1 tests/e2e/run.sh` (needs ≥ 20 GB free on the host; the shared `target/` dir grows fast — `rm -rf target/debug/incremental` is safe; if Docker reports a read-only filesystem, `orbctl stop && orbctl start`).
+4. Write the README quickstart (compose snippet from DESIGN §18.3, env var pointer to DESIGN §17.3, plugin how-to pointer to DESIGN §6.5/§13.4) and refresh the table above.
+5. Commit (no AI attribution), push `main`, confirm the first GitHub Actions run (`ci.yml`, `docker.yml`) is green and the image is on GHCR.
+
+Then continue with "Next steps" below (review workflow → OrbStack smoke → iOS migration → cutover).
 
 ## How the work is being done
 
@@ -64,9 +78,7 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 
 ## Next steps (in order)
 
-1. **WP-17** (`aulos-server`: wiring, POT supervisor, config watcher, CLI) and **WP-18** (docker
-   e2e), then final integration, first push to `origin/main`, strip attribution trailers from
-   history. Start from the carried-forward table at the end of INTEGRATION-NOTES.md.
+1. Finish the final integration (see RESUME HERE above).
 2. **Review-and-fix workflow**: parallel reviewers (DESIGN conformance, PROTOCOL conformance, legacy
    parity vs `docs/reference/legacy-backend-spec.md`, security: path containment / SSRF / process
    kill, hot-path performance), adversarial verification of each finding, fix agents, repeat until
