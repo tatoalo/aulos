@@ -318,11 +318,19 @@ pub fn load_ytdl_options(cfg: &Config) -> anyhow::Result<Arc<ArcSwap<YtdlOptions
 #[must_use]
 pub fn build_registry(
     cfg: &Arc<Config>,
+    extra: Vec<Arc<dyn aulos_provider::Provider>>,
 ) -> (
     Arc<RwLock<Registry>>,
     Vec<aulos_provider::command::HookSpec>,
 ) {
     let mut registry = Registry::new();
+
+    // First, so a test's provider wins a score tie against every built-in. Nothing in production
+    // passes any; rebuilding the registry afterwards instead would lose each `command` plugin's
+    // fingerprint and `Degraded` state, and make the next re-scan report every one as updated.
+    for provider in extra {
+        registry.register(provider);
+    }
 
     match ScProvider::new(Arc::clone(cfg)) {
         Ok(sc) => registry.register(Arc::new(sc)),
@@ -558,7 +566,7 @@ mod tests {
             ]))
             .unwrap(),
         );
-        let (registry, hooks) = build_registry(&cfg);
+        let (registry, hooks) = build_registry(&cfg, Vec::new());
         let guard = registry.read().unwrap();
         let ids: Vec<String> = guard.ids().iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -585,7 +593,7 @@ mod tests {
             ]))
             .unwrap(),
         );
-        let (registry, hooks) = build_registry(&cfg);
+        let (registry, hooks) = build_registry(&cfg, Vec::new());
         assert!(hooks.is_empty());
         // A rescan is a documented no-op with no loader installed.
         let report = registry.write().unwrap().reload_commands(&cfg.plugins_dir);

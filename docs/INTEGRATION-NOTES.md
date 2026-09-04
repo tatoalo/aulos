@@ -1878,3 +1878,212 @@ landed. **None of them blocks WP-17 starting; two of them are on its critical pa
 One request is carried forward **conditionally**: a children channel and a `ProgressSink` on
 `ResolveCtx`. Nothing in v1.0 publishes children before a resolve returns or routes resolution logs
 to an item's event stream, so it stays a design note rather than a gap.
+
+---
+
+## WP-17 — `aulos-server`: wiring, POT supervisor, config watcher, CLI, e2e
+
+### The carried-forward requests, all nine of them
+
+Every open request addressed to WP-17 in the wave-2 pass is done. Both ⚠ items are on the
+critical path and both are now covered end-to-end:
+
+| Request | Where |
+|---|---|
+| ⚠ `HookFinalizer` newtype + `Engine::with_pre_terminal` over the dispatcher's hook list | `adapters::EngineFinalizer`, `adapters::DispatcherPreTerminal`, wired in `wiring::run_with`. **The same `Vec<Arc<dyn Hook>>` reaches both**, so the engine's "will a pre-terminal hook run?" answer and the dispatcher's "which hooks run?" answer cannot disagree. Asserted end-to-end by `tests/server.rs::a_pre_terminal_hook_runs_and_the_item_still_finalises`, which injects a recording pre-terminal hook and checks both that it ran and that the item reached `finished` |
+| ⚠ `Aggregator::with_done_total(RecoveryReport::terminal_total)` | `wiring::run_with`, step 12 |
+| `telegram_actor.incoming()` / `health()` before `spawn`, plus `transport::poll_updates` | `wiring::spawn_telegram` |
+| `ApiState::with_info(... .with_yt_dlp(...))` | `wiring::run_with`, step 15 — `healthz.yt_dlp` reads `2026.08.30.232658` against a real shim |
+| `aulos_subscriptions::check::OptionsSource` over the `ArcSwap` | `adapters::SwapOptions` |
+| `config::load_with_warnings()` **and** `YtdlOptions::load(...)` merged before one exit-2 | `bootstrap::load_config` |
+| `Registry::set_command_loader(CommandPluginLoader::with_env(PluginEnv { state_dir }))` | `bootstrap::build_registry` |
+| the importer only on a first start, `ImportFatal` handled as WP-05's note describes | `bootstrap::open_store` |
+| `tests/e2e/run.sh` | added, with `tests/e2e/ws_watch.py` |
+
+### Two bugs this package found in its own wiring, both fixed here
+
+Recorded because each is the kind of thing an integration pass would otherwise re-discover:
+
+1. **The listener bound before the recovered queue reached the published snapshot.** DESIGN §16.1
+   promises "the first request already sees a consistent snapshot", but `Engine::recover` publishes
+   its working set as a `DomainEvent`, which reaches `Published` only after the router and the
+   aggregator have both run a tick. So the first `GET api/v2/state` (or the first WS `snapshot`)
+   answered an **empty queue** for up to one `AULOS_WS_BATCH_MS` — which a client reads as "the
+   server lost everything I had". `wiring::await_first_publish` now waits for the recovered row
+   count before binding, with a 10 s ceiling and a WARN. `tests/server.rs::
+   the_first_request_already_sees_a_recovered_queue` reproduced it before the fix.
+2. **A shutdown mid-download stranded the item as `canceled`.** DESIGN §16.4 step 6 says the
+   still-active rows are marked `queued`; the engine's own reaction to a cancelled job is to write
+   `canceled`, which is terminal, so the next boot never picked it up and the "asserted by a
+   restart that resumes them" acceptance failed. See the request below.
+
+### Things the integrator (or the owning crate) should act on
+
+- **`aulos-queue`: `Engine::run` cannot terminate.** `Engine` keeps a clone of its **own**
+  `EngineCmd` sender (`Engine::tx`, handed to every job task), so `rx.recv()` never returns `None`
+  however many `EngineHandle`s the process drops. Combined with the fact that the aggregator, the
+  hook dispatcher and the Telegram actor each hold an `EngineHandle` *and* wait on an `EventInbox`
+  that closes only when the engine drops its `EventSender`, DESIGN §16.4's "dropping the senders
+  closes the chain" **does not close**: before this was handled, every shutdown cost the full
+  `TaskTracker` ceiling (measured: 20 s) and then closed the store anyway.
+  `wiring::shutdown_tasks` breaks the cycle explicitly — a 500 ms flush window, then abort the
+  three consumers, then a bounded await of the engine, then abort — and documents why nothing
+  durable is lost (`Store::write` hands its ops to the store's *writer thread* and awaits only the
+  commit ack, and `Store::close` drains that queue). Shutdown is now ~2.7 s.
+  **The clean fix is one line in `aulos-queue`**: `Engine::run` should `drop(self.tx)` after taking
+  `rx` (job tasks hold their own clones), or `EngineCmd` should grow a `Shutdown` variant. Either
+  would let this module delete the aborts.
+- **`aulos-queue`: no shutdown command, so DESIGN §16.4 step 6 is written from outside.** The
+  interrupted ids are captured from the published snapshot *before* the jobs are killed, and after
+  the engine settles they are rewritten `queued` with `msg = "Interrupted by shutdown"` and
+  `auto_start = true` through `aulos_store::WriteOp::SetStatus`. The store has exactly one writer,
+  so "last write wins" is deterministic and the loser is the engine's `canceled`. An additive
+  `EngineCmd::Shutdown { ack }` would move this back inside the engine, where it belongs.
+  Verified against a real yt-dlp download: `handing interrupted downloads back to the next boot
+  count=1`, then `boot recovery … scheduled=1`, then the item reads `downloading | Interrupted by
+  shutdown`.
+- **`aulos-core`: `EventInbox::dropped()` is unreadable after the inbox is moved.** The counter is
+  an `Arc<AtomicU64>` the router and the inbox share, but the inbox is consumed by
+  `TelegramActor::spawn`, so `healthz.components.events.dropped.telegram` is reported as `0` rather
+  than measured. `HooksHealth::events_dropped` gives the hooks half honestly. An additive
+  `EventInbox::dropped_handle() -> Arc<AtomicU64>` (or `EventRouter::dropped_counter(name)`) closes
+  it in four lines. Every drop is still WARN-logged by the router itself.
+- **`aulos-telegram`: no `health_handle()`.** `TelegramActor::health()` needs `&self` and `spawn`
+  consumes the actor, so `components.telegram` is published once, after `load()`, and
+  `edits_throttled_total` stops at its boot value. `HookDispatcher::health_handle()` is the shape
+  to copy.
+- **`aulos-telegram`: `TelegramActor::new` hides its `teloxide::Bot`.** `transport::poll_updates`
+  needs one, so the wiring builds `TeloxideTransport` itself and uses `with_transport` — which
+  means the three startup gates of `new` are reproduced in `wiring::telegram_will_run`. A
+  `TelegramActor::bot()` accessor, or a `new` that returns the bot alongside the actor, would
+  remove the duplication. (`telegram_will_run` is needed anyway: see the next bullet.)
+- **`aulos-provider`: `HookSpec` is not `Clone`.** `CommandPluginLoader::hooks()` caches
+  `Arc<HookSpec>` for a later re-scan, but `HookDispatcher::new` and `ManifestHook::new` both take
+  an **owned** `HookSpec`, and the loader's `Arc` cannot be unwrapped because the loader keeps a
+  reference. `bootstrap::build_registry` therefore walks the plugin directory a second time with
+  `command::scan_with` to get owned specs. Either `#[derive(Clone)]` on `HookSpec` or a
+  `ManifestHook::from_arc(Arc<HookSpec>)` would drop the second walk.
+- **`aulos-store`: no `checkpoint()`.** DESIGN §7.1 asks for `wal_checkpoint(TRUNCATE)` "on
+  graceful shutdown **and every 6 h**". The shutdown half is `Store::close()`; the six-hourly half
+  is **not implemented**, because the only route to a `PRAGMA` from here is `Store::read`, whose
+  `&Connection` parameter cannot be named without a `rusqlite` dependency that `tests/arch.rs`
+  rule A2 forbids. `pragma wal_autocheckpoint = 512` already bounds the WAL and `healthz` reports
+  `wal_bytes`, so nothing is unbounded — but an additive `pub async fn checkpoint(&self)` would let
+  the wiring schedule it in three lines.
+- **`.github/workflows/docker.yml`'s PR smoke step will fail.** It runs
+  `docker run --rm "$img" healthcheck` under `set -eu`, and `healthcheck` against a *stopped*
+  server exits **1** by design (DESIGN §3.1, and PLAN WP-17 asks for exactly that). The line was
+  written when the subcommand printed "not implemented" and exited 0. `docker run --rm "$img"
+  healthcheck || true` — or better, dropping the line, since the `URL_PREFIX=metube` container
+  check two lines below already proves the subcommand works — fixes it. `.github/` is not this
+  package's to edit.
+- **`aulos-core`: an engine-task panic cannot be discriminated in a panic hook.**
+  `signals::install_panic_hook` aborts on a panic on the store's writer **thread** (matched by
+  name, cross-checked against `aulos-store`'s source by a test), which is DESIGN §16.4's rule for
+  the store. The engine is a tokio *task*, not a named thread, and tokio exposes no "current task
+  name" in a panic hook, so an engine panic is logged and the task ends — after which every
+  `EngineHandle` send fails and the API answers `state_unavailable`. Making it abort needs either
+  a `tokio::task::Builder::name` + an unstable `tokio_taskdump`-style hook, or the engine catching
+  its own panics.
+
+### Deliberate deviations from PLAN WP-17's interface block
+
+- **`PotSupervisor::spawn(cfg: &Arc<Config>, health: Arc<HealthRegistry>)`** takes the config by
+  reference: clippy's `needless_pass_by_value` is denied workspace-wide and the body only reads it.
+  `PotSupervisor::builder(PotSettings)` is additive and is what the wiring and the tests use — it
+  injects the probe, the clock, the shutdown token and the event sender, and it is what makes "a
+  sidecar that hangs while its probe fails three times" testable at all.
+- **`ConfigWatcher::new(...).with_shutdown(...).start()`** alongside the PLAN's
+  `ConfigWatcher::spawn(targets, cfg, ytdl, events)`. Two additive arguments: a `HealthRegistry`
+  (DESIGN §17.2 step 6 requires a deleted file to *degrade the component*, and the registry is the
+  only place that can be said) and a `CancellationToken` (so shutdown stops the task rather than
+  aborting it mid-reload). `with_force_poll(true)` is how "with inotify disabled, the poll fallback
+  still reloads" is tested without touching `fs.inotify` limits.
+- **`HealthRegistry` is not defined here.** It is an `aulos-core` type (WP-02), as DESIGN §3
+  requires; `health::Probes` / `health::run` are this package's *writers* for the components that
+  move (store latency and WAL, queue composition and slots, each hook's counters, the event drop
+  counters, the subscription schedule). The boot probes write the rest once.
+- **`slots.<pool>.used` in `components.queue` is derived from the published snapshot**, not read
+  out of the engine's semaphores: the engine owns them and exposes no accessor, which is the
+  property that makes it a single task with no `Mutex`. A StreamingCommunity job holds its own
+  pool's permit *instead of* a global one (DESIGN §8.7), so the two counts partition the running
+  set.
+- **`store` is published by this package rather than left to `aulos-api`'s synthesis.** The
+  synthesised component cannot report `latency_ms`, and DESIGN §16.3's one 503 condition is "the
+  store is unusable" — which has to be *measured*. `health::store_component` times a real
+  `kv_get` through the read pool; `health::tests::a_closed_store_is_down_which_is_the_only_503_
+  condition` proves the 503 follows. `queue` is published for the same reason (slots and
+  `progress_dropped_total` have no other source). Every other synthesis in `aulos-api` is left
+  alone.
+- **The DESIGN §16.4 step 2 WebSocket `1001` is one hop later than written.** A session closes with
+  `1001 "server shutting down"` when its frame bus closes, i.e. when the last `EventHub` drops —
+  and one lives inside the axum router's state, i.e. inside the serve future. So the sequence is:
+  signal axum's graceful shutdown, give the sockets `WS_CLOSE_GRACE` (2 s) to read the close frame,
+  then drop the listener task. A client that has not read it by then sees a TCP close and
+  reconnects — the same observable behaviour, one hop later. An additive `EventHub::close()` in
+  `aulos-queue` would make step 2 exact.
+- **`ClearScheduler` is not a task.** DESIGN §16.1 step 13 lists one, but `Engine::sweep_clears`
+  runs on the engine's own 1 Hz tick plus its `sleep_until(min(clear_after))` fast path
+  (`aulos-queue::clear`), so a separate task would have nothing to do.
+- **`SIGQUIT` dumps the runtime's own metrics, not a task list.** DESIGN §16.4 says "log every
+  task's state at ERROR"; tokio has no supported way to enumerate task states, so
+  `signals::dump_state` reports `num_workers` / `num_alive_tasks` / `global_queue_depth`, which is
+  what an operator staring at a wedged container can actually act on. The process continues, as
+  the design requires.
+
+### BRIEF scope trims applied here
+
+- The Prometheus `metrics` endpoint and the whole DESIGN §16.7 inventory are **CUT**.
+  `AULOS_METRICS_ENABLED` is still parsed (an existing compose file must boot), and every counter
+  §16.7 maps onto a `healthz` path is still reported there — `components.queue.progress_dropped_
+  total`, `components.events.dropped.<subscriber>`, `components.pot.restarts`,
+  `components.<hook>.runs_total`, `components.store.wal_bytes`, `components.subscriptions.failing`.
+- `print-schema` and `repair-ids` are **CUT**. The allocator boot check logs a `WARN` and continues
+  (`bootstrap::open_store` walks `Store::id_warnings()`), so the documented recovery command has
+  nothing to recover.
+- `tests/load/` and the criterion benchmarks are **CUT**.
+
+### The e2e harness, and what could and could not be run here
+
+`tests/e2e/run.sh` (gated on `AULOS_E2E=1`) plus `tests/e2e/ws_watch.py`, a dependency-free RFC
+6455 reader — `websocat` is not installed in CI and the image ships no Python WebSocket library, so
+the third option was sixty lines of framing. The script opens the socket **before** the add
+(`--match` latches the item id off the first `added` frame), because a socket that connects
+afterwards is correctly handed a `snapshot` and the acceptance list asks for a literal `added`.
+
+**`docker build` could not be run on this machine.** The OrbStack VM's docker data root is 41.8 GB
+and was 88–99 % full before this package started; the Rust release build (cargo-chef + a vendored
+BoringSSL for `wreq`) exhausted it three times, the third time leaving
+`/var/lib/docker` **remounted read-only** (`write /var/lib/docker/buildkit/metadata_v2.db:
+read-only file system`), after which `docker run` fails too. Only the regenerable build cache and
+*dangling* images were pruned (≈4 GB reclaimed); the user's 22 stopped containers, 21 tagged images
+and 32 volumes were left alone, and OrbStack was not restarted. **So the script has not been run
+against a real image, and the integrator must run it.** The host volume is at 96 % (18 GiB free),
+so the VM needs headroom before it will build.
+
+What *was* verified instead, and it is most of the script's surface: the **real** `aulos-server`
+binary on the host, with the pinned nightly `yt-dlp==2026.8.30.232658.dev0` in a throwaway `uv`
+venv, against the **real** CC-BY video (`https://www.youtube.com/watch?v=aqz-KE-bpKQ`) over the
+real network — YouTube is reachable from here (HTTP 200):
+
+| Assertion | Result |
+|---|---|
+| `healthz` carries all 15 DESIGN §16.3 components | ✅ (`pot` `disabled`, `deno`/`nm3u8dl` `down` — neither is installed on a Mac) |
+| `healthz.yt_dlp` | ✅ `2026.08.30.232658`, from the shim handshake |
+| `components.store.latency_ms` / `wal_bytes` / `db_bytes` | ✅ measured |
+| `components.queue.slots` | ✅ `global 0/3`, `streamingcommunity 0/1` |
+| `POST api/v2/downloads` → `202 {id}` before extraction | ✅ |
+| the WS `added → delta → completed` sequence for that id | ✅ via `ws_watch.py`, socket opened first |
+| the file lands in `DOWNLOAD_DIR` | ✅ a real 690 MB 4K mp4, and a 10 MB m4a |
+| `GET download/<name>` → 200, and `Range: bytes=0-99` → `206` + `content-range: bytes 0-99/722944168` + exactly 100 bytes | ✅ |
+| v1 `POST add` → `200 {"status":"ok"}`; `GET history` has `queue`/`pending`/`done` | ✅ |
+| `socket.io/` → `501` | ✅ |
+| restart mid-download resumes | ✅ `handing interrupted downloads back … count=1` → `boot recovery … scheduled=1` → `downloading \| Interrupted by shutdown` |
+| `SIGTERM` exits 0, in ~2.7 s | ✅ |
+| the legacy importer on a first start | ✅ (`tests/cli.rs`, `bootstrap::tests`, over WP-04's fixtures) |
+
+Unverified, and only a container can verify them: the image build itself, the entrypoint's
+`PUID`/`PGID`/`UMASK`/`CHOWN_DIRS`, the `HEALTHCHECK` wiring, `bgutil-pot` being supervised for
+real (the supervisor's own logic is covered by `pot.rs`'s tests, including the force-restart, the
+`failed` budget, the pgid isolation and the shutdown), `docker restart`, and the `docker logs`
+ERROR sweep.
