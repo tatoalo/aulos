@@ -13,6 +13,10 @@ default-run = "aulos-server"
 [lints]
 workspace = true
 
+[lib]
+name = "aulos_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aulos-server"
 path = "src/main.rs"
@@ -32,17 +36,31 @@ aulos-provider-sc = { workspace = true }
 aulos-queue = { workspace = true }
 aulos-api = { workspace = true }
 aulos-telegram = { workspace = true }
+# Only to hand `aulos_telegram::poll_updates` a `teloxide::Bot`: `TelegramActor::new` builds its
+# own transport and keeps it private, so the long-polling loop would otherwise have nothing to
+# poll (the WP-16 note in docs/INTEGRATION-NOTES.md). Same features as `aulos-telegram`.
+teloxide = { workspace = true, features = ["macros", "ctrlc_handler", "rustls"] }
 aulos-subscriptions = { workspace = true }
 aulos-hooks = { workspace = true }
 
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 clap = { workspace = true }
+notify = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json", "ansi"] }
 reqwest = { workspace = true }
 nix = { workspace = true, features = ["signal", "process"] }
+url = { workspace = true }
+# The listener and TLS. `axum` is only needed for `axum::serve`/`Router`; every route lives in
+# `aulos-api` (DESIGN §3 rule A3 permits exactly these two crates).
+axum = { workspace = true, features = ["http1", "tokio"] }
+axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
+rustls = { workspace = true, features = ["ring"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+tempfile = { workspace = true }
+aulos-provider = { workspace = true, features = ["fake"] }

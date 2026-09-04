@@ -1,4 +1,12 @@
-//! WP-01 acceptance: the CLI surface the container depends on.
+//! WP-01/WP-05/WP-17 acceptance: the CLI surface the container depends on, exercised through the
+//! real binary.
+//!
+//! The `serve` tests point `PYTHONPATH` at `aulos-provider-ytdlp`'s checked-in `pystub` fixture,
+//! so the DESIGN §16.1 step 9 shim handshake — which is **fatal** when `python3` + `yt-dlp` are
+//! missing, because `ytdlp` is the fallback provider for every URL — succeeds on a machine that
+//! has no real yt-dlp installed. The shim itself is the production one; only the `yt_dlp` module
+//! it imports is the stub, which is exactly the seam `aulos-provider-ytdlp`'s own transport tests
+//! use.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +21,11 @@ fn bin() -> Command {
     Command::cargo_bin("aulos-server").expect("the aulos-server binary is built by cargo test")
 }
 
+/// The stubbed `yt_dlp` package the shim imports, so a `serve` boot needs no real yt-dlp.
+fn pystub() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../aulos-provider-ytdlp/tests/fixtures/pystub")
+}
+
 #[test]
 fn a_bare_invocation_runs_serve() {
     // The entrypoint execs `aulos-server "$@"`; with no CMD there is no argument at all.
@@ -25,17 +38,48 @@ fn explicit_serve_runs_serve() {
     assert_serve_runs_and_stops_on_sigterm(&["serve"]);
 }
 
-/// `serve` must stay alive (the container `HEALTHCHECK` needs a live process) and exit 0 on the
-/// `SIGTERM` that `tini` forwards (DESIGN §16.4).
+/// A bare invocation really takes the `serve` path, whatever the machine has installed.
+///
+/// The discriminator is the exit code: invalid configuration exits **2** from `serve` (BRIEF §15)
+/// and **1** from `check-config`, so the same broken environment tells the two apart without
+/// depending on a listener, a port or an interpreter.
+#[test]
+fn a_bare_invocation_takes_the_serve_path_and_exits_two_on_bad_config() {
+    clean()
+        .env("PORT", "eighty")
+        .assert()
+        .code(2)
+        .stderr(contains("configuration is invalid").and(contains("PORT")));
+    clean()
+        .arg("check-config")
+        .env("PORT", "eighty")
+        .assert()
+        .code(1);
+}
+
+/// `serve` must bind, announce itself, and exit 0 on the `SIGTERM` that `tini` forwards
+/// (DESIGN §16.1 step 16, §16.4).
 fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
     use std::io::{BufRead as _, BufReader};
     use std::process::{Command as Proc, Stdio};
 
+    let work = workdir("serve");
     let exe = assert_cmd::cargo::cargo_bin("aulos-server");
     let mut child = Proc::new(exe)
         .args(args)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PYTHONPATH", pystub())
+        .env("HOST", "127.0.0.1")
+        .env("PORT", "0")
+        .env("DOWNLOAD_DIR", work.join("downloads"))
+        .env("TEMP_DIR", work.join("tmp"))
+        .env("STATE_DIR", work.join("state"))
+        .env("AULOS_PLUGINS_DIR", work.join("plugins"))
+        .env("AULOS_POT_ENABLED", "false")
+        .env("TELEGRAM_BOT_ENABLED", "false")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawning aulos-server failed: {e}"));
 
@@ -49,11 +93,15 @@ fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
         None => panic!("stdout was not piped"),
     }
     assert!(
-        line.contains("aulos-server serve: not implemented"),
+        line.starts_with("aulos-server ") && line.contains("listening on 127.0.0.1:"),
         "unexpected announce line: {line:?}"
     );
+    assert!(
+        line.contains("(v1 shim: on)"),
+        "the announce line must state the shim (DESIGN §16.1 step 16): {line:?}"
+    );
 
-    // Still running: a stub that exited would make the image permanently unhealthy.
+    // Still running: a process that exited would make the image permanently unhealthy.
     assert!(
         matches!(child.try_wait(), Ok(None)),
         "serve must not exit on its own"
@@ -69,24 +117,109 @@ fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
         matches!(&status, Ok(s) if s.success()),
         "serve must exit 0 on SIGTERM, got {status:?}"
     );
+    let _ = std::fs::remove_dir_all(&work);
 }
 
+/// Steps 5–12 really are before the bind: the announce line is printed only once the database
+/// exists, so a reader of stdout knows the queue is already consistent.
 #[test]
-fn doctor_exits_zero_with_the_not_implemented_line() {
-    bin()
+fn the_announce_line_comes_after_the_database_is_open() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command as Proc, Stdio};
+
+    let work = workdir("order");
+    let state = work.join("state");
+    let exe = assert_cmd::cargo::cargo_bin("aulos-server");
+    let mut child = Proc::new(exe)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PYTHONPATH", pystub())
+        .env("HOST", "127.0.0.1")
+        .env("PORT", "0")
+        .env("DOWNLOAD_DIR", work.join("downloads"))
+        .env("TEMP_DIR", work.join("tmp"))
+        .env("STATE_DIR", &state)
+        .env("AULOS_PLUGINS_DIR", work.join("plugins"))
+        .env("AULOS_POT_ENABLED", "false")
+        .env("TELEGRAM_BOT_ENABLED", "false")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn: {e}"));
+
+    let mut line = String::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = BufReader::new(out).read_line(&mut line);
+    }
+    assert!(line.contains("listening on"), "{line:?}");
+    assert!(
+        state.join("aulos.db").is_file(),
+        "the database must exist before the listener is announced"
+    );
+
+    let _ = Proc::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// `doctor` prints the table and exits 0 when the required tools answer.
+#[test]
+fn doctor_reports_every_tool_and_exits_zero_when_the_shim_answers() {
+    clean()
         .arg("doctor")
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PYTHONPATH", pystub())
         .assert()
         .success()
-        .stdout(contains("aulos-server doctor: not implemented"));
+        .stdout(
+            contains("required:")
+                .and(contains("yt-dlp"))
+                .and(contains("optional:"))
+                .and(contains("ffmpeg"))
+                .and(contains("nm3u8dl"))
+                .and(contains("deno"))
+                .and(contains("all required tools are present")),
+        );
 }
 
+/// A required tool removed from `PATH` makes `doctor` exit non-zero, which is what the image's own
+/// smoke step relies on.
 #[test]
-fn healthcheck_exits_zero_with_the_not_implemented_line() {
-    bin()
-        .arg("healthcheck")
+fn doctor_exits_non_zero_when_python_is_not_on_path() {
+    let empty = workdir("nopath");
+    clean()
+        .arg("doctor")
+        .env("PATH", &empty)
         .assert()
-        .success()
-        .stdout(contains("aulos-server healthcheck: not implemented"));
+        .code(1)
+        .stdout(contains("a REQUIRED tool is missing"));
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// `healthcheck` against a stopped server exits 1 and says which URL it tried.
+#[test]
+fn healthcheck_exits_one_against_a_stopped_server() {
+    clean()
+        .arg("healthcheck")
+        .env("PORT", "1")
+        .assert()
+        .code(1)
+        .stderr(contains("http://127.0.0.1:1/healthz"));
+}
+
+/// The C16 regression, as a URL: the subcommand normalises `URL_PREFIX` where a shell
+/// interpolating `${URL_PREFIX}` produced `…:8081metubehealthz`.
+#[test]
+fn healthcheck_normalises_a_slashless_url_prefix() {
+    clean()
+        .arg("healthcheck")
+        .env("PORT", "1")
+        .env("URL_PREFIX", "metube")
+        .assert()
+        .code(1)
+        .stderr(contains("http://127.0.0.1:1/metube/healthz"));
 }
 
 #[test]
