@@ -1,0 +1,14 @@
+{
+  "body": {
+    "ids": "11111111-1111-4111-8111-111111111111"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "47",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/subscriptions/delete",
+  "route": "POST subscriptions/delete"
+}

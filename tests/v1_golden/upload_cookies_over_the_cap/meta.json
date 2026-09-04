@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "upload_cookies_over_the_cap",
+  "path": "/upload-cookies",
+  "reason": "Bad Request",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "1000155",
+    "Content-Type": "multipart/form-data; boundary=----aulosWP00Boundary",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 61,
+  "response_headers": {
+    "Content-Length": "61",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "26d2a5d298d1189a4b9e5301781986a299d10e50480e2cb55ccc7420588e32fa",
+  "route": "POST upload-cookies",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §16.6: the cap is 1 000 000 **decimal** bytes and the test is `size > max_size`, so 1 000 001 is the first rejected size"
+}

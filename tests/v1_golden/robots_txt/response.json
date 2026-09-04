@@ -1,0 +1,3 @@
+{
+  "__text__": "User-agent: *\nDisallow: /download/\nDisallow: /audio_download/\n"
+}

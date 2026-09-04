@@ -1,0 +1,361 @@
+{
+  "codec_filter_map": {
+    "av1": "[vcodec~='^av0?1']",
+    "h264": "[vcodec~='^(h264|avc)']",
+    "h265": "[vcodec~='^(h265|hevc)']",
+    "vp9": "[vcodec~='^vp0?9']"
+  },
+  "description": "get_format(download_type, codec, format, quality) -> yt-dlp format selector, for every request tuple the legacy API admits, plus the edge cases the tuple sweep cannot reach.",
+  "edge_cases": [
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "custom:bestvideo[height<=720]+bestaudio",
+        "quality": "1080"
+      },
+      "name": "custom_selector_passthrough",
+      "selector": "bestvideo[height<=720]+bestaudio",
+      "why": "format.startswith('custom:') returns the remainder verbatim"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "audio",
+        "format": "custom:worstaudio",
+        "quality": "best"
+      },
+      "name": "custom_selector_wins_over_audio_type",
+      "selector": "worstaudio",
+      "why": "the custom: check runs before the download_type dispatch"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "custom:",
+        "quality": "best"
+      },
+      "name": "custom_selector_empty_remainder",
+      "selector": "",
+      "why": "'custom:' with nothing after it yields the empty selector"
+    },
+    {
+      "args": {
+        "codec": "",
+        "download_type": "",
+        "format": "",
+        "quality": ""
+      },
+      "name": "defaults_from_empty_strings",
+      "selector": "bestvideo+bestaudio/best",
+      "why": "'' falls back to video/any/auto/best via the `or` defaults"
+    },
+    {
+      "args": {
+        "codec": null,
+        "download_type": null,
+        "format": null,
+        "quality": null
+      },
+      "name": "defaults_from_none",
+      "selector": "bestvideo+bestaudio/best",
+      "why": "None falls back to video/any/auto/best"
+    },
+    {
+      "args": {
+        "codec": " H264 ",
+        "download_type": "  VIDEO ",
+        "format": " MP4 ",
+        "quality": " 1080 "
+      },
+      "name": "whitespace_and_case_are_normalised",
+      "selector": "bestvideo[vcodec~='^(h264|avc)'][height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+      "why": ".strip().lower() on all four arguments"
+    },
+    {
+      "args": {
+        "codec": "vp8",
+        "download_type": "video",
+        "format": "any",
+        "quality": "720"
+      },
+      "name": "unknown_codec_falls_back_to_no_filter",
+      "selector": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+      "why": "CODEC_FILTER_MAP.get(codec, '') -- an unknown codec is not an error"
+    },
+    {
+      "args": {
+        "codec": "av1",
+        "download_type": "video",
+        "format": "ios",
+        "quality": "1080"
+      },
+      "name": "ios_ignores_the_codec_filter",
+      "selector": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+      "why": "the ios branch returns before codec_filter is consulted"
+    },
+    {
+      "args": {
+        "codec": "h265",
+        "download_type": "video",
+        "format": "mp4",
+        "quality": "best_remux"
+      },
+      "name": "mp4_best_remux_ignores_the_codec_filter",
+      "selector": "bestvideo+bestaudio/best",
+      "why": "the best_remux branch returns before codec_filter is consulted"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "any",
+        "quality": "best_remux"
+      },
+      "name": "any_best_remux_is_height_unfiltered",
+      "selector": "bestvideo+bestaudio/best",
+      "why": "best_remux is only API-legal for mp4, but get_format treats it as a no-height-filter quality for every video format"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "any",
+        "quality": "worst"
+      },
+      "name": "worst_is_not_a_height_filter",
+      "selector": "bestvideo+bestaudio/best",
+      "why": "the documented legacy quirk (DESIGN §6.6 notice): 'worst' produces the same selector as 'best'"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "thumbnail",
+        "format": "jpg",
+        "quality": "best"
+      },
+      "name": "thumbnail_selector_is_bestaudio_best",
+      "selector": "bestaudio/best",
+      "why": "thumbnail short-circuits to bestaudio/best regardless of format"
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "captions",
+        "format": "vtt",
+        "quality": "best"
+      },
+      "name": "captions_selector_is_bestaudio_best",
+      "selector": "bestaudio/best",
+      "why": "captions short-circuits to bestaudio/best regardless of format"
+    }
+  ],
+  "errors": [
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "podcast",
+        "format": "any",
+        "quality": "best"
+      },
+      "name": "unknown_download_type",
+      "raises": {
+        "ValueError": "Unknown download_type podcast"
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "mkv",
+        "quality": "best"
+      },
+      "name": "unknown_video_format",
+      "raises": {
+        "ValueError": "Unknown video format mkv"
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "audio",
+        "format": "aac",
+        "quality": "best"
+      },
+      "name": "unknown_audio_format",
+      "raises": {
+        "ValueError": "Unknown audio format aac"
+      }
+    }
+  ],
+  "key_format": "download_type|codec|format|quality",
+  "provenance": {
+    "captured_at": "2026-09-04T11:19:19+00:00",
+    "legacy_commit": "fd35a66c562db7ab4f1656f65a8c28c98c5e6a84",
+    "legacy_module": "app/dl_formats.py",
+    "python_version": "3.13.13",
+    "tool": "tools/capture/dump_formats.py",
+    "yt_dlp_version": "2026.03.17"
+  },
+  "selectors": {
+    "audio|auto|flac|best": "bestaudio[ext=flac]/bestaudio/best",
+    "audio|auto|m4a|128": "bestaudio[ext=m4a]/bestaudio/best",
+    "audio|auto|m4a|192": "bestaudio[ext=m4a]/bestaudio/best",
+    "audio|auto|m4a|best": "bestaudio[ext=m4a]/bestaudio/best",
+    "audio|auto|mp3|128": "bestaudio[ext=mp3]/bestaudio/best",
+    "audio|auto|mp3|192": "bestaudio[ext=mp3]/bestaudio/best",
+    "audio|auto|mp3|320": "bestaudio[ext=mp3]/bestaudio/best",
+    "audio|auto|mp3|best": "bestaudio[ext=mp3]/bestaudio/best",
+    "audio|auto|opus|best": "bestaudio[ext=opus]/bestaudio/best",
+    "audio|auto|wav|best": "bestaudio[ext=wav]/bestaudio/best",
+    "captions|auto|dfxp|best": "bestaudio/best",
+    "captions|auto|sbv|best": "bestaudio/best",
+    "captions|auto|scc|best": "bestaudio/best",
+    "captions|auto|srt|best": "bestaudio/best",
+    "captions|auto|ttml|best": "bestaudio/best",
+    "captions|auto|txt|best": "bestaudio/best",
+    "captions|auto|vtt|best": "bestaudio/best",
+    "thumbnail|auto|jpg|best": "bestaudio/best",
+    "video|auto|any|1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "video|auto|any|1440": "bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+    "video|auto|any|2160": "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "video|auto|any|240": "bestvideo[height<=240]+bestaudio/best[height<=240]",
+    "video|auto|any|360": "bestvideo[height<=360]+bestaudio/best[height<=360]",
+    "video|auto|any|480": "bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "video|auto|any|720": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "video|auto|any|best": "bestvideo+bestaudio/best",
+    "video|auto|any|worst": "bestvideo+bestaudio/best",
+    "video|auto|ios|1080": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|auto|ios|1440": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|auto|ios|2160": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|auto|ios|240": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|auto|ios|360": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|auto|ios|480": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|auto|ios|720": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|auto|ios|best": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|auto|ios|worst": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|auto|mp4|1080": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|auto|mp4|1440": "bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|auto|mp4|2160": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|auto|mp4|240": "bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|auto|mp4|360": "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|auto|mp4|480": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|auto|mp4|720": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|auto|mp4|best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|auto|mp4|best_remux": "bestvideo+bestaudio/best",
+    "video|auto|mp4|worst": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|av1|any|1080": "bestvideo[vcodec~='^av0?1'][height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "video|av1|any|1440": "bestvideo[vcodec~='^av0?1'][height<=1440]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+    "video|av1|any|2160": "bestvideo[vcodec~='^av0?1'][height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "video|av1|any|240": "bestvideo[vcodec~='^av0?1'][height<=240]+bestaudio/bestvideo[height<=240]+bestaudio/best[height<=240]",
+    "video|av1|any|360": "bestvideo[vcodec~='^av0?1'][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
+    "video|av1|any|480": "bestvideo[vcodec~='^av0?1'][height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "video|av1|any|720": "bestvideo[vcodec~='^av0?1'][height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "video|av1|any|best": "bestvideo[vcodec~='^av0?1']+bestaudio/bestvideo+bestaudio/best",
+    "video|av1|any|worst": "bestvideo[vcodec~='^av0?1']+bestaudio/bestvideo+bestaudio/best",
+    "video|av1|ios|1080": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|av1|ios|1440": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|av1|ios|2160": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|av1|ios|240": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|av1|ios|360": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|av1|ios|480": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|av1|ios|720": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|av1|ios|best": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|av1|ios|worst": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|av1|mp4|1080": "bestvideo[vcodec~='^av0?1'][height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|av1|mp4|1440": "bestvideo[vcodec~='^av0?1'][height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|av1|mp4|2160": "bestvideo[vcodec~='^av0?1'][height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|av1|mp4|240": "bestvideo[vcodec~='^av0?1'][height<=240][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|av1|mp4|360": "bestvideo[vcodec~='^av0?1'][height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|av1|mp4|480": "bestvideo[vcodec~='^av0?1'][height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|av1|mp4|720": "bestvideo[vcodec~='^av0?1'][height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|av1|mp4|best": "bestvideo[vcodec~='^av0?1'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|av1|mp4|best_remux": "bestvideo+bestaudio/best",
+    "video|av1|mp4|worst": "bestvideo[vcodec~='^av0?1'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h264|any|1080": "bestvideo[vcodec~='^(h264|avc)'][height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "video|h264|any|1440": "bestvideo[vcodec~='^(h264|avc)'][height<=1440]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+    "video|h264|any|2160": "bestvideo[vcodec~='^(h264|avc)'][height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "video|h264|any|240": "bestvideo[vcodec~='^(h264|avc)'][height<=240]+bestaudio/bestvideo[height<=240]+bestaudio/best[height<=240]",
+    "video|h264|any|360": "bestvideo[vcodec~='^(h264|avc)'][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
+    "video|h264|any|480": "bestvideo[vcodec~='^(h264|avc)'][height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "video|h264|any|720": "bestvideo[vcodec~='^(h264|avc)'][height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "video|h264|any|best": "bestvideo[vcodec~='^(h264|avc)']+bestaudio/bestvideo+bestaudio/best",
+    "video|h264|any|worst": "bestvideo[vcodec~='^(h264|avc)']+bestaudio/bestvideo+bestaudio/best",
+    "video|h264|ios|1080": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|h264|ios|1440": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|h264|ios|2160": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|h264|ios|240": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|h264|ios|360": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|h264|ios|480": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|h264|ios|720": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|h264|ios|best": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h264|ios|worst": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h264|mp4|1080": "bestvideo[vcodec~='^(h264|avc)'][height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|h264|mp4|1440": "bestvideo[vcodec~='^(h264|avc)'][height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|h264|mp4|2160": "bestvideo[vcodec~='^(h264|avc)'][height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|h264|mp4|240": "bestvideo[vcodec~='^(h264|avc)'][height<=240][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|h264|mp4|360": "bestvideo[vcodec~='^(h264|avc)'][height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|h264|mp4|480": "bestvideo[vcodec~='^(h264|avc)'][height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|h264|mp4|720": "bestvideo[vcodec~='^(h264|avc)'][height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|h264|mp4|best": "bestvideo[vcodec~='^(h264|avc)'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h264|mp4|best_remux": "bestvideo+bestaudio/best",
+    "video|h264|mp4|worst": "bestvideo[vcodec~='^(h264|avc)'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h265|any|1080": "bestvideo[vcodec~='^(h265|hevc)'][height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "video|h265|any|1440": "bestvideo[vcodec~='^(h265|hevc)'][height<=1440]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+    "video|h265|any|2160": "bestvideo[vcodec~='^(h265|hevc)'][height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "video|h265|any|240": "bestvideo[vcodec~='^(h265|hevc)'][height<=240]+bestaudio/bestvideo[height<=240]+bestaudio/best[height<=240]",
+    "video|h265|any|360": "bestvideo[vcodec~='^(h265|hevc)'][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
+    "video|h265|any|480": "bestvideo[vcodec~='^(h265|hevc)'][height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "video|h265|any|720": "bestvideo[vcodec~='^(h265|hevc)'][height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "video|h265|any|best": "bestvideo[vcodec~='^(h265|hevc)']+bestaudio/bestvideo+bestaudio/best",
+    "video|h265|any|worst": "bestvideo[vcodec~='^(h265|hevc)']+bestaudio/bestvideo+bestaudio/best",
+    "video|h265|ios|1080": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|h265|ios|1440": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|h265|ios|2160": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|h265|ios|240": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|h265|ios|360": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|h265|ios|480": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|h265|ios|720": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|h265|ios|best": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h265|ios|worst": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h265|mp4|1080": "bestvideo[vcodec~='^(h265|hevc)'][height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|h265|mp4|1440": "bestvideo[vcodec~='^(h265|hevc)'][height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|h265|mp4|2160": "bestvideo[vcodec~='^(h265|hevc)'][height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|h265|mp4|240": "bestvideo[vcodec~='^(h265|hevc)'][height<=240][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|h265|mp4|360": "bestvideo[vcodec~='^(h265|hevc)'][height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|h265|mp4|480": "bestvideo[vcodec~='^(h265|hevc)'][height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|h265|mp4|720": "bestvideo[vcodec~='^(h265|hevc)'][height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|h265|mp4|best": "bestvideo[vcodec~='^(h265|hevc)'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|h265|mp4|best_remux": "bestvideo+bestaudio/best",
+    "video|h265|mp4|worst": "bestvideo[vcodec~='^(h265|hevc)'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|vp9|any|1080": "bestvideo[vcodec~='^vp0?9'][height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "video|vp9|any|1440": "bestvideo[vcodec~='^vp0?9'][height<=1440]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]",
+    "video|vp9|any|2160": "bestvideo[vcodec~='^vp0?9'][height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "video|vp9|any|240": "bestvideo[vcodec~='^vp0?9'][height<=240]+bestaudio/bestvideo[height<=240]+bestaudio/best[height<=240]",
+    "video|vp9|any|360": "bestvideo[vcodec~='^vp0?9'][height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]",
+    "video|vp9|any|480": "bestvideo[vcodec~='^vp0?9'][height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "video|vp9|any|720": "bestvideo[vcodec~='^vp0?9'][height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "video|vp9|any|best": "bestvideo[vcodec~='^vp0?9']+bestaudio/bestvideo+bestaudio/best",
+    "video|vp9|any|worst": "bestvideo[vcodec~='^vp0?9']+bestaudio/bestvideo+bestaudio/best",
+    "video|vp9|ios|1080": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|vp9|ios|1440": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|vp9|ios|2160": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|vp9|ios|240": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=240]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|vp9|ios|360": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|vp9|ios|480": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|vp9|ios|720": "bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])'][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|vp9|ios|best": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|vp9|ios|worst": "bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[acodec=aac]/bestvideo[vcodec~='^((he|a)vc|h26[45])']+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|vp9|mp4|1080": "bestvideo[vcodec~='^vp0?9'][height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
+    "video|vp9|mp4|1440": "bestvideo[vcodec~='^vp0?9'][height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]",
+    "video|vp9|mp4|2160": "bestvideo[vcodec~='^vp0?9'][height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]",
+    "video|vp9|mp4|240": "bestvideo[vcodec~='^vp0?9'][height<=240][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]",
+    "video|vp9|mp4|360": "bestvideo[vcodec~='^vp0?9'][height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]",
+    "video|vp9|mp4|480": "bestvideo[vcodec~='^vp0?9'][height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]",
+    "video|vp9|mp4|720": "bestvideo[vcodec~='^vp0?9'][height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]",
+    "video|vp9|mp4|best": "bestvideo[vcodec~='^vp0?9'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+    "video|vp9|mp4|best_remux": "bestvideo+bestaudio/best",
+    "video|vp9|mp4|worst": "bestvideo[vcodec~='^vp0?9'][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
+  }
+}

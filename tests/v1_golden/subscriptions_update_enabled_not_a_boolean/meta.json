@@ -1,0 +1,28 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_enabled_not_a_boolean",
+  "path": "/subscriptions/update",
+  "reason": "Internal Server Error",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "62",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 55,
+  "response_headers": {
+    "Connection": "close",
+    "Content-Length": "55",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "7b7236933fa20a5ecab7cc0764a3378eb654733a5e8c1102b602544158cd2ece",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 500,
+  "why": "the legacy leak DESIGN §11.1 / Appendix B C25 fixes: _coerce_bool raises ValueError('enabled must be a boolean') and nothing catches it -> HTTP 500"
+}

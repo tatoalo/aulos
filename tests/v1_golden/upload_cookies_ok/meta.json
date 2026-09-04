@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "upload_cookies_ok",
+  "path": "/upload-cookies",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "218",
+    "Content-Type": "multipart/form-data; boundary=----aulosWP00Boundary",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 54,
+  "response_headers": {
+    "Content-Length": "54",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "4df9aeddde5b47c1888bfe8952795fab1748e9da74d69ac01840e5d4a45a7087",
+  "route": "POST upload-cookies",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "DESIGN §11.7: `Cookies uploaded (N bytes)` -- N is the decoded byte count"
+}

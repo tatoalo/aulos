@@ -1,0 +1,3 @@
+{
+  "__text__": "400: subtitle_mode must be one of ['auto_only', 'manual_only', 'prefer_auto', 'prefer_manual']"
+}

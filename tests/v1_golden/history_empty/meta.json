@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "history_empty",
+  "path": "/history",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 40,
+  "response_headers": {
+    "Content-Length": "40",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "683bdb0adecd0c176d739c336671ed0f022aba161591be32a7f36c12e876a9aa",
+  "route": "GET history",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "all three keys are present and empty on a fresh install (DESIGN §11.4)"
+}

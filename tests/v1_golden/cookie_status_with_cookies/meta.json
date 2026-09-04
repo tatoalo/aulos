@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "cookie_status_with_cookies",
+  "path": "/cookie-status",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 37,
+  "response_headers": {
+    "Content-Length": "37",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "ee15027d5563dabaddca5ee2e0df1276c81a9b6ecfca41695633738b1cf9e1f8",
+  "route": "GET cookie-status",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "has_cookies flips to true once an upload landed"
+}

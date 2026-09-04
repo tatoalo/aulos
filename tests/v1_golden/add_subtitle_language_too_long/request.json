@@ -1,0 +1,18 @@
+{
+  "body": {
+    "download_type": "video",
+    "format": "any",
+    "quality": "best",
+    "subtitle_language": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "177",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/add",
+  "route": "POST add"
+}

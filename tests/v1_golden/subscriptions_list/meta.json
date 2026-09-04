@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "subscriptions_list",
+  "path": "/subscriptions",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 677,
+  "response_headers": {
+    "Content-Length": "677",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "c63f86d8191fd1392b6997be1e0fe9237ac39a1a2029cac719dd353332acafc2",
+  "route": "GET subscriptions",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the 13-key public projection, one enabled and one disabled subscription"
+}

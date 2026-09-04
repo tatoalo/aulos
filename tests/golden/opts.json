@@ -1,0 +1,1961 @@
+{
+  "branches": [
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "audio",
+        "format": "m4a",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "audio_m4a_best_with_existing_writethumbnail",
+      "opts": {
+        "postprocessors": [
+          {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "m4a",
+            "preferredquality": 0
+          }
+        ],
+        "writethumbnail": false
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "'writethumbnail' already present -> the thumbnail postprocessor trio is skipped",
+      "ytdl_opts": {
+        "writethumbnail": false
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "audio",
+        "format": "mp3",
+        "quality": "192"
+      },
+      "caller_opts_unmutated": true,
+      "name": "audio_mp3_192_with_existing_postprocessors",
+      "opts": {
+        "postprocessors": [
+          {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+          },
+          {
+            "format": "jpg",
+            "key": "FFmpegThumbnailsConvertor",
+            "when": "before_dl"
+          },
+          {
+            "key": "FFmpegMetadata"
+          },
+          {
+            "key": "EmbedThumbnail"
+          },
+          {
+            "key": "SponsorBlock"
+          }
+        ],
+        "writethumbnail": true
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "caller postprocessors are appended after the type-derived ones",
+      "ytdl_opts": {
+        "postprocessors": [
+          {
+            "key": "SponsorBlock"
+          }
+        ]
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "mp4",
+        "quality": "best_remux"
+      },
+      "caller_opts_unmutated": true,
+      "name": "video_mp4_best_remux_pops_caller_format",
+      "opts": {
+        "merge_output_format": "mp4",
+        "noprogress": true,
+        "postprocessors": [
+          {
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4"
+          },
+          {
+            "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+            "key": "Exec"
+          }
+        ]
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "the best_remux branch deletes a caller-supplied 'format' key",
+      "ytdl_opts": {
+        "format": "bestvideo[height<=480]",
+        "noprogress": true
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "mp4",
+        "quality": "best_remux"
+      },
+      "caller_opts_unmutated": true,
+      "name": "video_mp4_best_remux_with_existing_postprocessors",
+      "opts": {
+        "merge_output_format": "mp4",
+        "postprocessors": [
+          {
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4"
+          },
+          {
+            "key": "SponsorBlock"
+          },
+          {
+            "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+            "key": "Exec"
+          }
+        ]
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "ordering is [derived] + [caller] + [late]; the Exec hook is always last",
+      "ytdl_opts": {
+        "postprocessors": [
+          {
+            "key": "SponsorBlock"
+          }
+        ]
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "any",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "video_any_best_is_a_passthrough",
+      "opts": {
+        "noplaylist": true,
+        "postprocessors": []
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "the plain video path adds nothing but the postprocessors key",
+      "ytdl_opts": {
+        "noplaylist": true
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "thumbnail",
+        "format": "jpg",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "thumbnail_with_existing_postprocessors",
+      "opts": {
+        "postprocessors": [
+          {
+            "format": "jpg",
+            "key": "FFmpegThumbnailsConvertor",
+            "when": "before_dl"
+          },
+          {
+            "key": "FFmpegMetadata"
+          }
+        ],
+        "skip_download": true,
+        "writethumbnail": true
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "skip_download + writethumbnail + convertor, then caller postprocessors",
+      "ytdl_opts": {
+        "postprocessors": [
+          {
+            "key": "FFmpegMetadata"
+          }
+        ]
+      }
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "captions",
+        "format": "txt",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "captions_txt_is_downloaded_as_srt",
+      "opts": {
+        "postprocessors": [],
+        "skip_download": true,
+        "subtitlesformat": "srt",
+        "subtitleslangs": [
+          "en",
+          "en-orig"
+        ],
+        "writeautomaticsub": true,
+        "writesubtitles": true
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "'txt' is rewritten to 'srt' for subtitlesformat (the txt conversion is post-hoc)",
+      "ytdl_opts": {}
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "captions",
+        "format": "srt",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "captions_unknown_mode_falls_back_to_prefer_manual",
+      "opts": {
+        "postprocessors": [],
+        "skip_download": true,
+        "subtitlesformat": "srt",
+        "subtitleslangs": [
+          "en",
+          "en-orig"
+        ],
+        "writeautomaticsub": true,
+        "writesubtitles": true
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "nonsense",
+      "why": "_normalize_caption_mode: anything outside CAPTION_MODES -> prefer_manual",
+      "ytdl_opts": {}
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "captions",
+        "format": "srt",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "captions_blank_language_falls_back_to_en",
+      "opts": {
+        "postprocessors": [],
+        "skip_download": true,
+        "subtitlesformat": "srt",
+        "subtitleslangs": [
+          "en",
+          "en-orig"
+        ],
+        "writeautomaticsub": true,
+        "writesubtitles": true
+      },
+      "subtitle_language": "   ",
+      "subtitle_mode": "prefer_manual",
+      "why": "_normalize_subtitle_language: '' / whitespace -> 'en'",
+      "ytdl_opts": {}
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "captions",
+        "format": "vtt",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "captions_language_is_stripped",
+      "opts": {
+        "postprocessors": [],
+        "skip_download": true,
+        "subtitlesformat": "vtt",
+        "subtitleslangs": [
+          "pt-BR-orig",
+          "pt-BR"
+        ],
+        "writeautomaticsub": true,
+        "writesubtitles": false
+      },
+      "subtitle_language": "  pt-BR  ",
+      "subtitle_mode": "auto_only",
+      "why": "_normalize_subtitle_language strips surrounding whitespace",
+      "ytdl_opts": {}
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "audio",
+        "format": "wav",
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "audio_wav_has_no_thumbnail_trio",
+      "opts": {
+        "postprocessors": [
+          {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav",
+            "preferredquality": 0
+          }
+        ]
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "format == 'wav' is excluded from the writethumbnail branch",
+      "ytdl_opts": {}
+    },
+    {
+      "args": {
+        "codec": "auto",
+        "download_type": "video",
+        "format": "any",
+        "quality": "720"
+      },
+      "caller_opts_unmutated": true,
+      "name": "caller_opts_are_deep_copied",
+      "opts": {
+        "paths": {
+          "home": "/downloads",
+          "temp": "/tmp"
+        },
+        "postprocessors": []
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "get_opts deepcopies ytdl_opts; the nested dict must not be shared",
+      "ytdl_opts": {
+        "paths": {
+          "home": "/downloads",
+          "temp": "/tmp"
+        }
+      }
+    },
+    {
+      "args": {
+        "codec": null,
+        "download_type": null,
+        "format": null,
+        "quality": "best"
+      },
+      "caller_opts_unmutated": true,
+      "name": "defaults_from_none_download_type",
+      "opts": {
+        "postprocessors": []
+      },
+      "subtitle_language": "en",
+      "subtitle_mode": "prefer_manual",
+      "why": "None download_type/format default to video/any",
+      "ytdl_opts": {}
+    }
+  ],
+  "caption_modes": [
+    "auto_only",
+    "manual_only",
+    "prefer_manual",
+    "prefer_auto"
+  ],
+  "description": "get_opts(download_type, codec, format, quality, ytdl_opts, subtitle_language, subtitle_mode) -> the merged yt-dlp option dict, for every legal request tuple (empty caller opts) plus one entry per branch that needs non-default inputs.",
+  "key_format": "download_type|codec|format|quality, with |subtitle_mode|subtitle_language appended for download_type=captions",
+  "provenance": {
+    "captured_at": "2026-09-04T11:19:19+00:00",
+    "legacy_commit": "fd35a66c562db7ab4f1656f65a8c28c98c5e6a84",
+    "legacy_module": "app/dl_formats.py",
+    "python_version": "3.13.13",
+    "tool": "tools/capture/dump_formats.py",
+    "yt_dlp_version": "2026.03.17"
+  },
+  "sweep": {
+    "audio|auto|flac|best": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "flac",
+          "preferredquality": 0
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|m4a|128": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "m4a",
+          "preferredquality": "128"
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|m4a|192": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "m4a",
+          "preferredquality": "192"
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|m4a|best": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "m4a",
+          "preferredquality": 0
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|mp3|128": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": "128"
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|mp3|192": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": "192"
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|mp3|320": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": "320"
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|mp3|best": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": 0
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|opus|best": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "opus",
+          "preferredquality": 0
+        },
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        },
+        {
+          "key": "FFmpegMetadata"
+        },
+        {
+          "key": "EmbedThumbnail"
+        }
+      ],
+      "writethumbnail": true
+    },
+    "audio|auto|wav|best": {
+      "postprocessors": [
+        {
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "wav",
+          "preferredquality": 0
+        }
+      ]
+    },
+    "captions|auto|dfxp|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|dfxp|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|dfxp|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|dfxp|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|dfxp|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "dfxp",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|sbv|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|sbv|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|sbv|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|sbv|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "sbv",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|scc|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|scc|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|scc|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|scc|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "scc",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|srt|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|srt|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|srt|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|srt|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|ttml|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|ttml|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|ttml|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|ttml|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "ttml",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|txt|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|txt|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|txt|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|txt|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "srt",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|auto_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|vtt|best|auto_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|vtt|best|auto_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": false
+    },
+    "captions|auto|vtt|best|manual_only|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "en"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|manual_only|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "it"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|manual_only|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "pt-BR"
+      ],
+      "writeautomaticsub": false,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_auto|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "en-orig",
+        "en"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_auto|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "it-orig",
+        "it"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_auto|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "pt-BR-orig",
+        "pt-BR"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_manual|en": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "en",
+        "en-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_manual|it": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "it",
+        "it-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "captions|auto|vtt|best|prefer_manual|pt-BR": {
+      "postprocessors": [],
+      "skip_download": true,
+      "subtitlesformat": "vtt",
+      "subtitleslangs": [
+        "pt-BR",
+        "pt-BR-orig"
+      ],
+      "writeautomaticsub": true,
+      "writesubtitles": true
+    },
+    "thumbnail|auto|jpg|best": {
+      "postprocessors": [
+        {
+          "format": "jpg",
+          "key": "FFmpegThumbnailsConvertor",
+          "when": "before_dl"
+        }
+      ],
+      "skip_download": true,
+      "writethumbnail": true
+    },
+    "video|auto|any|1080": {
+      "postprocessors": []
+    },
+    "video|auto|any|1440": {
+      "postprocessors": []
+    },
+    "video|auto|any|2160": {
+      "postprocessors": []
+    },
+    "video|auto|any|240": {
+      "postprocessors": []
+    },
+    "video|auto|any|360": {
+      "postprocessors": []
+    },
+    "video|auto|any|480": {
+      "postprocessors": []
+    },
+    "video|auto|any|720": {
+      "postprocessors": []
+    },
+    "video|auto|any|best": {
+      "postprocessors": []
+    },
+    "video|auto|any|worst": {
+      "postprocessors": []
+    },
+    "video|auto|ios|1080": {
+      "postprocessors": []
+    },
+    "video|auto|ios|1440": {
+      "postprocessors": []
+    },
+    "video|auto|ios|2160": {
+      "postprocessors": []
+    },
+    "video|auto|ios|240": {
+      "postprocessors": []
+    },
+    "video|auto|ios|360": {
+      "postprocessors": []
+    },
+    "video|auto|ios|480": {
+      "postprocessors": []
+    },
+    "video|auto|ios|720": {
+      "postprocessors": []
+    },
+    "video|auto|ios|best": {
+      "postprocessors": []
+    },
+    "video|auto|ios|worst": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|1080": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|1440": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|2160": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|240": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|360": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|480": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|720": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|best": {
+      "postprocessors": []
+    },
+    "video|auto|mp4|best_remux": {
+      "merge_output_format": "mp4",
+      "postprocessors": [
+        {
+          "key": "FFmpegVideoConvertor",
+          "preferedformat": "mp4"
+        },
+        {
+          "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+          "key": "Exec"
+        }
+      ]
+    },
+    "video|auto|mp4|worst": {
+      "postprocessors": []
+    },
+    "video|av1|any|1080": {
+      "postprocessors": []
+    },
+    "video|av1|any|1440": {
+      "postprocessors": []
+    },
+    "video|av1|any|2160": {
+      "postprocessors": []
+    },
+    "video|av1|any|240": {
+      "postprocessors": []
+    },
+    "video|av1|any|360": {
+      "postprocessors": []
+    },
+    "video|av1|any|480": {
+      "postprocessors": []
+    },
+    "video|av1|any|720": {
+      "postprocessors": []
+    },
+    "video|av1|any|best": {
+      "postprocessors": []
+    },
+    "video|av1|any|worst": {
+      "postprocessors": []
+    },
+    "video|av1|ios|1080": {
+      "postprocessors": []
+    },
+    "video|av1|ios|1440": {
+      "postprocessors": []
+    },
+    "video|av1|ios|2160": {
+      "postprocessors": []
+    },
+    "video|av1|ios|240": {
+      "postprocessors": []
+    },
+    "video|av1|ios|360": {
+      "postprocessors": []
+    },
+    "video|av1|ios|480": {
+      "postprocessors": []
+    },
+    "video|av1|ios|720": {
+      "postprocessors": []
+    },
+    "video|av1|ios|best": {
+      "postprocessors": []
+    },
+    "video|av1|ios|worst": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|1080": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|1440": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|2160": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|240": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|360": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|480": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|720": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|best": {
+      "postprocessors": []
+    },
+    "video|av1|mp4|best_remux": {
+      "merge_output_format": "mp4",
+      "postprocessors": [
+        {
+          "key": "FFmpegVideoConvertor",
+          "preferedformat": "mp4"
+        },
+        {
+          "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+          "key": "Exec"
+        }
+      ]
+    },
+    "video|av1|mp4|worst": {
+      "postprocessors": []
+    },
+    "video|h264|any|1080": {
+      "postprocessors": []
+    },
+    "video|h264|any|1440": {
+      "postprocessors": []
+    },
+    "video|h264|any|2160": {
+      "postprocessors": []
+    },
+    "video|h264|any|240": {
+      "postprocessors": []
+    },
+    "video|h264|any|360": {
+      "postprocessors": []
+    },
+    "video|h264|any|480": {
+      "postprocessors": []
+    },
+    "video|h264|any|720": {
+      "postprocessors": []
+    },
+    "video|h264|any|best": {
+      "postprocessors": []
+    },
+    "video|h264|any|worst": {
+      "postprocessors": []
+    },
+    "video|h264|ios|1080": {
+      "postprocessors": []
+    },
+    "video|h264|ios|1440": {
+      "postprocessors": []
+    },
+    "video|h264|ios|2160": {
+      "postprocessors": []
+    },
+    "video|h264|ios|240": {
+      "postprocessors": []
+    },
+    "video|h264|ios|360": {
+      "postprocessors": []
+    },
+    "video|h264|ios|480": {
+      "postprocessors": []
+    },
+    "video|h264|ios|720": {
+      "postprocessors": []
+    },
+    "video|h264|ios|best": {
+      "postprocessors": []
+    },
+    "video|h264|ios|worst": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|1080": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|1440": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|2160": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|240": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|360": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|480": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|720": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|best": {
+      "postprocessors": []
+    },
+    "video|h264|mp4|best_remux": {
+      "merge_output_format": "mp4",
+      "postprocessors": [
+        {
+          "key": "FFmpegVideoConvertor",
+          "preferedformat": "mp4"
+        },
+        {
+          "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+          "key": "Exec"
+        }
+      ]
+    },
+    "video|h264|mp4|worst": {
+      "postprocessors": []
+    },
+    "video|h265|any|1080": {
+      "postprocessors": []
+    },
+    "video|h265|any|1440": {
+      "postprocessors": []
+    },
+    "video|h265|any|2160": {
+      "postprocessors": []
+    },
+    "video|h265|any|240": {
+      "postprocessors": []
+    },
+    "video|h265|any|360": {
+      "postprocessors": []
+    },
+    "video|h265|any|480": {
+      "postprocessors": []
+    },
+    "video|h265|any|720": {
+      "postprocessors": []
+    },
+    "video|h265|any|best": {
+      "postprocessors": []
+    },
+    "video|h265|any|worst": {
+      "postprocessors": []
+    },
+    "video|h265|ios|1080": {
+      "postprocessors": []
+    },
+    "video|h265|ios|1440": {
+      "postprocessors": []
+    },
+    "video|h265|ios|2160": {
+      "postprocessors": []
+    },
+    "video|h265|ios|240": {
+      "postprocessors": []
+    },
+    "video|h265|ios|360": {
+      "postprocessors": []
+    },
+    "video|h265|ios|480": {
+      "postprocessors": []
+    },
+    "video|h265|ios|720": {
+      "postprocessors": []
+    },
+    "video|h265|ios|best": {
+      "postprocessors": []
+    },
+    "video|h265|ios|worst": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|1080": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|1440": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|2160": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|240": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|360": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|480": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|720": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|best": {
+      "postprocessors": []
+    },
+    "video|h265|mp4|best_remux": {
+      "merge_output_format": "mp4",
+      "postprocessors": [
+        {
+          "key": "FFmpegVideoConvertor",
+          "preferedformat": "mp4"
+        },
+        {
+          "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+          "key": "Exec"
+        }
+      ]
+    },
+    "video|h265|mp4|worst": {
+      "postprocessors": []
+    },
+    "video|vp9|any|1080": {
+      "postprocessors": []
+    },
+    "video|vp9|any|1440": {
+      "postprocessors": []
+    },
+    "video|vp9|any|2160": {
+      "postprocessors": []
+    },
+    "video|vp9|any|240": {
+      "postprocessors": []
+    },
+    "video|vp9|any|360": {
+      "postprocessors": []
+    },
+    "video|vp9|any|480": {
+      "postprocessors": []
+    },
+    "video|vp9|any|720": {
+      "postprocessors": []
+    },
+    "video|vp9|any|best": {
+      "postprocessors": []
+    },
+    "video|vp9|any|worst": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|1080": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|1440": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|2160": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|240": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|360": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|480": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|720": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|best": {
+      "postprocessors": []
+    },
+    "video|vp9|ios|worst": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|1080": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|1440": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|2160": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|240": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|360": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|480": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|720": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|best": {
+      "postprocessors": []
+    },
+    "video|vp9|mp4|best_remux": {
+      "merge_output_format": "mp4",
+      "postprocessors": [
+        {
+          "key": "FFmpegVideoConvertor",
+          "preferedformat": "mp4"
+        },
+        {
+          "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q",
+          "key": "Exec"
+        }
+      ]
+    },
+    "video|vp9|mp4|worst": {
+      "postprocessors": []
+    }
+  }
+}

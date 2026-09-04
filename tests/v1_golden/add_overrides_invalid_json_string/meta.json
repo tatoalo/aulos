@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_overrides_invalid_json_string",
+  "path": "/add",
+  "reason": "ytdl_options_overrides must be valid JSON",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "155",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 46,
+  "response_headers": {
+    "Content-Length": "46",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "db4317e3d0ce51b61cd566cfed556b4972f4e28c2fe135f00783cd1d1e190057",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.2.1 leniency 3: a string value is json.loads()ed first"
+}

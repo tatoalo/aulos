@@ -1,0 +1,16 @@
+{
+  "body": {
+    "ids": [
+      "https://example.com/definitely-not-queued"
+    ]
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "54",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/start",
+  "route": "POST start"
+}

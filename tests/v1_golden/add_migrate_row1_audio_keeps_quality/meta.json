@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_migrate_row1_audio_keeps_quality",
+  "path": "/add",
+  "reason": "quality must be one of ['128', '192', '320', 'best'] for format mp3",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "89",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 72,
+  "response_headers": {
+    "Content-Length": "72",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "845a3ee03117353ca6c688e9ff46c863b2eba891cd1230dc2d56cc08812e3380",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "migration row 1: legacy format=mp3 -> download_type=audio with the legacy quality passed through, proven by the mp3-specific quality reason string"
+}

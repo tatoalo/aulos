@@ -1,0 +1,28 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "start_missing_ids",
+  "path": "/start",
+  "reason": "Internal Server Error",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "2",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 55,
+  "response_headers": {
+    "Connection": "close",
+    "Content-Length": "55",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "7b7236933fa20a5ecab7cc0764a3378eb654733a5e8c1102b602544158cd2ece",
+  "route": "POST start",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 500,
+  "why": "an absent ids key takes the same TypeError path"
+}

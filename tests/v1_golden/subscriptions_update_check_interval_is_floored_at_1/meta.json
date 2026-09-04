@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_check_interval_is_floored_at_1",
+  "path": "/subscriptions/update",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "75",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 371,
+  "response_headers": {
+    "Content-Length": "371",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "05f3c374fa7c1395b6e989c82b6d34c248c5a96dd223dd242b467eabc48ed90c",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "max(1, int(...)) here, unlike /subscribe which 400s on the same input"
+}

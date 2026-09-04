@@ -1,0 +1,15 @@
+{
+  "body": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "name": "Renamed By The Capture"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "80",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/subscriptions/update",
+  "route": "POST subscriptions/update"
+}

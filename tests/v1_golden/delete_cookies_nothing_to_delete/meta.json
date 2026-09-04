@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "delete_cookies_nothing_to_delete",
+  "path": "/delete-cookies",
+  "reason": "Bad Request",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "2",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 59,
+  "response_headers": {
+    "Content-Length": "59",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "75af721debec7b9db228e61ae80d605ffb74c1b68b55451734332e6e89cb7790",
+  "route": "POST delete-cookies",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: `No uploaded cookies to delete`, as a 400 with a JSON body"
+}

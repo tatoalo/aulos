@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_subtitle_mode_unknown",
+  "path": "/add",
+  "reason": "subtitle_mode must be one of ['auto_only', 'manual_only', 'prefer_auto', 'prefer_manual']",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "143",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 94,
+  "response_headers": {
+    "Content-Length": "94",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "081c6c487e7455ba9d380ec53f1aef21840a16343551258dfb9ba6ce4da63116",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "the sorted() Python list repr is part of the string"
+}

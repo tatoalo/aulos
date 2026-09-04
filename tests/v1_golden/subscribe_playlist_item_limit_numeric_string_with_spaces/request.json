@@ -1,0 +1,19 @@
+{
+  "body": {
+    "check_interval_minutes": 0,
+    "download_type": "video",
+    "format": "any",
+    "playlist_item_limit": " 5 ",
+    "quality": "best",
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "175",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/subscribe",
+  "route": "POST subscribe"
+}

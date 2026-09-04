@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_video_quality_unknown",
+  "path": "/add",
+  "reason": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'worst'] for video",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "116",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 107,
+  "response_headers": {
+    "Content-Length": "107",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "58d3bfe4e4b25c95ea42895a53d1e814b59098bf407b980a6728088c4ccc3368",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "4320 is not in the legacy height list"
+}

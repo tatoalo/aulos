@@ -1,0 +1,16 @@
+{
+  "body": {
+    "ids": [
+      "no-such-subscription"
+    ]
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "33",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/subscriptions/check",
+  "route": "POST subscriptions/check"
+}

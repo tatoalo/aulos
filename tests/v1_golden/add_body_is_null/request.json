@@ -1,0 +1,14 @@
+{
+  "body": {
+    "__raw__": "null"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "4",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/add",
+  "route": "POST add"
+}

@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_blank_name_is_ignored",
+  "path": "/subscriptions/update",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "58",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 374,
+  "response_headers": {
+    "Content-Length": "374",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "a990a0df247d28b2bc4f2e29a1d826182926143c741257749563b61d0b5d5005",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "`if 'name' in changes and changes['name']` -- a blank name is silently skipped"
+}

@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "upload_cookies_at_the_cap",
+  "path": "/upload-cookies",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "1000154",
+    "Content-Type": "multipart/form-data; boundary=----aulosWP00Boundary",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 59,
+  "response_headers": {
+    "Content-Length": "59",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "63daac6c7ce9043bb3c46e3a3c2cdfa1d3165a0d4b33864584032f6418477aae",
+  "route": "POST upload-cookies",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the other side of the boundary: exactly 1 000 000 bytes is accepted"
+}

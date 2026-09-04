@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "delete_missing_where",
+  "path": "/delete",
+  "reason": "Bad Request",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "39",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 16,
+  "response_headers": {
+    "Content-Length": "16",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "1d3b6934c69fb0aa9f8fc7524c51649b906a91244d9f542b06042cc394569cfa",
+  "route": "POST delete",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "a reasonless 400 (HTTPBadRequest with no reason) -- legacy's bare `raise`"
+}

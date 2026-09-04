@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_subtitle_language_empty_string",
+  "path": "/add",
+  "reason": "subtitle_language must match pattern [A-Za-z0-9-] and be at most 35 characters",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "141",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 83,
+  "response_headers": {
+    "Content-Length": "83",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "88998cbd2ec52ee1c5a891cf0814e56a9cc7509b87aae02866e5c08c0a6f15e7",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "'' is not None, so it is not defaulted to 'en' -- it fails the regex"
+}

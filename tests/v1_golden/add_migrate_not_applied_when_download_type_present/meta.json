@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_migrate_not_applied_when_download_type_present",
+  "path": "/add",
+  "reason": "format must be one of ['any', 'ios', 'mp4'] for video",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "116",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 58,
+  "response_headers": {
+    "Content-Length": "58",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "3363cdb734bdb489f5e2e15e01f78d89de5881513db6356501cf14adc0337282",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "migration is skipped entirely when download_type is present, so a legacy audio `format` is judged against the video list"
+}

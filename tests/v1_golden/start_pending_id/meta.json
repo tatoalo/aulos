@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "start_pending_id",
+  "path": "/start",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "56",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 16,
+  "response_headers": {
+    "Content-Length": "16",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "08e2c358ce13cb67f94ebb35b0f67c8763190a857c0db68da6eb196dfe9da46a",
+  "route": "POST start",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the documented case: a pending URL moves to the queue. MAX_CONCURRENT_DOWNLOADS=0 means the started task blocks on the semaphore, so nothing reaches the network"
+}

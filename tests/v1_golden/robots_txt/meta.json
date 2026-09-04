@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "robots_txt",
+  "path": "/robots.txt",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 62,
+  "response_headers": {
+    "Content-Length": "62",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "018bb3dd330314cf62124ab46560dffeeb974ab5f0f7a50ade8c7b28cd858720",
+  "route": "GET robots.txt",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the three-line default body, text/plain (DESIGN §11.7)"
+}

@@ -1,0 +1,17 @@
+{
+  "body": {
+    "format": "mp4",
+    "playlist_item_limit": "nope",
+    "quality": "best_ios",
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "125",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/add",
+  "route": "POST add"
+}

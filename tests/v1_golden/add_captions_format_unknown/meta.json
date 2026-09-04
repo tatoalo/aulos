@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_captions_format_unknown",
+  "path": "/add",
+  "reason": "format must be one of ['dfxp', 'sbv', 'scc', 'srt', 'ttml', 'txt', 'vtt'] for captions",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "119",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 91,
+  "response_headers": {
+    "Content-Length": "91",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "102e812d854f9da86624f5e6ce9f78d4b4eca100d200b4c645bcc2ef2fb84dbd",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "the seven caption formats"
+}

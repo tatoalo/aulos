@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "history_after_mutations",
+  "path": "/history",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 476813,
+  "response_headers": {
+    "Content-Length": "476813",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "263745ef4e3bd15a2ed056ed31056cd5a7919f46bbef30c668b3f5b0a4456817",
+  "route": "GET history",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the deletes and the start have moved rows between the three arrays; this is the end-state a replay harness can assert against"
+}

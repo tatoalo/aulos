@@ -1,0 +1,17 @@
+{
+  "body": {
+    "download_type": "video",
+    "format": "any",
+    "quality": "best",
+    "url": ""
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "73",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/add",
+  "route": "POST add"
+}

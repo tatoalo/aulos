@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_audio_quality_320_on_m4a",
+  "path": "/add",
+  "reason": "quality must be one of ['128', '192', 'best'] for format m4a",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "115",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 65,
+  "response_headers": {
+    "Content-Length": "65",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "14446ed0d74a1ae45ce3969d68688b6679ca6d24eb1aa703b2151f774722bd45",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "320 is mp3-only; m4a stops at 192"
+}

@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "history_seeded",
+  "path": "/history",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 478325,
+  "response_headers": {
+    "Content-Length": "478325",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "9ba830140a079d3d3e17c2ac419925873ab55d8a1f9efef1b179e6028b388029",
+  "route": "GET history",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "one item per legacy status, a pre-download-problem pending row, and 607 done rows -- the whole-set-vs-window case of DESIGN §11.4"
+}

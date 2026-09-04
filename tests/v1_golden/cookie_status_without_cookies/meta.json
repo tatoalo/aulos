@@ -1,0 +1,25 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "GET",
+  "name": "cookie_status_without_cookies",
+  "path": "/cookie-status",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 38,
+  "response_headers": {
+    "Content-Length": "38",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "13b9c2c3e97d442f6b04d6a10dc4bdaf04b79d4363bb0bc97f10fe519516e93a",
+  "route": "GET cookie-status",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "has_cookies is false when neither an upload nor YTDL_OPTIONS.cookiefile exists"
+}

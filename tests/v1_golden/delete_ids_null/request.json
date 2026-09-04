@@ -1,0 +1,15 @@
+{
+  "body": {
+    "ids": null,
+    "where": "queue"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "31",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/delete",
+  "route": "POST delete"
+}

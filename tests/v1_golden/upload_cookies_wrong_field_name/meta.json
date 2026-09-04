@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "upload_cookies_wrong_field_name",
+  "path": "/upload-cookies",
+  "reason": "Bad Request",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "189",
+    "Content-Type": "multipart/form-data; boundary=----aulosWP00Boundary",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 54,
+  "response_headers": {
+    "Content-Length": "54",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "9a3e415e0063433c20f51fec1d092bbf2966eeabb099e9b66825b96616ca2b37",
+  "route": "POST upload-cookies",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "the field must be named exactly `cookies`; same reason string"
+}

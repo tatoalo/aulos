@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_delete_ids_not_a_list",
+  "path": "/subscriptions/delete",
+  "reason": "missing ids list",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "47",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 21,
+  "response_headers": {
+    "Content-Length": "21",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "3bb4b9ed6bf2149f4287c39b9d7dba9346ce31858e42c1d460d926726181a172",
+  "route": "POST subscriptions/delete",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "a string also fails the isinstance check, with the same reason"
+}

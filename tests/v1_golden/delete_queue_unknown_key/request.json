@@ -1,0 +1,17 @@
+{
+  "body": {
+    "ids": [
+      "https://example.com/definitely-not-queued"
+    ],
+    "where": "queue"
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "72",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/delete",
+  "route": "POST delete"
+}

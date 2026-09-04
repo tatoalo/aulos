@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_preset_unknown_name",
+  "path": "/add",
+  "reason": "ytdl_options_presets must only contain configured preset names",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "150",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 67,
+  "response_headers": {
+    "Content-Length": "67",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "21752755d1c44652159c3a281d8d719f57f7eb6231e641be79eb2edabcd66c04",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "preset names are checked against YTDL_OPTIONS_PRESETS"
+}

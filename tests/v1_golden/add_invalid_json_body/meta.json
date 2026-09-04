@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_invalid_json_body",
+  "path": "/add",
+  "reason": "Invalid JSON request body",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "9",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 30,
+  "response_headers": {
+    "Content-Length": "30",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "bd7cd490354f19d73ad5a28c1ee30facd61697013bd3908609c83956c5191ee3",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: `Invalid JSON request body`"
+}

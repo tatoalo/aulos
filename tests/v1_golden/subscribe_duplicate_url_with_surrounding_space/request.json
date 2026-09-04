@@ -1,0 +1,18 @@
+{
+  "body": {
+    "check_interval_minutes": 60,
+    "download_type": "video",
+    "format": "any",
+    "quality": "best",
+    "url": "  https://www.youtube.com/@BlenderOfficial/videos  "
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "154",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/subscribe",
+  "route": "POST subscribe"
+}

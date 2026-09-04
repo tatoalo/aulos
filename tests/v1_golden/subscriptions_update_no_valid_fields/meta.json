@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_no_valid_fields",
+  "path": "/subscriptions/update",
+  "reason": "no valid fields to update",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "96",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 30,
+  "response_headers": {
+    "Content-Length": "30",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "a2be450cc9262494de6631347173393cb3ff829b7a64e9b036bbc838e19e06b0",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: `no valid fields to update` -- only enabled / check_interval_minutes / name are updatable"
+}

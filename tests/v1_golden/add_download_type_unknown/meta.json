@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_download_type_unknown",
+  "path": "/add",
+  "reason": "download_type must be one of ['audio', 'captions', 'thumbnail', 'video']",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "118",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 77,
+  "response_headers": {
+    "Content-Length": "77",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "c6931f1bfcff174b308ec8a334570a836991f7ebc7e2881b5fcc209a3190cab2",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: the Python sorted-list repr is reproduced verbatim"
+}

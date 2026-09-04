@@ -1,0 +1,25 @@
+{
+  "content_type": "application/json; charset=utf-8",
+  "method": "GET",
+  "name": "presets",
+  "path": "/presets",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 32,
+  "response_headers": {
+    "Content-Length": "32",
+    "Content-Type": "application/json; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "c03361e725a826c9cc2ae2ae56e5b30de019026db699467446abc12c0a111c09",
+  "route": "GET presets",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "sorted preset names; explicitly application/json"
+}

@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_thumbnail_format_unknown",
+  "path": "/add",
+  "reason": "format must be one of ['jpg'] for thumbnail",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "120",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 48,
+  "response_headers": {
+    "Content-Length": "48",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "c098e9999d5791c514b073c1874bf525ad0be17dfb18433a14235091fe6a54d5",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "thumbnail admits only jpg"
+}

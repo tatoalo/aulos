@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_check_ids_not_a_list",
+  "path": "/subscriptions/check",
+  "reason": "ids must be a list",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "15",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 23,
+  "response_headers": {
+    "Content-Length": "23",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "ed2ff0bf837b0452e55e3e999b183846edade455021499b1be1d00cd0cf4b1e7",
+  "route": "POST subscriptions/check",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: `ids must be a list`"
+}

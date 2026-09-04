@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscribe_missing_url",
+  "path": "/subscribe",
+  "reason": "missing 'url', 'download_type', or 'quality'",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "62",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 49,
+  "response_headers": {
+    "Content-Length": "49",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "7b7e2bb8a49d3fdf84757e286a8bc8731d2a61dc182a991e3c5777fe89f5f1da",
+  "route": "POST subscribe",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "subscribe reuses parse_download_options wholesale"
+}

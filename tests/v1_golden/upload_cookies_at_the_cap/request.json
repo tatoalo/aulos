@@ -1,0 +1,21 @@
+{
+  "body": {
+    "__multipart__": {
+      "boundary": "----aulosWP00Boundary",
+      "content_bytes": 1000000,
+      "content_synthesised_as": "b'a' * 1000000",
+      "field_name": "cookies",
+      "filename": "cookies.txt",
+      "has_parts": true
+    }
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "1000154",
+    "Content-Type": "multipart/form-data; boundary=----aulosWP00Boundary",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/upload-cookies",
+  "route": "POST upload-cookies"
+}

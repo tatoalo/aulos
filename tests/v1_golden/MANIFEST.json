@@ -1,0 +1,1147 @@
+{
+  "base_url": "http://127.0.0.1:18081",
+  "case_count": 131,
+  "cases": {
+    "add_audio_format_unknown": {
+      "method": "POST",
+      "name": "add_audio_format_unknown",
+      "path": "/add",
+      "reason": "format must be one of ['flac', 'm4a', 'mp3', 'opus', 'wav'] for audio",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_audio_quality_320_on_m4a": {
+      "method": "POST",
+      "name": "add_audio_quality_320_on_m4a",
+      "path": "/add",
+      "reason": "quality must be one of ['128', '192', 'best'] for format m4a",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_audio_quality_on_wav": {
+      "method": "POST",
+      "name": "add_audio_quality_on_wav",
+      "path": "/add",
+      "reason": "quality must be one of ['best'] for format wav",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_auto_start_bool_true": {
+      "method": "POST",
+      "name": "add_auto_start_bool_true",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_auto_start_string_false": {
+      "method": "POST",
+      "name": "add_auto_start_string_false",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_auto_start_string_true": {
+      "method": "POST",
+      "name": "add_auto_start_string_true",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_body_is_a_string": {
+      "method": "POST",
+      "name": "add_body_is_a_string",
+      "path": "/add",
+      "reason": "JSON request body must be an object",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_body_is_an_array": {
+      "method": "POST",
+      "name": "add_body_is_an_array",
+      "path": "/add",
+      "reason": "JSON request body must be an object",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_body_is_empty": {
+      "method": "POST",
+      "name": "add_body_is_empty",
+      "path": "/add",
+      "reason": "Invalid JSON request body",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_body_is_null": {
+      "method": "POST",
+      "name": "add_body_is_null",
+      "path": "/add",
+      "reason": "JSON request body must be an object",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_captions_format_unknown": {
+      "method": "POST",
+      "name": "add_captions_format_unknown",
+      "path": "/add",
+      "reason": "format must be one of ['dfxp', 'sbv', 'scc', 'srt', 'ttml', 'txt', 'vtt'] for captions",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_chapter_template_absolute": {
+      "method": "POST",
+      "name": "add_chapter_template_absolute",
+      "path": "/add",
+      "reason": "chapter_template must not contain \"..\" or start with a path separator",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_chapter_template_traversal": {
+      "method": "POST",
+      "name": "add_chapter_template_traversal",
+      "path": "/add",
+      "reason": "chapter_template must not contain \"..\" or start with a path separator",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_codec_unknown": {
+      "method": "POST",
+      "name": "add_codec_unknown",
+      "path": "/add",
+      "reason": "codec must be one of ['auto', 'av1', 'h264', 'h265', 'vp9']",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_custom_name_prefix_absolute": {
+      "method": "POST",
+      "name": "add_custom_name_prefix_absolute",
+      "path": "/add",
+      "reason": "custom_name_prefix must not contain \"..\" or start with a path separator",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_custom_name_prefix_backslash": {
+      "method": "POST",
+      "name": "add_custom_name_prefix_backslash",
+      "path": "/add",
+      "reason": "custom_name_prefix must not contain \"..\" or start with a path separator",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_custom_name_prefix_traversal": {
+      "method": "POST",
+      "name": "add_custom_name_prefix_traversal",
+      "path": "/add",
+      "reason": "custom_name_prefix must not contain \"..\" or start with a path separator",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_download_type_unknown": {
+      "method": "POST",
+      "name": "add_download_type_unknown",
+      "path": "/add",
+      "reason": "download_type must be one of ['audio', 'captions', 'thumbnail', 'video']",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_empty_object": {
+      "method": "POST",
+      "name": "add_empty_object",
+      "path": "/add",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_empty_url": {
+      "method": "POST",
+      "name": "add_empty_url",
+      "path": "/add",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_invalid_json_body": {
+      "method": "POST",
+      "name": "add_invalid_json_body",
+      "path": "/add",
+      "reason": "Invalid JSON request body",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_not_applied_when_download_type_present": {
+      "method": "POST",
+      "name": "add_migrate_not_applied_when_download_type_present",
+      "path": "/add",
+      "reason": "format must be one of ['any', 'ios', 'mp4'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row1_audio_keeps_quality": {
+      "method": "POST",
+      "name": "add_migrate_row1_audio_keeps_quality",
+      "path": "/add",
+      "reason": "quality must be one of ['128', '192', '320', 'best'] for format mp3",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row1_audio_wav_keeps_quality": {
+      "method": "POST",
+      "name": "add_migrate_row1_audio_wav_keeps_quality",
+      "path": "/add",
+      "reason": "quality must be one of ['best'] for format wav",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row2_thumbnail": {
+      "method": "POST",
+      "name": "add_migrate_row2_thumbnail",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row3_captions_defaults_to_srt": {
+      "method": "POST",
+      "name": "add_migrate_row3_captions_defaults_to_srt",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row3_captions_uses_subtitle_format": {
+      "method": "POST",
+      "name": "add_migrate_row3_captions_uses_subtitle_format",
+      "path": "/add",
+      "reason": "format must be one of ['dfxp', 'sbv', 'scc', 'srt', 'ttml', 'txt', 'vtt'] for captions",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row4_best_ios": {
+      "method": "POST",
+      "name": "add_migrate_row4_best_ios",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row5_quality_audio": {
+      "method": "POST",
+      "name": "add_migrate_row5_quality_audio",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row6_passes_format_through": {
+      "method": "POST",
+      "name": "add_migrate_row6_passes_format_through",
+      "path": "/add",
+      "reason": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'worst'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_migrate_row6_uses_video_codec": {
+      "method": "POST",
+      "name": "add_migrate_row6_uses_video_codec",
+      "path": "/add",
+      "reason": "codec must be one of ['auto', 'av1', 'h264', 'h265', 'vp9']",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_missing_quality": {
+      "method": "POST",
+      "name": "add_missing_quality",
+      "path": "/add",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_missing_url": {
+      "method": "POST",
+      "name": "add_missing_url",
+      "path": "/add",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_null_quality": {
+      "method": "POST",
+      "name": "add_null_quality",
+      "path": "/add",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_overrides_disabled": {
+      "method": "POST",
+      "name": "add_overrides_disabled",
+      "path": "/add",
+      "reason": "ytdl_options_overrides are disabled",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_overrides_invalid_json_string": {
+      "method": "POST",
+      "name": "add_overrides_invalid_json_string",
+      "path": "/add",
+      "reason": "ytdl_options_overrides must be valid JSON",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_overrides_json_string_not_an_object": {
+      "method": "POST",
+      "name": "add_overrides_json_string_not_an_object",
+      "path": "/add",
+      "reason": "ytdl_options_overrides must be a JSON object",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_overrides_json_string_object_is_disabled_too": {
+      "method": "POST",
+      "name": "add_overrides_json_string_object_is_disabled_too",
+      "path": "/add",
+      "reason": "ytdl_options_overrides are disabled",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_overrides_not_an_object": {
+      "method": "POST",
+      "name": "add_overrides_not_an_object",
+      "path": "/add",
+      "reason": "ytdl_options_overrides must be a JSON object",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_playlist_item_limit_float_string": {
+      "method": "POST",
+      "name": "add_playlist_item_limit_float_string",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_playlist_item_limit_list": {
+      "method": "POST",
+      "name": "add_playlist_item_limit_list",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_playlist_item_limit_not_an_integer": {
+      "method": "POST",
+      "name": "add_playlist_item_limit_not_an_integer",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_playlist_item_limit_object": {
+      "method": "POST",
+      "name": "add_playlist_item_limit_object",
+      "path": "/add",
+      "reason": "playlist_item_limit must be an integer",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_preset_unknown_name": {
+      "method": "POST",
+      "name": "add_preset_unknown_name",
+      "path": "/add",
+      "reason": "ytdl_options_presets must only contain configured preset names",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_presets_bare_string": {
+      "method": "POST",
+      "name": "add_presets_bare_string",
+      "path": "/add",
+      "reason": "ytdl_options_presets must only contain configured preset names",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_presets_list_with_blanks_is_lenient": {
+      "method": "POST",
+      "name": "add_presets_list_with_blanks_is_lenient",
+      "path": "/add",
+      "reason": "ytdl_options_presets must only contain configured preset names",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_presets_singular_alias": {
+      "method": "POST",
+      "name": "add_presets_singular_alias",
+      "path": "/add",
+      "reason": "ytdl_options_presets must only contain configured preset names",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_presets_wrong_type": {
+      "method": "POST",
+      "name": "add_presets_wrong_type",
+      "path": "/add",
+      "reason": "ytdl_options_presets must be a JSON array of strings (or legacy ytdl_options_preset string)",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_subtitle_language_empty_string": {
+      "method": "POST",
+      "name": "add_subtitle_language_empty_string",
+      "path": "/add",
+      "reason": "subtitle_language must match pattern [A-Za-z0-9-] and be at most 35 characters",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_subtitle_language_leading_dash": {
+      "method": "POST",
+      "name": "add_subtitle_language_leading_dash",
+      "path": "/add",
+      "reason": "subtitle_language must match pattern [A-Za-z0-9-] and be at most 35 characters",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_subtitle_language_too_long": {
+      "method": "POST",
+      "name": "add_subtitle_language_too_long",
+      "path": "/add",
+      "reason": "subtitle_language must match pattern [A-Za-z0-9-] and be at most 35 characters",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_subtitle_language_underscore": {
+      "method": "POST",
+      "name": "add_subtitle_language_underscore",
+      "path": "/add",
+      "reason": "subtitle_language must match pattern [A-Za-z0-9-] and be at most 35 characters",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_subtitle_mode_unknown": {
+      "method": "POST",
+      "name": "add_subtitle_mode_unknown",
+      "path": "/add",
+      "reason": "subtitle_mode must be one of ['auto_only', 'manual_only', 'prefer_auto', 'prefer_manual']",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_thumbnail_format_unknown": {
+      "method": "POST",
+      "name": "add_thumbnail_format_unknown",
+      "path": "/add",
+      "reason": "format must be one of ['jpg'] for thumbnail",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_video_best_remux_on_any": {
+      "method": "POST",
+      "name": "add_video_best_remux_on_any",
+      "path": "/add",
+      "reason": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'worst'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_video_best_remux_on_ios": {
+      "method": "POST",
+      "name": "add_video_best_remux_on_ios",
+      "path": "/add",
+      "reason": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'worst'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_video_format_unknown": {
+      "method": "POST",
+      "name": "add_video_format_unknown",
+      "path": "/add",
+      "reason": "format must be one of ['any', 'ios', 'mp4'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "add_video_quality_unknown": {
+      "method": "POST",
+      "name": "add_video_quality_unknown",
+      "path": "/add",
+      "reason": "quality must be one of ['1080', '1440', '2160', '240', '360', '480', '720', 'best', 'worst'] for video",
+      "route": "POST add",
+      "status": 400
+    },
+    "cancel_add": {
+      "method": "POST",
+      "name": "cancel_add",
+      "path": "/cancel-add",
+      "reason": "OK",
+      "route": "POST cancel-add",
+      "status": 200
+    },
+    "cookie_status_after_delete": {
+      "method": "GET",
+      "name": "cookie_status_after_delete",
+      "path": "/cookie-status",
+      "reason": "OK",
+      "route": "GET cookie-status",
+      "status": 200
+    },
+    "cookie_status_with_cookies": {
+      "method": "GET",
+      "name": "cookie_status_with_cookies",
+      "path": "/cookie-status",
+      "reason": "OK",
+      "route": "GET cookie-status",
+      "status": 200
+    },
+    "cookie_status_without_cookies": {
+      "method": "GET",
+      "name": "cookie_status_without_cookies",
+      "path": "/cookie-status",
+      "reason": "OK",
+      "route": "GET cookie-status",
+      "status": 200
+    },
+    "delete_bad_where": {
+      "method": "POST",
+      "name": "delete_bad_where",
+      "path": "/delete",
+      "reason": "Bad Request",
+      "route": "POST delete",
+      "status": 400
+    },
+    "delete_cookies_nothing_to_delete": {
+      "method": "POST",
+      "name": "delete_cookies_nothing_to_delete",
+      "path": "/delete-cookies",
+      "reason": "Bad Request",
+      "route": "POST delete-cookies",
+      "status": 400
+    },
+    "delete_cookies_ok": {
+      "method": "POST",
+      "name": "delete_cookies_ok",
+      "path": "/delete-cookies",
+      "reason": "OK",
+      "route": "POST delete-cookies",
+      "status": 200
+    },
+    "delete_done_by_media_id_is_a_no_op": {
+      "method": "POST",
+      "name": "delete_done_by_media_id_is_a_no_op",
+      "path": "/delete",
+      "reason": "OK",
+      "route": "POST delete",
+      "status": 200
+    },
+    "delete_done_by_url": {
+      "method": "POST",
+      "name": "delete_done_by_url",
+      "path": "/delete",
+      "reason": "OK",
+      "route": "POST delete",
+      "status": 200
+    },
+    "delete_done_unknown_key": {
+      "method": "POST",
+      "name": "delete_done_unknown_key",
+      "path": "/delete",
+      "reason": "OK",
+      "route": "POST delete",
+      "status": 200
+    },
+    "delete_empty_ids": {
+      "method": "POST",
+      "name": "delete_empty_ids",
+      "path": "/delete",
+      "reason": "Bad Request",
+      "route": "POST delete",
+      "status": 400
+    },
+    "delete_ids_null": {
+      "method": "POST",
+      "name": "delete_ids_null",
+      "path": "/delete",
+      "reason": "Bad Request",
+      "route": "POST delete",
+      "status": 400
+    },
+    "delete_missing_ids": {
+      "method": "POST",
+      "name": "delete_missing_ids",
+      "path": "/delete",
+      "reason": "Bad Request",
+      "route": "POST delete",
+      "status": 400
+    },
+    "delete_missing_where": {
+      "method": "POST",
+      "name": "delete_missing_where",
+      "path": "/delete",
+      "reason": "Bad Request",
+      "route": "POST delete",
+      "status": 400
+    },
+    "delete_queue_by_url": {
+      "method": "POST",
+      "name": "delete_queue_by_url",
+      "path": "/delete",
+      "reason": "OK",
+      "route": "POST delete",
+      "status": 200
+    },
+    "delete_queue_unknown_key": {
+      "method": "POST",
+      "name": "delete_queue_unknown_key",
+      "path": "/delete",
+      "reason": "OK",
+      "route": "POST delete",
+      "status": 200
+    },
+    "history_after_mutations": {
+      "method": "GET",
+      "name": "history_after_mutations",
+      "path": "/history",
+      "reason": "OK",
+      "route": "GET history",
+      "status": 200
+    },
+    "history_empty": {
+      "method": "GET",
+      "name": "history_empty",
+      "path": "/history",
+      "reason": "OK",
+      "route": "GET history",
+      "status": 200
+    },
+    "history_seeded": {
+      "method": "GET",
+      "name": "history_seeded",
+      "path": "/history",
+      "reason": "OK",
+      "route": "GET history",
+      "status": 200
+    },
+    "options_add": {
+      "method": "OPTIONS",
+      "name": "options_add",
+      "path": "/add",
+      "reason": "OK",
+      "route": "OPTIONS add",
+      "status": 200
+    },
+    "options_add_with_allowed_origin": {
+      "method": "OPTIONS",
+      "name": "options_add_with_allowed_origin",
+      "path": "/add",
+      "reason": "OK",
+      "route": "OPTIONS add",
+      "status": 200
+    },
+    "options_cancel_add": {
+      "method": "OPTIONS",
+      "name": "options_cancel_add",
+      "path": "/cancel-add",
+      "reason": "OK",
+      "route": "OPTIONS cancel-add",
+      "status": 200
+    },
+    "options_delete_cookies": {
+      "method": "OPTIONS",
+      "name": "options_delete_cookies",
+      "path": "/delete-cookies",
+      "reason": "OK",
+      "route": "OPTIONS delete-cookies",
+      "status": 200
+    },
+    "options_subscribe": {
+      "method": "OPTIONS",
+      "name": "options_subscribe",
+      "path": "/subscribe",
+      "reason": "OK",
+      "route": "OPTIONS subscribe",
+      "status": 200
+    },
+    "options_subscriptions": {
+      "method": "OPTIONS",
+      "name": "options_subscriptions",
+      "path": "/subscriptions",
+      "reason": "OK",
+      "route": "OPTIONS subscriptions",
+      "status": 200
+    },
+    "options_subscriptions_check": {
+      "method": "OPTIONS",
+      "name": "options_subscriptions_check",
+      "path": "/subscriptions/check",
+      "reason": "OK",
+      "route": "OPTIONS subscriptions/check",
+      "status": 200
+    },
+    "options_subscriptions_delete": {
+      "method": "OPTIONS",
+      "name": "options_subscriptions_delete",
+      "path": "/subscriptions/delete",
+      "reason": "OK",
+      "route": "OPTIONS subscriptions/delete",
+      "status": 200
+    },
+    "options_subscriptions_update": {
+      "method": "OPTIONS",
+      "name": "options_subscriptions_update",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "OPTIONS subscriptions/update",
+      "status": 200
+    },
+    "options_upload_cookies": {
+      "method": "OPTIONS",
+      "name": "options_upload_cookies",
+      "path": "/upload-cookies",
+      "reason": "OK",
+      "route": "OPTIONS upload-cookies",
+      "status": 200
+    },
+    "presets": {
+      "method": "GET",
+      "name": "presets",
+      "path": "/presets",
+      "reason": "OK",
+      "route": "GET presets",
+      "status": 200
+    },
+    "robots_txt": {
+      "method": "GET",
+      "name": "robots_txt",
+      "path": "/robots.txt",
+      "reason": "OK",
+      "route": "GET robots.txt",
+      "status": 200
+    },
+    "start_ids_is_a_string": {
+      "method": "POST",
+      "name": "start_ids_is_a_string",
+      "path": "/start",
+      "reason": "OK",
+      "route": "POST start",
+      "status": 200
+    },
+    "start_ids_null": {
+      "method": "POST",
+      "name": "start_ids_null",
+      "path": "/start",
+      "reason": "Internal Server Error",
+      "route": "POST start",
+      "status": 500
+    },
+    "start_missing_ids": {
+      "method": "POST",
+      "name": "start_missing_ids",
+      "path": "/start",
+      "reason": "Internal Server Error",
+      "route": "POST start",
+      "status": 500
+    },
+    "start_pending_id": {
+      "method": "POST",
+      "name": "start_pending_id",
+      "path": "/start",
+      "reason": "OK",
+      "route": "POST start",
+      "status": 200
+    },
+    "start_unknown_id": {
+      "method": "POST",
+      "name": "start_unknown_id",
+      "path": "/start",
+      "reason": "OK",
+      "route": "POST start",
+      "status": 200
+    },
+    "subscribe_check_interval_negative": {
+      "method": "POST",
+      "name": "subscribe_check_interval_negative",
+      "path": "/subscribe",
+      "reason": "check_interval_minutes must be at least 1",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_check_interval_not_an_integer": {
+      "method": "POST",
+      "name": "subscribe_check_interval_not_an_integer",
+      "path": "/subscribe",
+      "reason": "check_interval_minutes must be an integer",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_check_interval_null_uses_default": {
+      "method": "POST",
+      "name": "subscribe_check_interval_null_uses_default",
+      "path": "/subscribe",
+      "reason": "OK",
+      "route": "POST subscribe",
+      "status": 200
+    },
+    "subscribe_check_interval_numeric_string_zero": {
+      "method": "POST",
+      "name": "subscribe_check_interval_numeric_string_zero",
+      "path": "/subscribe",
+      "reason": "check_interval_minutes must be at least 1",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_check_interval_zero": {
+      "method": "POST",
+      "name": "subscribe_check_interval_zero",
+      "path": "/subscribe",
+      "reason": "check_interval_minutes must be at least 1",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_download_type_unknown": {
+      "method": "POST",
+      "name": "subscribe_download_type_unknown",
+      "path": "/subscribe",
+      "reason": "download_type must be one of ['audio', 'captions', 'thumbnail', 'video']",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_duplicate_url": {
+      "method": "POST",
+      "name": "subscribe_duplicate_url",
+      "path": "/subscribe",
+      "reason": "OK",
+      "route": "POST subscribe",
+      "status": 200
+    },
+    "subscribe_duplicate_url_with_surrounding_space": {
+      "method": "POST",
+      "name": "subscribe_duplicate_url_with_surrounding_space",
+      "path": "/subscribe",
+      "reason": "OK",
+      "route": "POST subscribe",
+      "status": 200
+    },
+    "subscribe_invalid_json_body": {
+      "method": "POST",
+      "name": "subscribe_invalid_json_body",
+      "path": "/subscribe",
+      "reason": "Invalid JSON request body",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_missing_url": {
+      "method": "POST",
+      "name": "subscribe_missing_url",
+      "path": "/subscribe",
+      "reason": "missing 'url', 'download_type', or 'quality'",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscribe_playlist_item_limit_numeric_string_with_spaces": {
+      "method": "POST",
+      "name": "subscribe_playlist_item_limit_numeric_string_with_spaces",
+      "path": "/subscribe",
+      "reason": "check_interval_minutes must be at least 1",
+      "route": "POST subscribe",
+      "status": 400
+    },
+    "subscriptions_check_ids_not_a_list": {
+      "method": "POST",
+      "name": "subscriptions_check_ids_not_a_list",
+      "path": "/subscriptions/check",
+      "reason": "ids must be a list",
+      "route": "POST subscriptions/check",
+      "status": 400
+    },
+    "subscriptions_check_unknown_ids": {
+      "method": "POST",
+      "name": "subscriptions_check_unknown_ids",
+      "path": "/subscriptions/check",
+      "reason": "OK",
+      "route": "POST subscriptions/check",
+      "status": 200
+    },
+    "subscriptions_delete_empty_ids": {
+      "method": "POST",
+      "name": "subscriptions_delete_empty_ids",
+      "path": "/subscriptions/delete",
+      "reason": "missing ids list",
+      "route": "POST subscriptions/delete",
+      "status": 400
+    },
+    "subscriptions_delete_ids_not_a_list": {
+      "method": "POST",
+      "name": "subscriptions_delete_ids_not_a_list",
+      "path": "/subscriptions/delete",
+      "reason": "missing ids list",
+      "route": "POST subscriptions/delete",
+      "status": 400
+    },
+    "subscriptions_delete_missing_ids": {
+      "method": "POST",
+      "name": "subscriptions_delete_missing_ids",
+      "path": "/subscriptions/delete",
+      "reason": "missing ids list",
+      "route": "POST subscriptions/delete",
+      "status": 400
+    },
+    "subscriptions_delete_real_id": {
+      "method": "POST",
+      "name": "subscriptions_delete_real_id",
+      "path": "/subscriptions/delete",
+      "reason": "OK",
+      "route": "POST subscriptions/delete",
+      "status": 200
+    },
+    "subscriptions_delete_unknown_id": {
+      "method": "POST",
+      "name": "subscriptions_delete_unknown_id",
+      "path": "/subscriptions/delete",
+      "reason": "OK",
+      "route": "POST subscriptions/delete",
+      "status": 200
+    },
+    "subscriptions_list": {
+      "method": "GET",
+      "name": "subscriptions_list",
+      "path": "/subscriptions",
+      "reason": "OK",
+      "route": "GET subscriptions",
+      "status": 200
+    },
+    "subscriptions_list_after_mutations": {
+      "method": "GET",
+      "name": "subscriptions_list_after_mutations",
+      "path": "/subscriptions",
+      "reason": "OK",
+      "route": "GET subscriptions",
+      "status": 200
+    },
+    "subscriptions_update_blank_name_is_ignored": {
+      "method": "POST",
+      "name": "subscriptions_update_blank_name_is_ignored",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "POST subscriptions/update",
+      "status": 200
+    },
+    "subscriptions_update_check_interval_is_floored_at_1": {
+      "method": "POST",
+      "name": "subscriptions_update_check_interval_is_floored_at_1",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "POST subscriptions/update",
+      "status": 200
+    },
+    "subscriptions_update_empty_id": {
+      "method": "POST",
+      "name": "subscriptions_update_empty_id",
+      "path": "/subscriptions/update",
+      "reason": "missing subscription id",
+      "route": "POST subscriptions/update",
+      "status": 400
+    },
+    "subscriptions_update_enabled_not_a_boolean": {
+      "method": "POST",
+      "name": "subscriptions_update_enabled_not_a_boolean",
+      "path": "/subscriptions/update",
+      "reason": "Internal Server Error",
+      "route": "POST subscriptions/update",
+      "status": 500
+    },
+    "subscriptions_update_enabled_string_is_accepted": {
+      "method": "POST",
+      "name": "subscriptions_update_enabled_string_is_accepted",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "POST subscriptions/update",
+      "status": 200
+    },
+    "subscriptions_update_missing_id": {
+      "method": "POST",
+      "name": "subscriptions_update_missing_id",
+      "path": "/subscriptions/update",
+      "reason": "missing subscription id",
+      "route": "POST subscriptions/update",
+      "status": 400
+    },
+    "subscriptions_update_no_valid_fields": {
+      "method": "POST",
+      "name": "subscriptions_update_no_valid_fields",
+      "path": "/subscriptions/update",
+      "reason": "no valid fields to update",
+      "route": "POST subscriptions/update",
+      "status": 400
+    },
+    "subscriptions_update_rename": {
+      "method": "POST",
+      "name": "subscriptions_update_rename",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "POST subscriptions/update",
+      "status": 200
+    },
+    "subscriptions_update_unknown_id": {
+      "method": "POST",
+      "name": "subscriptions_update_unknown_id",
+      "path": "/subscriptions/update",
+      "reason": "OK",
+      "route": "POST subscriptions/update",
+      "status": 200
+    },
+    "upload_cookies_at_the_cap": {
+      "method": "POST",
+      "name": "upload_cookies_at_the_cap",
+      "path": "/upload-cookies",
+      "reason": "OK",
+      "route": "POST upload-cookies",
+      "status": 200
+    },
+    "upload_cookies_no_parts": {
+      "method": "POST",
+      "name": "upload_cookies_no_parts",
+      "path": "/upload-cookies",
+      "reason": "Bad Request",
+      "route": "POST upload-cookies",
+      "status": 400
+    },
+    "upload_cookies_ok": {
+      "method": "POST",
+      "name": "upload_cookies_ok",
+      "path": "/upload-cookies",
+      "reason": "OK",
+      "route": "POST upload-cookies",
+      "status": 200
+    },
+    "upload_cookies_over_the_cap": {
+      "method": "POST",
+      "name": "upload_cookies_over_the_cap",
+      "path": "/upload-cookies",
+      "reason": "Bad Request",
+      "route": "POST upload-cookies",
+      "status": 400
+    },
+    "upload_cookies_wrong_field_name": {
+      "method": "POST",
+      "name": "upload_cookies_wrong_field_name",
+      "path": "/upload-cookies",
+      "reason": "Bad Request",
+      "route": "POST upload-cookies",
+      "status": 400
+    },
+    "version": {
+      "method": "GET",
+      "name": "version",
+      "path": "/version",
+      "reason": "OK",
+      "route": "GET version",
+      "status": 200
+    },
+    "version_with_allowed_origin": {
+      "method": "GET",
+      "name": "version_with_allowed_origin",
+      "path": "/version",
+      "reason": "OK",
+      "route": "GET version",
+      "status": 200
+    },
+    "version_with_disallowed_origin": {
+      "method": "GET",
+      "name": "version_with_disallowed_origin",
+      "path": "/version",
+      "reason": "OK",
+      "route": "GET version",
+      "status": 200
+    }
+  },
+  "corpus": "v1_golden",
+  "legacy_commit": "fd35a66c562db7ab4f1656f65a8c28c98c5e6a84",
+  "legacy_image_digest": "not used -- BRIEF's WP-00 scope trim captures against a local `python app/main.py` run, so no image was built",
+  "legacy_repo": "/Users/apogliaghi/Development/metube_pot",
+  "meta_fields": "meta.json records method, path, status, the aiohttp reason phrase (where every legacy validation string actually lives), Content-Type, and the full scrubbed request and response header sets.",
+  "phases": {
+    "empty": {
+      "captured_at": "2026-09-04T11:19:19+00:00",
+      "case_count": 1,
+      "state_dir_fixture": "<scratch>/empty/.metube"
+    },
+    "seeded": {
+      "captured_at": "2026-09-04T11:19:20+00:00",
+      "case_count": 130,
+      "state_dir_fixture": "<scratch>/seeded/.metube"
+    }
+  },
+  "purpose": "Byte-level record of the legacy MeTube-POT v1 HTTP surface, captured before cutover. WP-15 replays it against the Rust v1 shim (DESIGN §11).",
+  "python_version": "3.13.13",
+  "scope": "Network-free routes only, per BRIEF's WP-00 scope trim: history, delete, start, version, presets, robots.txt, cancel-add, cookie-status, cookie upload/delete, subscriptions/* validation errors, and every POST add validation 400 (bodies that fail parse_download_options before yt-dlp runs).",
+  "secret_hygiene": "No request sends Cookie/Authorization. Both request and response headers are scrubbed on write (Cookie, Set-Cookie, Authorization, Proxy-Authorization -> '<scrubbed>'); Date -> '<volatile>' so a re-capture diffs cleanly. Every seeded URL is public.",
+  "server_env": {
+    "ALLOW_YTDL_OPTIONS_OVERRIDES": "false",
+    "AUDIO_DOWNLOAD_DIR": "<scratch>/seeded/downloads",
+    "CORS_ALLOWED_ORIGINS": "https://ui.example.com",
+    "CREATE_CUSTOM_DIRS": "true",
+    "CUSTOM_DIRS": "true",
+    "DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT": "0",
+    "DELETE_FILE_ON_TRASHCAN": "false",
+    "DOWNLOAD_DIR": "<scratch>/seeded/downloads",
+    "HOST": "127.0.0.1",
+    "JELLYFIN_SYNC_ENABLED": "false",
+    "LOGLEVEL": "INFO",
+    "MAX_CONCURRENT_DOWNLOADS": "0",
+    "METUBE_VERSION": "wp00-capture",
+    "PORT": "18081",
+    "STATE_DIR": "<scratch>/seeded/.metube",
+    "SUBSCRIPTION_DEFAULT_CHECK_INTERVAL": "60",
+    "TELEGRAM_BOT_ENABLED": "false",
+    "TEMP_DIR": "<scratch>/seeded/tmp",
+    "URL_PREFIX": "",
+    "YTDL_OPTIONS_PRESETS": "{\"archive\": {\"writesubtitles\": true}, \"fast\": {\"concurrent_fragment_downloads\": 4}}"
+  },
+  "skipped": [
+    {
+      "case": "ok (video), ok (playlist), duplicate, unsupported URL, geo-blocked URL, `Invalid/empty data was given.`, `Unsupported resource \"<etype>\"`, upcoming-livestream",
+      "reason": "all require yt-dlp to reach the network (BRIEF WP-00 scope trim)",
+      "route": "POST add"
+    },
+    {
+      "case": "auto_start true vs \"true\" vs \"false\" routing to queue vs pending",
+      "reason": "the `auto_start is True` divergence happens in __add_download, after a successful network resolve. Parse-time acceptance of all three forms IS captured (add_auto_start_*)",
+      "route": "POST add"
+    },
+    {
+      "case": "ok, single-video URL (`This URL points to a single video…`), `Could not resolve URL`",
+      "reason": "all three need extract_flat_playlist to hit the network",
+      "route": "POST subscribe"
+    },
+    {
+      "case": "`Missing URL`",
+      "reason": "unreachable over HTTP: parse_download_options rejects a falsy url with `missing 'url', 'download_type', or 'quality'` first, so add_subscription's own empty-url branch is dead behind the REST route",
+      "route": "POST subscribe"
+    },
+    {
+      "case": "ok with real targets",
+      "reason": "checking an existing enabled subscription performs a network extraction",
+      "route": "POST subscriptions/check"
+    },
+    {
+      "case": "the manual-cookiefile 400 and the reload-failure 500",
+      "reason": "both need a YTDL_OPTIONS.cookiefile pointing elsewhere; a second server configuration for two strings was judged not worth the corpus complexity. Both strings are quoted in DESIGN §11.7 / legacy spec §2.1",
+      "route": "POST delete-cookies"
+    },
+    {
+      "case": "the Angular index and the metube_theme cookie",
+      "reason": "DESIGN §11.1 deliberately does not provide it (a JSON identity document replaces it), so there is no contract to pin",
+      "route": "GET <p>"
+    },
+    {
+      "case": "the handshake",
+      "reason": "DESIGN §11.1 answers 501 socketio_removed by design; nothing to match",
+      "route": "GET <p>socket.io/*"
+    },
+    {
+      "case": "static file serving",
+      "reason": "aiohttp static handler behaviour, not a v1 shim contract",
+      "route": "GET <p>download/*, <p>audio_download/*"
+    }
+  ],
+  "state_dir_fixture": "Seeded by tools/capture/seed_state.py: queue.json with one downloading, one preparing and one pending item; pending.json with a pending item and an upcoming-livestream row (status pending + a populated error); completed.json with 607 rows (a finished row with filename/size, an error row, a custom_name_prefix row, a chaptered row, a captions row, a thumbnail row, a presets/folder row, and 600 filler finished rows); subscriptions.json with one enabled and one disabled subscription. The server runs with MAX_CONCURRENT_DOWNLOADS=0 so the queue auto-restart blocks on the semaphore and the seeded statuses survive verbatim.",
+  "url_prefix": "/",
+  "yt_dlp_version": "2026.03.17"
+}

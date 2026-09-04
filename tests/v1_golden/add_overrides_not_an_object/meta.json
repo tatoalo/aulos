@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_overrides_not_an_object",
+  "path": "/add",
+  "reason": "ytdl_options_overrides must be a JSON object",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "146",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 49,
+  "response_headers": {
+    "Content-Length": "49",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "253e01e82477523d43678126fd7532fb4babb18b731b3f776cf9ee84c8dbf1bb",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "a bare number is rejected without any parse attempt"
+}

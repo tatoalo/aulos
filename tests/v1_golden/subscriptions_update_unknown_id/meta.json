@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_unknown_id",
+  "path": "/subscriptions/update",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "48",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 52,
+  "response_headers": {
+    "Content-Length": "52",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "fc64c944178d8f64fb11c86e60b141a731bf05d8a0db3455676de6afac3734c3",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "DESIGN §11.7: `Subscription not found`, as a 200 status:error body"
+}

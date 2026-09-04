@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_presets_wrong_type",
+  "path": "/add",
+  "reason": "ytdl_options_presets must be a JSON array of strings (or legacy ytdl_options_preset string)",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "144",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 96,
+  "response_headers": {
+    "Content-Length": "96",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "13e40425a1f7f6291b0b3c38cc8a427fcffa6c3dab64e849f26ec427b0c53469",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "a number is neither a list nor a string"
+}

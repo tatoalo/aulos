@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_migrate_row1_audio_wav_keeps_quality",
+  "path": "/add",
+  "reason": "quality must be one of ['best'] for format wav",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "89",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 51,
+  "response_headers": {
+    "Content-Length": "51",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "412b2da6195a43713f926b25951166659e8b0848db614e8e78ca70ce8f19feb4",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "the same row for wav, whose allowed set is only {best}"
+}

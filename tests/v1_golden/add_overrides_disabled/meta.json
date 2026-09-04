@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_overrides_disabled",
+  "path": "/add",
+  "reason": "ytdl_options_overrides are disabled",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "163",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 40,
+  "response_headers": {
+    "Content-Length": "40",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "11242f0747a407809b017a50f3cbabde34892ebe60aeb6fdf668e50dc6ecbd70",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "ALLOW_YTDL_OPTIONS_OVERRIDES defaults to false, so any non-empty override is a 400 -- ErrorCode::overrides_disabled in DESIGN §5"
+}

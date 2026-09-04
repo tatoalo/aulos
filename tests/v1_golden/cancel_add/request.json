@@ -1,0 +1,14 @@
+{
+  "body": {
+    "generation": 7
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "17",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/cancel-add",
+  "route": "POST cancel-add"
+}

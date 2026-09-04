@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_chapter_template_traversal",
+  "path": "/add",
+  "reason": "chapter_template must not contain \"..\" or start with a path separator",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "160",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 74,
+  "response_headers": {
+    "Content-Length": "74",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "6ffd5559b65d37302875a1cb36f7a9aa7f21b6601784b4aedff5decbf232cc11",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "the same check, different reason string, for chapter_template"
+}

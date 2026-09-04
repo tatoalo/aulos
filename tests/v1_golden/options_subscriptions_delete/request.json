@@ -1,0 +1,10 @@
+{
+  "body": null,
+  "headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "OPTIONS",
+  "path": "/subscriptions/delete",
+  "route": "OPTIONS subscriptions/delete"
+}

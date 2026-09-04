@@ -1,0 +1,16 @@
+{
+  "body": {
+    "ids": [
+      "https://www.youtube.com/watch?v=9bZkp7q19f0"
+    ]
+  },
+  "headers": {
+    "Accept": "*/*",
+    "Content-Length": "56",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "POST",
+  "path": "/start",
+  "route": "POST start"
+}

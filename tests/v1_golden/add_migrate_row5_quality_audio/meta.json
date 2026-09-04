@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "add_migrate_row5_quality_audio",
+  "path": "/add",
+  "reason": "playlist_item_limit must be an integer",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "122",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 43,
+  "response_headers": {
+    "Content-Length": "43",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "471acef34d7eb8b8d442261b3ec63ccd6e9fb5652a1305fa78c31dcc9f6886b9",
+  "route": "POST add",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "migration row 5: legacy quality=audio -> audio/m4a/best. `audio` is not a legal video quality, so the probe firing proves the rewrite"
+}

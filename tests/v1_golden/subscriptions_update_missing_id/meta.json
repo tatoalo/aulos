@@ -1,0 +1,27 @@
+{
+  "content_type": "text/plain; charset=utf-8",
+  "method": "POST",
+  "name": "subscriptions_update_missing_id",
+  "path": "/subscriptions/update",
+  "reason": "missing subscription id",
+  "request_headers": {
+    "Accept": "*/*",
+    "Content-Length": "18",
+    "Content-Type": "application/json",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": false,
+  "response_bytes": 28,
+  "response_headers": {
+    "Content-Length": "28",
+    "Content-Type": "text/plain; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "af41f7f56e08a5474a25c2e875c83d4a68793f8705c0a0937b9a7ba6bb197a2e",
+  "route": "POST subscriptions/update",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 400,
+  "why": "DESIGN §11.7: `missing subscription id`"
+}

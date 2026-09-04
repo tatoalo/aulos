@@ -1,0 +1,11 @@
+{
+  "body": null,
+  "headers": {
+    "Accept": "*/*",
+    "Origin": "https://ui.example.com",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "method": "OPTIONS",
+  "path": "/add",
+  "route": "OPTIONS add"
+}

@@ -1,0 +1,1887 @@
+{
+  "description": "_calculate_progress_percent(status, previous_percent) -> float | None. `vectors` are single frames; `sequences` thread previous_percent across frames the way Download._update_status does, and a `reset` step models the DESIGN §4.7 source_tag change (legacy: the caller passes previous=None).",
+  "provenance": {
+    "captured_at": "2026-09-04T11:19:19+00:00",
+    "legacy_commit": "fd35a66c562db7ab4f1656f65a8c28c98c5e6a84",
+    "legacy_module": "app/ytdl.py:_calculate_progress_percent",
+    "python_version": "3.13.13",
+    "tool": "tools/capture/dump_progress_vectors.py",
+    "yt_dlp_version": "2026.03.17"
+  },
+  "rules": [
+    "finished_is_100",
+    "exact_total_bytes",
+    "fragments_known",
+    "bogus_estimate_ignored",
+    "nothing_usable_keeps_previous",
+    "source_change_resets_floor",
+    "clamped_to_0_99_9",
+    "never_decreases"
+  ],
+  "sequences": [
+    {
+      "final_percent": 100.0,
+      "name": "hls_start_from_the_bogus_1kib_frame",
+      "rules": [
+        "bogus_estimate_ignored",
+        "fragments_known",
+        "never_decreases"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 1024,
+            "status": "downloading",
+            "total_bytes_estimate": 1024
+          },
+          "percent": null,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 1024,
+            "fragment_count": 463,
+            "fragment_index": 0,
+            "status": "downloading",
+            "total_bytes_estimate": 1024
+          },
+          "percent": 0.21598272138228944,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 253048,
+            "fragment_count": 463,
+            "fragment_index": 1,
+            "status": "downloading",
+            "total_bytes_estimate": 234322448
+          },
+          "percent": 0.21598272138228944,
+          "previous_percent": 0.21598272138228944
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 117161224,
+            "fragment_count": 463,
+            "fragment_index": 231,
+            "status": "downloading",
+            "total_bytes_estimate": 234322448
+          },
+          "percent": 50.0,
+          "previous_percent": 0.21598272138228944
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 234322448,
+            "fragment_count": 463,
+            "fragment_index": 462,
+            "status": "downloading",
+            "total_bytes_estimate": 234322448
+          },
+          "percent": 99.9,
+          "previous_percent": 50.0
+        },
+        {
+          "frame": {
+            "status": "finished"
+          },
+          "percent": 100.0,
+          "previous_percent": 99.9
+        }
+      ],
+      "why": "the real HLS opening: yt-dlp reports 1 KiB / 1 KiB before fragment counts land; the percent must not jump to 100"
+    },
+    {
+      "final_percent": 100.0,
+      "name": "progressive_exact_total",
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9",
+        "finished_is_100"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 0,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 0.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 250,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 25.0,
+          "previous_percent": 0.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 750,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 75.0,
+          "previous_percent": 25.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 1000,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 99.9,
+          "previous_percent": 75.0
+        },
+        {
+          "frame": {
+            "status": "finished"
+          },
+          "percent": 100.0,
+          "previous_percent": 99.9
+        }
+      ],
+      "why": "the ordinary progressive-download timeline"
+    },
+    {
+      "final_percent": 95.0,
+      "name": "a_regressing_frame_never_moves_the_bar_back",
+      "rules": [
+        "never_decreases"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 800,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 80.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 100,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 80.0,
+          "previous_percent": 80.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 400,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 80.0,
+          "previous_percent": 80.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 950,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 95.0,
+          "previous_percent": 80.0
+        }
+      ],
+      "why": "yt-dlp can re-report a smaller downloaded_bytes on a retry"
+    },
+    {
+      "final_percent": 100.0,
+      "name": "source_change_resets_the_floor",
+      "rules": [
+        "source_change_resets_floor",
+        "never_decreases"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 500,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 50.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 1000,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 99.9,
+          "previous_percent": 50.0
+        },
+        {
+          "percent": null,
+          "reset": true
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 10,
+            "status": "downloading",
+            "total_bytes": 500
+          },
+          "percent": 2.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 250,
+            "status": "downloading",
+            "total_bytes": 500
+          },
+          "percent": 50.0,
+          "previous_percent": 2.0
+        },
+        {
+          "frame": {
+            "status": "finished"
+          },
+          "percent": 100.0,
+          "previous_percent": 50.0
+        }
+      ],
+      "why": "DESIGN §4.7: the video leg finishes at 99.9, then the audio leg starts over. Legacy expresses the reset by the caller dropping previous_percent (`null` below); without the reset the audio leg would be pinned at the video leg's floor."
+    },
+    {
+      "final_percent": 99.9,
+      "name": "without_a_source_change_the_second_leg_is_pinned",
+      "rules": [
+        "never_decreases"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 500,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 50.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 1000,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 99.9,
+          "previous_percent": 50.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 10,
+            "status": "downloading",
+            "total_bytes": 500
+          },
+          "percent": 99.9,
+          "previous_percent": 99.9
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 250,
+            "status": "downloading",
+            "total_bytes": 500
+          },
+          "percent": 99.9,
+          "previous_percent": 99.9
+        }
+      ],
+      "why": "the same two legs with no reset — the counter-example to the row above"
+    },
+    {
+      "final_percent": 40.0,
+      "name": "stall_frames_carry_the_previous_value",
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 300,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 30.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "eta": null,
+            "speed": 0.0,
+            "status": "downloading"
+          },
+          "percent": 30.0,
+          "previous_percent": 30.0
+        },
+        {
+          "frame": {
+            "eta": null,
+            "speed": null,
+            "status": "downloading"
+          },
+          "percent": 30.0,
+          "previous_percent": 30.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 400,
+            "status": "downloading",
+            "total_bytes": 1000
+          },
+          "percent": 40.0,
+          "previous_percent": 30.0
+        }
+      ],
+      "why": "speed/eta-only frames arrive during a stall and must not clear the bar"
+    },
+    {
+      "final_percent": 100.0,
+      "name": "no_usable_frame_ever_stays_null",
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "status": "preparing"
+          },
+          "percent": null,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "status": "downloading"
+          },
+          "percent": null,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "speed": 1000.0,
+            "status": "downloading"
+          },
+          "percent": null,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "status": "finished"
+          },
+          "percent": 100.0,
+          "previous_percent": null
+        }
+      ],
+      "why": "an audio-only extraction that reports nothing until it finishes"
+    },
+    {
+      "final_percent": 100.0,
+      "name": "nm3u8_segment_frames",
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9",
+        "finished_is_100"
+      ],
+      "steps": [
+        {
+          "frame": {
+            "downloaded_bytes": 0,
+            "status": "downloading",
+            "total_bytes": 100
+          },
+          "percent": 0.0,
+          "previous_percent": null
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 1,
+            "status": "downloading",
+            "total_bytes": 100
+          },
+          "percent": 1.0,
+          "previous_percent": 0.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 57,
+            "status": "downloading",
+            "total_bytes": 100
+          },
+          "percent": 56.99999999999999,
+          "previous_percent": 1.0
+        },
+        {
+          "frame": {
+            "downloaded_bytes": 100,
+            "status": "downloading",
+            "total_bytes": 100
+          },
+          "percent": 99.9,
+          "previous_percent": 56.99999999999999
+        },
+        {
+          "frame": {
+            "status": "finished"
+          },
+          "percent": 100.0,
+          "previous_percent": 99.9
+        }
+      ],
+      "why": "StreamingCommunity: _parse_nm3u8_progress puts segment counts into downloaded_bytes/total_bytes, so the exact-total branch runs on segment numbers, not bytes"
+    }
+  ],
+  "vectors": [
+    {
+      "expected": 0.21598272138228944,
+      "name": "legacy_test_fragment_progress_caps_false_initial_hls_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "bogus_estimate_ignored"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 0,
+        "status": "downloading",
+        "total_bytes_estimate": 1024
+      }
+    },
+    {
+      "expected": 0.65,
+      "name": "legacy_test_fragment_progress_is_monotonic_for_same_source",
+      "previous_percent": 0.65,
+      "rules": [
+        "fragments_known",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 253048,
+        "fragment_count": 463,
+        "fragment_index": 1,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "legacy_test_exact_byte_progress_is_clamped_below_finished",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 100,
+        "status": "downloading",
+        "total_bytes": 100
+      }
+    },
+    {
+      "expected": 100.0,
+      "name": "legacy_test_finished_progress_is_complete",
+      "previous_percent": null,
+      "rules": [
+        "finished_is_100"
+      ],
+      "status": {
+        "status": "finished"
+      }
+    },
+    {
+      "expected": 100.0,
+      "name": "finished_ignores_a_partial_byte_count",
+      "previous_percent": null,
+      "rules": [
+        "finished_is_100"
+      ],
+      "status": {
+        "downloaded_bytes": 1,
+        "status": "finished",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 100.0,
+      "name": "finished_ignores_a_higher_previous",
+      "previous_percent": 99.9,
+      "rules": [
+        "finished_is_100"
+      ],
+      "status": {
+        "status": "finished"
+      }
+    },
+    {
+      "expected": 100.0,
+      "name": "finished_without_any_other_field_from_zero",
+      "previous_percent": 0.0,
+      "rules": [
+        "finished_is_100"
+      ],
+      "status": {
+        "status": "finished"
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "exact_total_half_way",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "exact_total_beats_a_disagreeing_estimate",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "status": "downloading",
+        "total_bytes": 1000,
+        "total_bytes_estimate": 4000
+      }
+    },
+    {
+      "expected": 90.0,
+      "name": "exact_total_beats_fragments",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": 900,
+        "fragment_count": 100,
+        "fragment_index": 1,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 12.5,
+      "name": "exact_total_zero_is_not_usable",
+      "previous_percent": 12.5,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes": 0
+      }
+    },
+    {
+      "expected": null,
+      "name": "exact_total_zero_with_no_previous_is_none",
+      "previous_percent": null,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes": 0
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "exact_total_downloaded_zero_is_zero_percent",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "exact_total_over_100_is_clamped",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 2000,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "exact_total_negative_downloaded_is_clamped_to_zero",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": -50,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": null,
+      "name": "exact_total_negative_total_is_not_usable",
+      "previous_percent": null,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 10,
+        "status": "downloading",
+        "total_bytes": -1000
+      }
+    },
+    {
+      "expected": 25.0,
+      "name": "fragments_floor_only_without_an_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "fragment_count": 100,
+        "fragment_index": 25,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 25.5,
+      "name": "fragments_estimate_inside_the_band_is_kept",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 255,
+        "fragment_count": 100,
+        "fragment_index": 25,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "fragments_estimate_below_the_floor_is_raised",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 10,
+        "fragment_count": 100,
+        "fragment_index": 50,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 11.0,
+      "name": "fragments_estimate_above_the_ceiling_is_capped",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 990,
+        "fragment_count": 100,
+        "fragment_index": 10,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "fragments_last_index_ceiling_is_99_9",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 1000,
+        "fragment_count": 100,
+        "fragment_index": 99,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "fragments_index_equal_to_count_is_floor_100_clamped",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 100,
+        "fragment_index": 100,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "fragments_index_above_count_is_bounded",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 100,
+        "fragment_index": 500,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "fragments_negative_index_is_bounded_to_zero",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "fragment_count": 100,
+        "fragment_index": -5,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "fragments_count_zero_falls_through_to_the_estimate",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "fragment_count": 0,
+        "fragment_index": 0,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 25.0,
+      "name": "fragments_missing_index_falls_through_to_the_estimate",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored"
+      ],
+      "status": {
+        "downloaded_bytes": 250,
+        "fragment_count": 100,
+        "status": "downloading",
+        "total_bytes_estimate": 1000
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "fragments_single_fragment_floor_is_zero",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "fragment_count": 1,
+        "fragment_index": 0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "fragments_beat_a_previous_that_is_higher",
+      "previous_percent": 50.0,
+      "rules": [
+        "fragments_known",
+        "never_decreases"
+      ],
+      "status": {
+        "fragment_count": 100,
+        "fragment_index": 1,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": null,
+      "name": "bogus_estimate_equal_to_downloaded_is_ignored",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "status": "downloading",
+        "total_bytes_estimate": 1024
+      }
+    },
+    {
+      "expected": 3.5,
+      "name": "bogus_estimate_below_downloaded_is_ignored",
+      "previous_percent": 3.5,
+      "rules": [
+        "bogus_estimate_ignored",
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 4096,
+        "status": "downloading",
+        "total_bytes_estimate": 1024
+      }
+    },
+    {
+      "expected": 10.0,
+      "name": "estimate_above_downloaded_is_used",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "status": "downloading",
+        "total_bytes_estimate": 10240
+      }
+    },
+    {
+      "expected": 7.25,
+      "name": "estimate_zero_is_not_usable",
+      "previous_percent": 7.25,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": 100,
+        "status": "downloading",
+        "total_bytes_estimate": 0
+      }
+    },
+    {
+      "expected": null,
+      "name": "estimate_without_downloaded_bytes_is_not_usable",
+      "previous_percent": null,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "status": "downloading",
+        "total_bytes_estimate": 5000
+      }
+    },
+    {
+      "expected": 42.0,
+      "name": "empty_status_keeps_previous",
+      "previous_percent": 42.0,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {}
+    },
+    {
+      "expected": null,
+      "name": "empty_status_with_no_previous_is_none",
+      "previous_percent": null,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {}
+    },
+    {
+      "expected": 61.5,
+      "name": "downloading_with_only_speed_and_eta_keeps_previous",
+      "previous_percent": 61.5,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "eta": 30,
+        "speed": 1048576.0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 88.0,
+      "name": "error_status_with_no_bytes_keeps_previous",
+      "previous_percent": 88.0,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "status": "error"
+      }
+    },
+    {
+      "expected": null,
+      "name": "preparing_status_with_no_bytes_is_none",
+      "previous_percent": null,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "status": "preparing"
+      }
+    },
+    {
+      "expected": 13.0,
+      "name": "all_nulls_keep_previous",
+      "previous_percent": 13.0,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": null,
+        "fragment_count": null,
+        "fragment_index": null,
+        "status": "downloading",
+        "total_bytes": null,
+        "total_bytes_estimate": null
+      }
+    },
+    {
+      "expected": 25.0,
+      "name": "numeric_strings_are_coerced",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": "250",
+        "status": "downloading",
+        "total_bytes": "1000"
+      }
+    },
+    {
+      "expected": 25.05,
+      "name": "float_strings_are_coerced",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": "250.5",
+        "status": "downloading",
+        "total_bytes": "1000.0"
+      }
+    },
+    {
+      "expected": 5.0,
+      "name": "garbage_strings_coerce_to_none",
+      "previous_percent": 5.0,
+      "rules": [
+        "nothing_usable_keeps_previous"
+      ],
+      "status": {
+        "downloaded_bytes": "n/a",
+        "status": "downloading",
+        "total_bytes": "n/a"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "booleans_coerce_to_numbers",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes"
+      ],
+      "status": {
+        "downloaded_bytes": true,
+        "status": "downloading",
+        "total_bytes": true
+      }
+    },
+    {
+      "expected": 25.0,
+      "name": "float_fragment_counts_are_accepted",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "fragment_count": 8.0,
+        "fragment_index": 2.0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "equal_to_previous_is_returned",
+      "previous_percent": 50.0,
+      "rules": [
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 60.0,
+      "name": "above_previous_is_returned",
+      "previous_percent": 50.0,
+      "rules": [
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 600,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "below_previous_returns_previous",
+      "previous_percent": 50.0,
+      "rules": [
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 400,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 100.0,
+      "name": "previous_above_the_clamp_is_returned_verbatim",
+      "previous_percent": 100.0,
+      "rules": [
+        "never_decreases",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 999,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 0.1,
+      "name": "previous_none_after_a_source_change_recomputes_from_scratch",
+      "previous_percent": null,
+      "rules": [
+        "source_change_resets_floor"
+      ],
+      "status": {
+        "downloaded_bytes": 1,
+        "status": "downloading",
+        "total_bytes": 1000
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_exact_000pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_000pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 1.0,
+      "name": "sweep_exact_001pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 100,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_001pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 100,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 5.0,
+      "name": "sweep_exact_005pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_005pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 25.0,
+      "name": "sweep_exact_025pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 2500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_025pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 2500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_050pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 5000,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_exact_050pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 5000,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 75.0,
+      "name": "sweep_exact_075pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 7500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 75.0,
+      "name": "sweep_exact_075pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 7500,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 99.0,
+      "name": "sweep_exact_099pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 9900,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 99.0,
+      "name": "sweep_exact_099pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 9900,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_exact_100pct",
+      "previous_percent": null,
+      "rules": [
+        "exact_total_bytes",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 10000,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_exact_100pct_prev50",
+      "previous_percent": 50.0,
+      "rules": [
+        "exact_total_bytes",
+        "never_decreases"
+      ],
+      "status": {
+        "downloaded_bytes": 10000,
+        "status": "downloading",
+        "total_bytes": 10000
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_estimate_000pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 0,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": 10.0,
+      "name": "sweep_estimate_010pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 1000,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_estimate_050pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 5000,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": 90.0,
+      "name": "sweep_estimate_090pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 9000,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": null,
+      "name": "sweep_estimate_100pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 10000,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": null,
+      "name": "sweep_estimate_150pct",
+      "previous_percent": null,
+      "rules": [
+        "bogus_estimate_ignored",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 15000,
+        "status": "downloading",
+        "total_bytes_estimate": 10000
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_fragments_000_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.0004370046526656294,
+      "name": "sweep_fragments_000_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 0,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.21598272138228944,
+      "name": "sweep_fragments_000_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 0,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.21598272138228944,
+      "name": "sweep_fragments_001_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 1,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.21598272138228944,
+      "name": "sweep_fragments_001_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 1,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.4319654427645789,
+      "name": "sweep_fragments_001_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 1,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.4319654427645789,
+      "name": "sweep_fragments_002_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 2,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.4319654427645789,
+      "name": "sweep_fragments_002_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 2,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.6479481641468683,
+      "name": "sweep_fragments_002_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 2,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 49.892008639308855,
+      "name": "sweep_fragments_231_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 231,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 49.892008639308855,
+      "name": "sweep_fragments_231_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 231,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 50.10799136069114,
+      "name": "sweep_fragments_231_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 231,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.56803455723542,
+      "name": "sweep_fragments_461_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 461,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.56803455723542,
+      "name": "sweep_fragments_461_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 461,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.78401727861771,
+      "name": "sweep_fragments_461_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 461,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.78401727861771,
+      "name": "sweep_fragments_462_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 462,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.78401727861771,
+      "name": "sweep_fragments_462_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 462,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.86239133179421,
+      "name": "sweep_fragments_462_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 462,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_463_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 463,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_463_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 463,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_463_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 463,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_464_of_463",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 463,
+        "fragment_index": 464,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_464_of_463_low_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known"
+      ],
+      "status": {
+        "downloaded_bytes": 1024,
+        "fragment_count": 463,
+        "fragment_index": 464,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_464_of_463_high_estimate",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "downloaded_bytes": 234000000,
+        "fragment_count": 463,
+        "fragment_index": 464,
+        "status": "downloading",
+        "total_bytes_estimate": 234322448
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_fragments_small_0_of_1",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 1,
+        "fragment_index": 0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_small_1_of_1",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 1,
+        "fragment_index": 1,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_fragments_small_0_of_2",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 2,
+        "fragment_index": 0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 50.0,
+      "name": "sweep_fragments_small_1_of_2",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 2,
+        "fragment_index": 1,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_small_2_of_2",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 2,
+        "fragment_index": 2,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 0.0,
+      "name": "sweep_fragments_small_0_of_3",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 3,
+        "fragment_index": 0,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 33.33333333333333,
+      "name": "sweep_fragments_small_1_of_3",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 3,
+        "fragment_index": 1,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 66.66666666666666,
+      "name": "sweep_fragments_small_2_of_3",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 3,
+        "fragment_index": 2,
+        "status": "downloading"
+      }
+    },
+    {
+      "expected": 99.9,
+      "name": "sweep_fragments_small_3_of_3",
+      "previous_percent": null,
+      "rules": [
+        "fragments_known",
+        "clamped_to_0_99_9"
+      ],
+      "status": {
+        "fragment_count": 3,
+        "fragment_index": 3,
+        "status": "downloading"
+      }
+    }
+  ]
+}

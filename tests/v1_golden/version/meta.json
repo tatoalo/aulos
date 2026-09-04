@@ -1,0 +1,25 @@
+{
+  "content_type": "application/json; charset=utf-8",
+  "method": "GET",
+  "name": "version",
+  "path": "/version",
+  "reason": "OK",
+  "request_headers": {
+    "Accept": "*/*",
+    "User-Agent": "aulos-wp00-capture/1"
+  },
+  "response_body_is_json": true,
+  "response_bytes": 51,
+  "response_headers": {
+    "Content-Length": "51",
+    "Content-Type": "application/json; charset=utf-8",
+    "Date": "<volatile>",
+    "Server": "Python/3.13 aiohttp/3.13.2"
+  },
+  "response_sha256": "d9d377a25734b2eeaf42558ee0b1a3699768b20213246f1bdb33c4198f6ea58d",
+  "route": "GET version",
+  "scrubbed_request_headers": [],
+  "scrubbed_response_headers": [],
+  "status": 200,
+  "why": "the only handler using web.json_response, so it is genuinely application/json"
+}
