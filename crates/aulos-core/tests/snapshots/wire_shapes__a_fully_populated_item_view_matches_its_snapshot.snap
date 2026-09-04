@@ -1,0 +1,93 @@
+---
+source: crates/aulos-core/tests/wire_shapes.rs
+expression: full_view()
+---
+{
+  "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
+  "kind": "item",
+  "ord": 981,
+  "group_id": "01JBQ8AA0000000000000000GG",
+  "group_index": 12,
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "title": "Rick Astley - Never Gonna Give You Up",
+  "status": "postprocessing",
+  "auto_start": false,
+  "provider": "ytdlp",
+  "percent": 42.42424242424242,
+  "speed": 3145728.0,
+  "eta": 63,
+  "downloaded_bytes": 44040192,
+  "total_bytes": 103809024,
+  "total_bytes_estimate": 103800000,
+  "fragment_index": 7,
+  "fragment_count": 19,
+  "phase": "remux",
+  "phase_percent": 41.5,
+  "msg": "Merging formats",
+  "error": {
+    "code": "not_yet_live",
+    "message": "Live stream starts at 20:00",
+    "field": null,
+    "provider": "ytdlp",
+    "provider_code": "ExtractorError"
+  },
+  "filename": "Music/Live/prefix - Rick.mkv",
+  "size": 104857600,
+  "download_url": "download/Music/Live/prefix%20-%20Rick.mkv",
+  "chapter_files": [
+    {
+      "filename": "Music/Live/prefix - Rick - 01 - Intro.mkv",
+      "size": 1048576,
+      "download_url": "download/Music/Live/prefix%20-%20Rick%20-%2001%20-%20Intro.mkv",
+      "lang": null
+    }
+  ],
+  "subtitle_files": [
+    {
+      "filename": "Music/Live/prefix - Rick.en-GB.srt",
+      "size": 2048,
+      "download_url": "download/Music/Live/prefix%20-%20Rick.en-GB.srt",
+      "lang": "en-GB"
+    }
+  ],
+  "selection": {
+    "download_type": "video",
+    "codec": "h265",
+    "format": "mp4",
+    "quality": "1080"
+  },
+  "folder": "Music/Live",
+  "request": {
+    "custom_name_prefix": "prefix - ",
+    "playlist_item_limit": 25,
+    "auto_start": true,
+    "split_by_chapters": true,
+    "chapter_template": "%(title)s - %(section_number)02d.%(ext)s",
+    "subtitle_language": "en-GB",
+    "subtitle_mode": "prefer_auto",
+    "ytdl_options_presets": [
+      "sponsorblock",
+      "archive"
+    ],
+    "ytdl_options_overrides": {
+      "cookiefile": "«redacted»",
+      "format_sort": [
+        "res",
+        "vcodec"
+      ]
+    }
+  },
+  "created_at": 1756999900000,
+  "started_at": 1756999901000,
+  "finished_at": 1756999999000,
+  "attempt": 2,
+  "source": {
+    "kind": "telegram",
+    "ref": "12345"
+  },
+  "children_total": 40,
+  "children_done": 30,
+  "children_error": 1,
+  "children_active": 2,
+  "children_inline": true
+}

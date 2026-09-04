@@ -14,18 +14,26 @@ workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `float_roundtrip` makes serde_json's parser bit-exact for fixed-precision floats. Without it the
+# default fast path can be one ULP off, which breaks the byte-for-byte replay of
+# `tests/golden/percent.json` (and would silently perturb `percent` on the wire). `arbitrary_precision`
+# stays off, as DESIGN §18.6 requires, so numbers still serialise as plain JSON numbers.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
-ulid = { workspace = true }
-url = { workspace = true }
+ulid = { workspace = true, features = ["serde"] }
+url = { workspace = true, features = ["serde"] }
 time = { workspace = true, features = ["formatting", "parsing", "macros"] }
 arc-swap = { workspace = true }
 regex = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+# `rt` is needed by `EventRouter::spawn` (DESIGN §2.2.1) and `time` by `Clock::instant`, which
+# returns a `tokio::time::Instant` so a paused-clock test controls both timers and watchdogs.
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
 proptest = { workspace = true }
 insta = { workspace = true, features = ["json"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

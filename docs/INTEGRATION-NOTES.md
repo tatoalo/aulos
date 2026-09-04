@@ -73,3 +73,80 @@ with your WP id.
   `.github/workflows/` holds only `ci.yml`, `docker.yml`, `update-yt-dlp.yml` and `release.yml`
   (asserted by a test), and `ci.yml` has no `deny`/`coverage`/`schema`/`gitleaks` job. `metrics`
   and `criterion` are pinned in `[workspace.dependencies]` but no crate depends on them.
+
+## WP-02 — `aulos-core`: domain, config, catalog
+
+- **`ProviderId` and `FileSlot` live in `aulos-core`, not `aulos-provider`.** DESIGN §6.1 declares
+  `ProviderId` alongside the `Provider` trait and §6.2 declares `FileSlot` alongside
+  `ProgressSink`, but `Item.provider`, `ItemView.provider`, `DownloadRequest.provider_hint`,
+  `FormatCatalog.provider`, `ReloadReport` and `WriteOp::PushFile` all name them, and `aulos-core`
+  is downstream of nothing. They are `aulos_core::selection::ProviderId` (also at the crate root)
+  and `aulos_core::item::FileSlot`. **WP-03 should `pub use` them rather than declare its own**, or
+  the two crates end up with structurally identical but incompatible types.
+- **`RawProgress` carries provider numbers as `f64`/`i64`, not `u64`/`u32`.** The golden corpus
+  pins legacy `_number()` behaviour, which coerces numeric **strings** and floats
+  (`"250.5" / "1000.0" ⇒ 25.05`) and tolerates negatives; integer inputs cannot reproduce that.
+  The wire stays integral. Every provider that parses numbers out of a child process must use
+  `aulos_core::progress::{number, integer}` to build a `RawProgress` and let
+  `ProgressCell::apply` convert to the wire types with `to_wire_bytes` / `to_wire_count` — this is
+  WP-07 (yt-dlp shim frames), WP-09 (`N_m3u8DL-RE` ANSI frames) and WP-10 (the `command` plugin
+  `regex`/`json_lines` progress grammar). Rolling your own `as u64` cast reintroduces the negative
+  and fractional bugs the corpus exists to catch.
+- **`serde_json`'s `float_roundtrip` feature is enabled** in `crates/aulos-core/Cargo.toml`
+  (`arbitrary_precision` stays off, as DESIGN §18.6 requires). Without it serde_json's fast float
+  path can land one ULP away from the value CPython produced, which breaks the byte-for-byte
+  replay of `tests/golden/percent.json` and would silently perturb `percent` on the wire. Cargo
+  unifies features, so the whole workspace gets it; nothing else needs to opt in.
+- **`Clock::instant()` returns `tokio::time::Instant`,** not `std::time::Instant`, and so do
+  `ProgressCell::{last_frame_at, last_applied_at}`. That is what lets a `tokio::time::pause()`
+  test drive the aggregator's stall watchdog and the subscription backoff without sleeping.
+  `FakeClock::advance` moves the wall clock and the monotonic half together.
+- **`aulos_core::load()` does no file IO.** DESIGN §17.1 step 8 folds `YTDL_OPTIONS_FILE` loading
+  into the loading algorithm; keeping `load()` a pure function of `RawEnv` is what makes the whole
+  §17.3 table testable without a filesystem. WP-17 must call `config::load_with_warnings()` **and**
+  `YtdlOptions::load(&cfg.ytdl_options, cfg.ytdl_options_file.as_deref(), ...)`, and merge both
+  reports before the single "print the table, exit 2" step.
+- **`Config` field naming rule:** the variable name lower-cased, with the `AULOS_` namespace marker
+  stripped — `AULOS_WS_BATCH_MS` → `cfg.ws_batch_ms`, `MAX_CONCURRENT_DOWNLOADS` →
+  `cfg.max_concurrent_downloads`. `METUBE_VERSION`/`AULOS_VERSION` collapse onto `cfg.version` and
+  `PLUGINS_DIR`/`AULOS_PLUGINS_DIR` onto `cfg.plugins_dir`, with the `AULOS_` name winning a tie.
+  `DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT` and `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL` also keep a
+  `_raw: Box<str>` copy, because the v1 shim must echo them as the strings legacy never coerced.
+- **`DomainEvent::Notice` keeps DESIGN §8.1's inline shape** (`{ level, code: &'static str, id,
+  message }`) and the `Notice` struct PLAN asks for is its **wire** projection
+  (`DomainEvent::as_notice()`). `event::notice_code` holds the six server-owned codes of
+  PROTOCOL §5.8, and `Level::Warn` serialises as `"warning"` — not `"warn"` — because that is what
+  the protocol document says. WP-13 should build the `notice` frame from `as_notice()`.
+- **`ItemView::FIELDS` (40 entries) is the authoritative wire key list**, and
+  `ItemView::IMMUTABLE_FIELDS` is the three a `delta` may never carry. `print-schema` is CUT, so
+  WP-13's diff macro should assert its own field list against `ItemView::FIELDS` — `wire_shapes.rs`
+  already asserts the serializer against it from the other side, which closes the loop PLAN asks
+  for. `ItemView::from_item(&Item, Option<&ProgressCell>, &ViewExtras)` is the constructor;
+  `ViewExtras` carries the three things only the caller knows (the percent-encoded `download_url`
+  and the group child counters).
+- **`can_transition` takes `impl Into<StatusEdge>`.** `can_transition(Status::Queued,
+  Status::Preparing)` works directly; the pause and start edges need the flag, so they are
+  `can_transition(StatusEdge::scheduled(Status::Downloading), StatusEdge::paused(Status::Queued))`.
+  A self-edge is legal — it is the engine's `StatusChanged { from == to }` re-diff signal.
+- **`EventRouter::subscribe` after `spawn` is structurally impossible**, not a runtime `Err`:
+  `spawn(self)` consumes the router, so the borrow checker enforces what DESIGN §2.2.1 describes as
+  a panic-in-debug. `EventRouter::run(self)` is also public so a test can drive the fan-out on the
+  current task. The `Block`-backpressure test uses `tokio::time::pause()` rather than `FakeClock`,
+  since it is the tokio scheduler that has to be held still.
+- **`FormatSpec.flags.slow` is set on `mp4`, not on the `best_remux` quality.** DESIGN §6.6 says
+  "`best_remux` carries `flags.slow = true`", but `flags` is a member of `FormatSpec` and
+  `QualitySpec` has only `{ id, label, notice }` (PROTOCOL §4.6). `mp4` is the only format offering
+  that quality, so the flag lands there and the per-quality `notice` says which choice is slow.
+- **The `ytdlp` catalog's `ytdl_options_presets` option ships with an empty `choices` array.** The
+  real preset names come from `YTDL_OPTIONS_PRESETS`, which a `LazyLock` constant cannot know, so
+  WP-14 must fill them in when it serves `GET api/v2/catalog` / `capabilities`.
+  `FormatCatalog::flat_formats()` is the ready-made projection for `capabilities.formats` (sixteen
+  entries, labels already matching PROTOCOL §4.5) and `bot_formats()` the one for WP-16's keyboard.
+- **`ChatConfig` has twelve keys, not thirteen.** DESIGN §7.6.5 says "the legacy 13 keys verbatim";
+  legacy `_get_chat_config` (`app/telegram_bot.py:188-201`) actually writes twelve. The twelve are
+  implemented and asserted; `ytdl_options_presets`/`_overrides` were never part of the chat config.
+- **`Status::v1()` returns `"preparing"` for `Preparing`** (DESIGN §11.5's table, not the §4.2
+  prose) and `"error"` for `Canceled` as a defensive fallback — DESIGN §11.4 omits cancelled items
+  from `GET history` entirely, so WP-15 should filter them out rather than rely on that value.
+- **`Item` and `DownloadRequest` derive `PartialEq`** (not `Eq`: `serde_json::Value` has no total
+  equality) so WP-04's store round-trips and WP-05's importer fixtures can compare rows directly.
