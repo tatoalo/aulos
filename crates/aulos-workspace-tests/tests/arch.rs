@@ -80,6 +80,11 @@ const TABLE: [(&str, Option<&[&str]>); 12] = [
             "tokio",
             "tokio-util",
             "wreq",
+            // Amendment (wave-1 integration, at WP-08's request): `wreq` ships only
+            // `Emulation`/`EmulationBuilder`; the named Chrome profiles — the real JA3/JA4 tables
+            // and Chrome's HTTP/2 SETTINGS order — live in `wreq-util`. DESIGN §18.6 and the §3
+            // row both omit it. See docs/INTEGRATION-NOTES.md, WP-08.
+            "wreq-util",
             "reqwest",
             "scraper",
             "regex",

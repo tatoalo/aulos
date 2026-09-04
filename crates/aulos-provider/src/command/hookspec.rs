@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aulos_core::item::Item;
-use aulos_core::selection::DownloadType;
+use aulos_core::item::{Item, ItemView};
+use aulos_core::selection::{DownloadType, ProviderId};
 use aulos_core::status::TerminalStatus;
 use serde::Deserialize;
 
@@ -187,27 +187,41 @@ impl HookFilter {
     /// filter names providers, and "unresolved" is not one of them.
     #[must_use]
     pub fn matches(&self, item: &Item) -> bool {
-        if !self.provider.is_empty() {
-            let ok = item
-                .provider
-                .as_ref()
-                .is_some_and(|p| self.provider.iter().any(|want| **want == *p.as_str()));
-            if !ok {
-                return false;
-            }
-        }
-        if !self.download_type.is_empty()
-            && !self
-                .download_type
-                .contains(&item.request.selection.download_type)
+        self.passes(
+            item.provider.as_ref().map(ProviderId::as_str),
+            item.request.selection.download_type,
+            item.request.folder.as_ref().map_or("", |f| f.as_str()),
+        )
+    }
+
+    /// [`Self::matches`] against the wire projection of an item.
+    ///
+    /// `aulos-hooks` never holds an [`Item`]: the dispatcher's only event source is the event bus,
+    /// whose payloads are `Arc<ItemView>` (DESIGN §13). Both entry points read the same three axes
+    /// through the same predicate, so the two crates cannot drift apart on what `when` means.
+    #[must_use]
+    pub fn matches_view(&self, item: &ItemView) -> bool {
+        self.passes(
+            item.provider.as_deref(),
+            item.selection.download_type,
+            item.folder.as_deref().unwrap_or(""),
+        )
+    }
+
+    /// The one implementation of DESIGN §13.4's `when.*` allow-lists.
+    fn passes(&self, provider: Option<&str>, download_type: DownloadType, folder: &str) -> bool {
+        if !self.provider.is_empty()
+            && !provider.is_some_and(|p| self.provider.iter().any(|want| **want == *p))
         {
             return false;
         }
-        if !self.folder_prefix.is_empty() {
-            let folder = item.request.folder.as_ref().map_or("", |f| f.as_str());
-            if !self.folder_prefix.iter().any(|p| folder.starts_with(&**p)) {
-                return false;
-            }
+        if !self.download_type.is_empty() && !self.download_type.contains(&download_type) {
+            return false;
+        }
+        if !self.folder_prefix.is_empty()
+            && !self.folder_prefix.iter().any(|p| folder.starts_with(&**p))
+        {
+            return false;
         }
         true
     }
@@ -618,6 +632,58 @@ mod tests {
             children_total: None,
             clear_after: None,
         }
+    }
+
+    /// The three `when` axes, judged from an `Item` and from its own wire projection, must agree —
+    /// `aulos-hooks` only ever has the latter (see the WP-11 entry in `docs/INTEGRATION-NOTES.md`).
+    #[test]
+    fn the_item_and_the_view_forms_of_a_filter_agree() {
+        let filters = [
+            HookFilter::default(),
+            HookFilter {
+                provider: vec![Arc::from("streamingcommunity")],
+                ..HookFilter::default()
+            },
+            HookFilter {
+                download_type: vec![DownloadType::Audio],
+                ..HookFilter::default()
+            },
+            HookFilter {
+                folder_prefix: vec![Arc::from("Series/")],
+                ..HookFilter::default()
+            },
+            HookFilter {
+                provider: vec![Arc::from("ytdlp")],
+                download_type: vec![DownloadType::Video],
+                folder_prefix: vec![Arc::from("Series/")],
+            },
+        ];
+        let items = [
+            item("ytdlp", DownloadType::Video, None),
+            item("ytdlp", DownloadType::Video, Some("Series/S01")),
+            item("streamingcommunity", DownloadType::Video, Some("Movies")),
+            item("ytdlp", DownloadType::Audio, Some("Series/S01")),
+            unresolved(),
+        ];
+        for f in &filters {
+            for it in &items {
+                let view = ItemView::from_item(it, None, &aulos_core::item::ViewExtras::default());
+                assert_eq!(
+                    f.matches(it),
+                    f.matches_view(&view),
+                    "{f:?} disagrees on {:?}/{:?}",
+                    it.provider,
+                    it.request.folder
+                );
+            }
+        }
+    }
+
+    /// An item that has not been resolved yet: no provider at all.
+    fn unresolved() -> Item {
+        let mut it = item("ytdlp", DownloadType::Video, Some("Series/S01"));
+        it.provider = None;
+        it
     }
 
     fn parse(toml_src: &str) -> Result<Vec<HookSpec>, ManifestError> {

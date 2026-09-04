@@ -68,6 +68,11 @@ with your WP id.
   `py_compile`, `shim_contract.py`, `smoke_extract.sh` and `tests/e2e/run.sh` steps still no-op and
   stay open for WP-07 / WP-18; the paths in the workflow match what those packages are told to
   create, so none of them needs a workflow edit either.
+  **UPDATED (wave-1 integration).** WP-07 landed `python/ytdlp_runner.py` and
+  `tests/shim_contract.py`, so the `ruff`/`py_compile` step and the shim contract step are both
+  live and pass locally. Only `crates/aulos-provider-ytdlp/tests/smoke_extract.sh` (the
+  `update-yt-dlp.yml` real-`mode=extract` smoke) and `tests/e2e/run.sh` still no-op; both need a
+  built image, so they stay **open for WP-18**.
 - **`serve` blocks in the skeleton.** It prints `aulos-server serve: not implemented`, then parks
   on `SIGTERM`/`SIGINT` and exits 0. Nothing is bound and no task is spawned, but the container
   needs a live process for the `HEALTHCHECK` to have anything to probe. `healthcheck` currently
@@ -108,6 +113,11 @@ with your WP id.
   WP-07 (yt-dlp shim frames), WP-09 (`N_m3u8DL-RE` ANSI frames) and WP-10 (the `command` plugin
   `regex`/`json_lines` progress grammar). Rolling your own `as u64` cast reintroduces the negative
   and fractional bugs the corpus exists to catch.
+  **APPLIED (wave-1 integration) — verified, no change needed.** All three consumers build their
+  frames through `aulos_core::progress`: `aulos-provider-ytdlp` (`frames.rs`, `progress.rs`,
+  `runner.rs`), `aulos-provider-sc` (`progress.rs`) and the `command` plugin grammar
+  (`aulos-provider/src/command/progress.rs`). No `as u64` cast on a provider-supplied number
+  anywhere.
 - **`serde_json`'s `float_roundtrip` feature is enabled** in `crates/aulos-core/Cargo.toml`
   (`arbitrary_precision` stays off, as DESIGN §18.6 requires). Without it serde_json's fast float
   path can land one ULP away from the value CPython produced, which breaks the byte-for-byte
@@ -210,6 +220,9 @@ with your WP id.
   `command-fds` and then call `Child::spawn_command(&spec, cmd)`. Bypassing `Child` loses the
   **mandatory** stderr drain, which is the one failure mode in DESIGN §2.3 that deadlocks a child
   forever rather than merely failing it.
+  **APPLIED (wave-1 integration) — verified, no change needed.** `runner.rs` spawns through
+  `Child::spawn_command(&spec, cmd)` with the fd-3 pipe added by `command-fds`; there is no
+  `Command::spawn` anywhere in the crate.
 - **`strip_ansi` lives in `aulos_provider::proc`.** DESIGN §3 gives `strip-ansi-escapes` to
   `aulos-provider-sc` only, and `aulos-provider` may not take a dependency its row does not budget
   for, so the ~30-line CSI/OSC scrubber the stderr ring needs is implemented here and exported.
@@ -300,12 +313,23 @@ with your WP id.
   `tests/golden_opts.rs` follow that convention (`CARGO_MANIFEST_DIR/../../tests/golden/…`) rather
   than duplicating 76 KB of corpus. If the integrator prefers the per-crate layout, moving the two
   files and editing one `golden_path()` per test file is the whole change.
+  **DECIDED (wave-1 integration): keep the workspace-root layout.** One corpus in one place, read
+  by both `aulos-core` and `aulos-provider-ytdlp`, is the better arrangement; PLAN WP-06's
+  per-crate paths are the thing that is wrong, not the tree. No files moved.
 - **`get_opts` does not emit the legacy `Exec` audio-sync postprocessor** — the one deliberate
   behaviour change of DESIGN §9.8 (Δ C9). **WP-11 owes the other half**: the in-process
   `audio_sync` hook must fire for a finished `{video, mp4, best_remux}` item, or that selection
   silently loses the A/V-desync fix it had in legacy. The exact dict we no longer emit is public as
   `opts::legacy_audio_sync_exec()`, and `tests/golden_opts.rs` asserts that this is the *only*
   difference from the captured Python output, so the delta cannot widen unnoticed.
+  **APPLIED (wave-1 integration).** WP-11 delivered the other half, and the two halves are now
+  tied together by a test neither crate could own:
+  `crates/aulos-workspace-tests/tests/audio_sync_delta_c9.rs` sweeps **every**
+  `(download_type, format, quality)` the `ytdlp` catalog admits and asserts that the legacy `Exec`
+  is gone from all of them and that `AudioSyncHook::applies` claims exactly one — `{video, mp4,
+  best_remux}` — plus that a failed, cancelled or file-less job is never re-encoded. Before this,
+  a disagreement between the two halves would have silently dropped the A/V-desync fix with no
+  test going red.
 - **`ytdlp_catalog()` delegates to `aulos_core::YTDLP_CATALOG`** rather than declaring a second
   catalogue. WP-02 put the §6.6 data in `aulos-core` (it is a wire type and the request validator
   reads it), so this crate only hands out the `Arc`. `tests/catalog.rs` parses the DESIGN §6.6
@@ -422,6 +446,17 @@ with your WP id.
   the `arch.rs` budget, then replace `chrome_emulation()`'s body with the crate's Chrome preset —
   it is a ~10-line change in one function, and `the_chrome_profile_is_accepted_by_boringssl`
   already guards it.
+  **APPLIED (wave-1 integration).** `wreq-util = "3.0.0-rc.14"` is in `[workspace.dependencies]`
+  (a bare `"3"` cannot match a prerelease, exactly as with `wreq`), declared `optional` in
+  `aulos-provider-sc` behind `sc-impersonate`, and added to the `aulos-provider-sc` row of both
+  DESIGN §3 and `tests/arch.rs`. `http::impersonate` now sends the real Chrome 131 profile
+  (`wreq_util::Emulation::Chrome131` through `wreq::IntoEmulation`), with this crate's own header
+  set layered on top so the impersonating and the plain client present one identical header map;
+  the hand-built cipher/curve/sigalg strings and the four HTTP/2 SETTINGS constants are gone.
+  DESIGN §10.1 and §18.6 record the crate and both rc pins. A second guard,
+  `the_fingerprint_and_the_user_agent_claim_the_same_chrome`, fails if the profile version and
+  `USER_AGENT`/`sec-ch-ua` ever drift apart — a JA3/JA4 from one Chrome behind a user agent from
+  another is a worse signal to a bot filter than none.
   `ClientBuilder::build()` constructs the BoringSSL connector eagerly, so `WreqClient::new()`
   catches a rejected cipher/curve string at boot and falls back to `wreq`'s default TLS options
   with a WARN and `impersonating() == false` — a bad profile can never become a silent
@@ -437,6 +472,8 @@ with your WP id.
   unavailable — is untested there. WP-08 does not own `.github/`; the fix is one line in the
   `test` job of `.github/workflows/ci.yml`:
   `- run: cargo test -p aulos-provider-sc --no-default-features --locked`.
+  **APPLIED (wave-1 integration).** That line is now in `ci.yml`'s `test` job, immediately after
+  `cargo test --workspace --locked`. It passes locally.
 - **`crates/aulos-provider-sc/src/engines.rs` is the seam WP-09 must fill.**
   `ScProvider::download` delegates to `engines::download(&self, ctx, sink)`, which currently logs
   an ERROR and returns `ProviderError::ToolMissing("N_m3u8DL-RE")` — deliberately a loud failure
@@ -520,6 +557,8 @@ with your WP id.
 - **Two of the four gates were run for this crate only.** `cargo clippy -p aulos-provider-sc
   --all-targets -- -D warnings` and `cargo test -p aulos-provider-sc` are green (160 unit tests in the crate, plus WP-08's 5 integration tests);
   the workspace-wide gates were not run because other crates were mid-edit.
+  **CLOSED (wave-1 integration).** The workspace-wide gates were run over the whole tree in this
+  pass; the results are in the wave-1 section at the end of this file.
 - **`mux::tests::a_real_ffmpeg_remuxes_the_concatenation` self-skips** when no `ffmpeg` is on
   `PATH` or in `/opt/homebrew/bin`, printing why. It generates its own two MPEG-TS segments with
   ffmpeg rather than checking a binary blob into the repository, so CI (which has no ffmpeg) just
@@ -541,6 +580,8 @@ with your WP id.
   and `tests/arch.rs` enforces that row as a subset rule. `HttpMethod` is
   `{Get, Post, Put, Patch, Delete, Head}` with `as_str()`/`parse()`; **WP-11 maps it to
   `reqwest::Method` in one line** (`Method::from_bytes(m.as_str().as_bytes())` or a six-arm match).
+  **APPLIED (wave-1 integration) — verified, no change needed.** WP-11 did exactly that:
+  `manifest_hook::reqwest_method` is the six-arm match.
 - **WP-11 gets its hooks from one of two places.** `aulos_provider::command::discover(dir)` has the
   PLAN signature and returns `(Vec<Arc<dyn Provider>>, Vec<HookSpec>, ReloadReport)`; the registry
   path is `Registry::set_command_loader(Arc::new(CommandPluginLoader::with_env(env)))` plus
@@ -639,6 +680,12 @@ with your WP id.
   (`aulos_provider_ytdlp::runner::EMPTY_DATA`); only the `Display` impl adds the prefix.
   `tests/replay.rs::an_extraction_that_yielded_nothing_uses_the_verbatim_legacy_message` asserts
   `contains` rather than `==` and points here.
+  **APPLIED (wave-1 integration).** The first option was taken: `ProviderError::Unsupported` is
+  now `#[error("{0}")]` like every other message-bearing variant, so no engine has to special-case
+  `ErrorCode::UnsupportedUrl` to satisfy DESIGN §8.4/§11.7. The variant's doc comment records why
+  the prefix may not come back, `provider.rs::the_verbatim_legacy_messages_are_undecorated`
+  asserts both required strings survive `Display`, `message()` and `to_wire()` untouched, and the
+  replay test was tightened from `contains` to `assert_eq!(e.message(), EMPTY_DATA)`.
 - **Per-line child-stderr logging is deferred to the end of the job.** DESIGN §9.1 asks for stderr
   lines to reach `tracing` at DEBUG (WARN for `^(ERROR|WARNING)`) with `target = "ytdlp.child"` *as
   they arrive*. `aulos_provider::proc::Child` owns the (mandatory, deadlock-avoiding) stderr drain
@@ -646,6 +693,13 @@ with your WP id.
   classification once when the job ends. Same information, later. An additive
   `SpawnSpec::stderr_line_hook(Box<dyn Fn(&str)>)` in `aulos-provider` would restore the real-time
   behaviour for every provider at once; nothing depends on it today.
+  **APPLIED (wave-1 integration).** `SpawnSpec::stderr_line_hook(impl Fn(u32, &str))` now exists
+  (the pid is an argument because the drain starts inside `Child::spawn`, before a caller could
+  learn it), and the runner installs `runner::log_child_line` through it — so DESIGN §9.1's
+  per-line DEBUG/WARN classification happens **as the line arrives**, and `drain_stderr`'s
+  end-of-job replay is gone. The ring and `stderr_tap` are untouched, and
+  `tests/proc.rs::the_stderr_line_hook_sees_lines_while_the_child_is_still_running` proves the
+  lines land before the child exits, exactly once each. Every provider can use it now.
 - **`RunnerOutcome` has a fourth variant, `Selftest(ShimIdentity)`.** The PLAN interface lists
   three. `Provider::probe` runs `mode = selftest` and needs the `hello` payload (yt-dlp version,
   interpreter version, plugin list, POT availability), which `healthz.components.ytdlp_runner` and
@@ -725,6 +779,10 @@ with your WP id.
   }
   ```
   Two implementations would silently defeat dedupe for every pre-cutover URL.
+  **CARRIED FORWARD (wave-1 integration).** `aulos-queue` is still the WP-01 stub (one `lib.rs`,
+  no `canonical_key`), so there is nothing to make delegate yet. This is **WP-12's** to honour when
+  it writes the engine — the bullet is addressed to "WP-11", but the function belongs to
+  `aulos-queue`.
 - **`healthz.components.importer` (WP-17):** `ImportReport::is_degraded()` and
   `ImportReport::skipped_files()` are the DESIGN §7.6.1 "degraded for the life of the process"
   inputs, and `warnings.len()` / `imported_at` are the other two fields of the §16.3 payload.
@@ -747,6 +805,19 @@ with your WP id.
   (`crates/aulos-store/tests/fixtures/state/sc-entry/queue.json`) is checked in for reuse.
   **WP-10 (or `aulos-workspace-tests`) should add:** `ScState::from_json(imported_blob)` succeeds,
   and `to_legacy_info_json` / the NFO XML match a freshly resolved entry.
+  **APPLIED (wave-1 integration).** Added as
+  `crates/aulos-workspace-tests/tests/sc_import_equivalence.rs`, which is where it had to go:
+  `aulos-hooks` may not depend on a provider crate and no provider crate may depend on the store
+  (A1), so only the dev-only crate can see all three sides. It resolves `/it/watch/9?e=456` for
+  real through `watch::resolve_watch` over a loopback `wiremock` server and the SC crate's own
+  checked-in fixtures, **derives** the legacy `queue.json` row from that resolution (so the two
+  sides cannot drift apart by someone editing one fixture), runs the real importer, and then
+  asserts `ScState::from_json(imported_blob)` parses, that the ids / season / episode / series /
+  `base_url` all match, that `to_legacy_info_json` is equivalent either way, and that
+  `nfo::render` produces a byte-identical document from the imported blob and from a fresh one.
+  `aulos-workspace-tests` gained the dev-dependencies that needs; the arch gate permits it (the
+  subset rule is judged on shipped dependencies, and A1 constrains provider crates, not this
+  one).
 - **Imported rows are attributed `source = { kind: "api_v1", ref: null }` and
   `provider = "ytdlp"`** (or `"streamingcommunity"`). Legacy persisted no attribution at all, and
   every legacy record had already been through `extract_info`, so a null provider would say
@@ -796,11 +867,27 @@ with your WP id.
   it"). A one-line additive `HookFilter::matches_view(&ItemView)` in `aulos-provider`, with both
   callers delegating to it, would remove the duplication; it is deliberately not done here because
   WP-10 owns that file.
+  **APPLIED (wave-1 integration).** `HookFilter::matches_view(&ItemView)` now exists, both public
+  entry points delegate to one private `HookFilter::passes(provider, download_type, folder)`, and
+  `ManifestHook::filter_matches` is a one-line call into it — the second copy of the three axes is
+  gone. `hookspec.rs::the_item_and_the_view_forms_of_a_filter_agree` cross-checks the two forms
+  over five filters x five items, including the unresolved item, which is the case with the
+  surprising answer.
 - **`aulos_provider::proc::Child::wait` does not join the stderr drain task**, so reading
   `child.stderr().tail(..)` the instant `wait` returns is a race — the tail came back empty about one
   run in twenty in this crate's tests. `ffprobe::settled_stderr` works around it with a bounded
   1 ms poll on the failure path only. Every other consumer of `proc` has the same race; an additive
   `Child::wait_drained()` that awaits the drain's `JoinHandle` would fix it once.
+  **APPLIED (wave-1 integration).** `Child` now keeps the drain's `JoinHandle` and exposes
+  `wait_drained()` (wait, then join) and `drained()` (join only, for the `select!` loops that
+  already have the exit status). The join is bounded by `Child::DRAIN_JOIN_GRACE` (250 ms),
+  because a pipe closes only when *every* writer closes it — a grandchild that inherited stderr
+  must not be able to wedge the caller, which
+  `wait_drained_is_not_wedged_by_a_grandchild_holding_stderr` proves. All three workarounds are
+  deleted: `aulos-hooks`' `ffprobe::settled_stderr`, `aulos-provider-sc`'s `engines::settled_tail`
+  (now `settled_tail(&mut Child)`, a join rather than a 100 ms poll) and the ytdlp runner's read
+  of the tail straight after `wait`. `wait_drained_settles_the_stderr_tail_without_polling` runs
+  the race 25 times.
 - **JSON escaping in a community `[[hook]]` applies to *string* tokens only.** DESIGN §13.4 says a
   placeholder in a `body`/header "is JSON-escaped when the body parses as JSON"; taken literally that
   breaks `{"count": {count}, "titles": {titles_json}}`, because `{count}` is a number and the two
@@ -841,7 +928,115 @@ with your WP id.
 - **`FakeClock::default()`'s doc comment in `aulos-core` says 2026-09-04, but its epoch value
   (`1_772_582_400_000`) is 2026-03-04.** Harmless, but every snapshot stamped from it reads March;
   this crate's NFO snapshots pass an explicit `now_ms` instead.
+  **APPLIED (wave-1 integration).** The **comment** was the wrong half: the value is load-bearing
+  for every `insta` snapshot stamped from that clock, so it must not move. It is now
+  `aulos_core::clock::DEFAULT_FAKE_EPOCH_MS`, documented as 2026-03-04, with
+  `the_default_epoch_is_the_date_it_claims` asserting the constant against the date it names, so
+  the two cannot drift again.
 - **`plugins/examples/media-server-hooks/plugin.toml` is now covered by a test.**
   `crates/aulos-hooks/tests/community.rs::the_shipped_example_manifest_loads_into_four_hooks` loads
   the shipped file through WP-10's real loader and asserts its four ids, the debounce values and the
   `${PLEX_TOKEN}` interpolation, so an edit to the example that breaks it fails CI.
+
+---
+
+## Wave-1 integration pass (integrator, 2026-09-04)
+
+### The tree
+
+- **Nothing was uncommitted and no code was discarded.** `git status` showed a clean tree after
+  WP-04/05/06/07/08/09/10/11 landed. Four git-ignored tool caches were sitting in it —
+  `.ruff_cache/` at the root, `crates/aulos-provider-ytdlp/python/{.ruff_cache,__pycache__}/` and
+  `crates/aulos-provider-ytdlp/tests/fixtures/scripts/.ruff_cache/` — and were removed; the
+  `.gitignore` entries wave 0 added already cover them, so nothing else was needed. The
+  `Cargo.lock` that WP-04 and WP-06 deliberately left out of their commits is committed here, with
+  the whole graph resolved and `cargo test --workspace --locked` green, so CI's `--locked` cannot
+  fail on it.
+- **The `sh` stand-ins keep mode 100755** (`crates/aulos-provider-sc/tests/fixtures/sc/bin/*.sh`,
+  `crates/aulos-provider-ytdlp/tests/fixtures/scripts/*.py`, both `plugins/examples/bandcamp`
+  scripts), as WP-09 warned they must — checked with `git ls-files -s`.
+
+### Gates, all green on `rustc 1.95.0 (59807616e 2026-04-14)`
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all` | no diff |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the CI form) | clean |
+| `cargo test --workspace` / `--locked` | **996 passed, 0 failed**, 57 test binaries |
+| `cargo test -p aulos-workspace-tests` | 12 arch + 10 packaging + 3 Δ C9 + 1 SC-equivalence |
+| `cargo test -p aulos-provider-sc --no-default-features` (the `plain` client) | 165 passed |
+| `python3 crates/aulos-provider-ytdlp/tests/shim_contract.py` | every check passed |
+| `python3 tools/capture/verify.py` | `OK — … 131 v1 case(s) verified` |
+| `ruff check` + `py_compile` on `python/ytdlp_runner.py` | clean |
+
+**No test was deleted, weakened or `#[ignore]`d to get there.** The single "ignored" line in the
+run is a ```` ```ignore ```` *documentation* block in `aulos-store`'s `import::canonical` module
+doc — the illustrative `aulos-queue::canonical_key` delegation snippet, which cannot compile until
+WP-12 creates that function. Two assertions were made *stricter*: the replay test on the verbatim
+`Invalid/empty data was given.` string went from `contains` to `==`, and
+`a_megabyte_of_stderr_does_not_deadlock_the_child` lost its 2-second polling loop in favour of the
+new deterministic join.
+
+### What was applied
+
+Every open request in this file is now annotated inline with what happened to it — sixteen
+bullets. Nine were real changes (below); three needed no code, because the package they were
+addressed to had already honoured them (marked *verified*); one was a decision to keep the tree as
+it is; two were status updates on wave-0 bullets; and one is carried forward to WP-12.
+
+| Request (owner) | Change |
+|---|---|
+| `ProviderError::Unsupported`'s `Display` decorates a wire-verbatim string (WP-07 → `aulos-provider`) | `#[error("{0}")]`, plus a test on both DESIGN §8.4 strings |
+| `Child::wait` does not join the stderr drain, so the tail is a race (WP-11 → `aulos-provider`) | `Child::wait_drained()` / `Child::drained()`; **three** independently-invented poll-loop workarounds deleted |
+| DESIGN §9.1's per-line child stderr logging is deferred to the end of the job (WP-07 → `aulos-provider`) | `SpawnSpec::stderr_line_hook`; the runner logs in real time again |
+| `HookFilter::matches` is reimplemented against `ItemView` in `aulos-hooks` (WP-11 → WP-10's file) | `HookFilter::matches_view`, one predicate, both callers delegate, cross-checked |
+| `wreq` cannot express a real Chrome fingerprint without `wreq-util` (WP-08 → integrator) | `wreq-util = "3.0.0-rc.14"` added to the workspace, DESIGN §3/§10.1/§18.6 and `arch.rs`; `Profile::Chrome131` replaces the hand-built tables |
+| CI never exercises the plain `reqwest` SC client (WP-08 → `.github/`) | one line in `ci.yml`'s `test` job |
+| The Δ C9 halves (WP-06 removed the `Exec`, WP-11 owns the hook) are untied | `tests/audio_sync_delta_c9.rs`, a full catalog sweep |
+| The SC import/resolve equivalence assertion nobody could own (WP-05 → `aulos-workspace-tests`) | `tests/sc_import_equivalence.rs`, a real resolve + a real import |
+| `FakeClock::default`'s doc says September, its value says March (WP-11 → `aulos-core`) | `DEFAULT_FAKE_EPOCH_MS`, documented correctly, asserted |
+
+`aulos-workspace-tests` grew from "no dependencies at all" to a set of dev-dependencies
+(`aulos-store`, `aulos-provider`, `aulos-provider-sc`, `aulos-provider-ytdlp`, `aulos-hooks`,
+`serde_json`, `tempfile`, `url`, `wiremock`, `tokio`) so it can host the two cross-crate tests.
+That is exactly the role DESIGN §3 gives it — its row in `arch.rs` stays `Some(&[])`, because the
+subset rule is judged on *shipped* dependencies and this crate ships nothing.
+
+### DESIGN.md edits made here
+
+PLAN §0 wants a deliberate deviation recorded in DESIGN.md, and wave 0 carried five such
+deviations in prose in this file instead. This pass adds one dependency, so it paid that debt for
+its own change rather than growing it: DESIGN §3's `aulos-provider-sc` row now lists `wreq-util`
+(and `futures-util`, which WP-01 added and `arch.rs` had been amending in a comment), §18.6 has a
+`wreq-util` row, and §10.1 gained two rows — one explaining why `wreq-util` is *required* with
+`wreq`, and one recording the pinned prerelease versions and the decision **not** to take the
+BRIEF's plain-`reqwest` escape hatch, which is the §10.1 note WP-08 owed. **The other five wave-0
+deviations are still documentation debt** (`ProviderId`/`FileSlot` in `aulos-core`,
+`Registry::pick` returning `Option`, `OutTmpl` in `aulos-provider`, `FormatSpec.flags.slow` on
+`mp4`, `ChatConfig`'s twelve keys), and so are the wave-1 ones recorded above in prose.
+
+### Carried forward — every request in this file that is still open
+
+All of these are addressed to packages that do not exist yet. None of them blocks wave 2 starting.
+
+| Request | Owner |
+|---|---|
+| Map `Registry::pick` → `None` to `ErrorCode::UnsupportedUrl` | WP-12 |
+| Park the `Outcome` engine-side on `Finished → Finishing` (`pending_hooks`) and pair it back on `HooksFinished`; publish `Finishing` **only** on the success path | WP-12 |
+| Delegate `aulos-queue::canonical_key` to `aulos_store::canonical_key` — never a second implementation | WP-12 |
+| Read `Store::options()` for `done_window`/`entry_max_bytes` rather than re-deriving them from `Config`; turn `set_size`/`drop_entry_blob` into `EngineCmd::HookWrite` | WP-12 |
+| Call `OutTmplJob::merge_info` with the compacted entry blob, or `%(playlist_id)s`-style fields degrade to `NA` | WP-12 |
+| Add a children channel to `ResolveCtx` if `capabilities.streaming_resolve` is to publish before the child exits; add a `ProgressSink` to `ResolveCtx` if resolution logs should reach the item's event stream | WP-12 |
+| Port `_post_download_cleanup` for the paths no provider reports (tmp dir, SC segment dir) — Δ C18 | WP-12 |
+| Build the `notice` frame from `DomainEvent::as_notice()`; assert the delta field list against `ItemView::FIELDS`; decide whether to special-case a `{phase, phase_percent}`-only frame (see `audio_sync::frame`) | WP-13 |
+| Fill `ytdl_options_presets.choices` from `YTDL_OPTIONS_PRESETS`; serve `match: null` for a `catalog?url=` that matches nothing; surface `PluginManifest.warnings` next to `ReloadReport.failed` in `healthz` and `GET api/v2/providers`; serve `import::stored_report` at `GET api/v2/import-report` | WP-14 |
+| Map any legacy video selection onto `mp4`/`best` for a provider whose catalog is advisory (the SC case), or catalog validation rejects a request legacy accepted | WP-15 |
+| Filter `Canceled` items out of `GET history` rather than relying on `Status::v1()`'s defensive `"error"`; call `get_format_raw`/`get_opts_raw`, not the typed forms | WP-15 |
+| Define the `HookFinalizer` newtype over the engine handle in `aulos-server` and pass it to `HookDispatcher::with_finalizer` — without it a `best_remux` item never finalises | WP-16 |
+| Take `health_handle()` **before** `spawn`; wire the dispatcher as the WP-11 note spells out | WP-16 |
+| Call `config::load_with_warnings()` **and** `YtdlOptions::load(...)`, merging both reports before the single exit-2 step | WP-17 |
+| `Registry::set_command_loader(CommandPluginLoader::with_env(PluginEnv { state_dir }))` at boot, or `{cookies_file}` renders empty | WP-17 |
+| Schedule the six-hourly checkpoint and `await store.close()` on shutdown; ask for `pub async fn checkpoint(&self)` rather than reaching into `schema` | WP-17 |
+| Run the importer only when the DB file did not exist, and handle `ImportFatal` as the WP-05 note describes | WP-17 |
+| Add `crates/aulos-provider-ytdlp/tests/smoke_extract.sh` and `tests/e2e/run.sh` — each turns on a CI step that no-ops today | WP-18 |

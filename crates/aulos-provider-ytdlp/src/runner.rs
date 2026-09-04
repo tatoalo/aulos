@@ -267,6 +267,9 @@ impl RunnerHandle {
             .stderr_ring(STDERR_RING_LINES, STDERR_RING_BYTES)
             .max_line_bytes(self.max_line_bytes)
             .kill_grace(self.kill_grace)
+            // DESIGN §9.1: the child's stderr reaches `tracing` **as it arrives**, classified by
+            // yt-dlp's own prefixes. The bounded ring still keeps the tail for `error.message`.
+            .stderr_line_hook(log_child_line)
             .env(EnvPolicy {
                 // The shim's environment is part of its contract: `YTDL_*`, the proxy variables,
                 // the locale and the POT plugin's own settings all come from the process env.
@@ -368,7 +371,10 @@ impl RunnerHandle {
         if let Some(identity) = &consumer.identity {
             self.remember(identity);
         }
-        drain_stderr(&stderr, pid);
+        // Every line has already reached `tracing` through `log_child_line`; the ring is only the
+        // tail quoted back to the user. `wait`/`kill_group` do not join the drain, so settle it
+        // first or the tail is a race (see the WP-11 entry in `docs/INTEGRATION-NOTES.md`).
+        child.drained().await;
         let tail = stderr.tail(STDERR_TAIL_BYTES);
 
         match outcome {
@@ -480,19 +486,20 @@ pub async fn run_job(
     RunnerHandle::default().run(&job, sink, cancel).await
 }
 
-/// Logs the child's retained stderr, classifying yt-dlp's own `ERROR:` / `WARNING:` lines.
+/// Logs one line of the child's stderr, classifying yt-dlp's own `ERROR:` / `WARNING:` prefixes
+/// (DESIGN §9.1).
 ///
-/// DESIGN §9.1 asks for this per line as it arrives; `aulos_provider::proc::Child` owns the
-/// (mandatory, deadlock-avoiding) drain and exposes the ring rather than a line stream, so the
-/// classification happens once at the end of the job instead. The information is the same; only
-/// its timing differs.
-fn drain_stderr(ring: &aulos_provider::proc::StderrRing, pid: u32) {
-    for line in ring.lines() {
-        if line.starts_with("ERROR") || line.starts_with("WARNING") {
-            tracing::warn!(target: "ytdlp.child", pid, "{line}");
-        } else {
-            tracing::debug!(target: "ytdlp.child", pid, "{line}");
-        }
+/// Installed as the [`SpawnSpec::stderr_line_hook`], so it runs on the mandatory drain the moment
+/// a line is complete — a 40-minute download's warnings are visible while it is still running,
+/// not only in the post-mortem. It must stay cheap: it is on the drain task, and a stalled drain
+/// is a deadlocked child.
+///
+/// [`SpawnSpec::stderr_line_hook`]: aulos_provider::proc::SpawnSpec::stderr_line_hook
+fn log_child_line(pid: u32, line: &str) {
+    if line.starts_with("ERROR") || line.starts_with("WARNING") {
+        tracing::warn!(target: "ytdlp.child", pid, "{line}");
+    } else {
+        tracing::debug!(target: "ytdlp.child", pid, "{line}");
     }
 }
 
@@ -982,7 +989,7 @@ impl<'a> Consumer<'a> {
 /// [`ProviderError::message`] caps at 512 characters, and it truncates from the **front** — so
 /// quoting the whole 8 KiB tail would fill the message with the oldest, least useful noise and
 /// throw away the actual error. The last few hundred characters are where the diagnosis is; the
-/// full tail is still in the logs, via [`drain_stderr`].
+/// full tail is still in the logs, via [`log_child_line`].
 const TAIL_IN_MESSAGE: usize = 360;
 
 /// The end of `tail`, at most [`TAIL_IN_MESSAGE`] characters, on a character boundary.

@@ -79,10 +79,18 @@ impl FakeClock {
     }
 }
 
+/// `2026-03-04T00:00:00Z` in Unix milliseconds — [`FakeClock::default`]'s epoch.
+pub const DEFAULT_FAKE_EPOCH_MS: UnixMs = 1_772_582_400_000;
+
 impl Default for FakeClock {
-    /// `2026-09-04T00:00:00Z`, a fixed instant so snapshots are stable.
+    /// `2026-03-04T00:00:00Z`, a fixed instant so snapshots are stable.
+    ///
+    /// The date is arbitrary — only its fixedness matters — but it is load-bearing for every
+    /// `insta` snapshot stamped from this clock, so it must not move. The doc comment used to
+    /// claim September while the value said March; `the_default_epoch_is_the_date_it_claims`
+    /// keeps the two in step.
     fn default() -> Self {
-        Self::new(1_772_582_400_000)
+        Self::new(DEFAULT_FAKE_EPOCH_MS)
     }
 }
 
@@ -120,6 +128,17 @@ mod tests {
     #[tokio::test]
     async fn fake_clock_is_usable_as_a_trait_object() {
         let c: std::sync::Arc<dyn Clock> = std::sync::Arc::new(FakeClock::default());
-        assert_eq!(c.now_ms(), 1_772_582_400_000);
+        assert_eq!(c.now_ms(), DEFAULT_FAKE_EPOCH_MS);
+    }
+
+    /// The doc comment and the constant must agree: snapshots across four crates are stamped from
+    /// this epoch, and one that reads March under a comment promising September sends the next
+    /// reader looking for a bug that is not there.
+    #[test]
+    fn the_default_epoch_is_the_date_it_claims() {
+        // 2026-03-04T00:00:00Z. Days since the Unix epoch × 86_400_000.
+        let days = 20_516_i64;
+        assert_eq!(DEFAULT_FAKE_EPOCH_MS, days * 86_400_000);
+        assert_eq!(FakeClock::default().now_ms(), DEFAULT_FAKE_EPOCH_MS);
     }
 }

@@ -231,7 +231,7 @@ pub async fn download_ffmpeg(
         (true, Some(size)) => Ok(Outcome::file(names.rel.clone(), size)),
         _ => {
             let code = status.code().unwrap_or(1);
-            let tail = settled_tail(&child.stderr()).await;
+            let tail = settled_tail(&mut child).await;
             tracing::error!(code, stderr = %tail, "FFmpeg failed");
             let mut msg = format!("FFmpeg failed with code {code}");
             if !tail.is_empty() {

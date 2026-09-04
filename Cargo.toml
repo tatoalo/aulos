@@ -101,6 +101,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # design; BRIEF allows dropping to plain `reqwest` if it will not build (feature
 # `sc-impersonate` in `aulos-provider-sc`).
 wreq = "6.0.0-rc.31"
+# Missing from DESIGN §18.6, added by the wave-1 integration pass at WP-08's request: `wreq`
+# itself ships only `Emulation`/`EmulationBuilder`, while the named browser profiles — the real
+# JA3/JA4 cipher/curve/sigalg tables and Chrome's HTTP/2 SETTINGS *order* — live here. Pinned to
+# the rc for the same reason `wreq` is: the 3.x line has no stable release yet.
+wreq-util = { version = "3.0.0-rc.14", default-features = false, features = ["emulation"] }
 scraper = "0.23"
 
 # --- tls ---

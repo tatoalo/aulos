@@ -331,11 +331,9 @@ async fn an_extraction_that_yielded_nothing_uses_the_verbatim_legacy_message() {
         .expect_err("zero entries is an error");
     assert!(matches!(e, ProviderError::Unsupported(_)));
     assert_eq!(e.code(), ErrorCode::UnsupportedUrl);
-    // The text is carried verbatim. `ProviderError::Unsupported`'s `Display` adds an
-    // `"unsupported url: "` prefix that every other message-bearing variant does not — see the
-    // WP-07 entry in `docs/INTEGRATION-NOTES.md`, because DESIGN §11.7 needs this string
-    // byte-identical on the wire.
-    assert!(e.message().contains(EMPTY_DATA), "{}", e.message());
+    // The text is carried verbatim, with no prefix: DESIGN §8.4 and §11.7 need this string
+    // byte-identical on the wire (the v1 shim echoes it as `{"status":"error","msg":…}`).
+    assert_eq!(e.message(), EMPTY_DATA);
 }
 
 #[tokio::test]

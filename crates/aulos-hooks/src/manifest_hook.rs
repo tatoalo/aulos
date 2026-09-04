@@ -99,33 +99,13 @@ impl ManifestHook {
 
     /// DESIGN §13.4's `when.*` allow-lists, evaluated against the wire view.
     ///
-    /// [`aulos_provider::command::HookFilter::matches`] takes an `Item`, which this crate never
-    /// has (see [`crate::hook`]); the three axes are reproduced here with identical semantics,
-    /// including "an item with no provider fails a `when.provider` filter rather than passing it".
+    /// Delegates to [`aulos_provider::command::HookFilter::matches_view`], which is the single
+    /// implementation of the three axes — including "an item with no provider fails a
+    /// `when.provider` filter rather than passing it". This crate never holds an `Item`
+    /// (see [`crate::hook`]), which is why the view form exists.
     #[must_use]
     pub fn filter_matches(&self, item: &ItemView) -> bool {
-        let when = &self.spec.when;
-        if !when.provider.is_empty() {
-            let ok = item
-                .provider
-                .as_ref()
-                .is_some_and(|p| when.provider.iter().any(|want| **want == **p));
-            if !ok {
-                return false;
-            }
-        }
-        if !when.download_type.is_empty()
-            && !when.download_type.contains(&item.selection.download_type)
-        {
-            return false;
-        }
-        if !when.folder_prefix.is_empty() {
-            let folder = item.folder.as_deref().unwrap_or("");
-            if !when.folder_prefix.iter().any(|p| folder.starts_with(&**p)) {
-                return false;
-            }
-        }
-        true
+        self.spec.when.matches_view(item)
     }
 
     /// The template context for one invocation (DESIGN §13.4's token table).

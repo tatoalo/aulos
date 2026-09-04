@@ -52,6 +52,10 @@ jobs:
       - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
       - run: cargo test --workspace --locked
+      # PLAN WP-08 requires both SC client feature combinations to run in CI. `--all-features`
+      # above only ever exercises the impersonating `wreq` path; this is the plain `reqwest` one,
+      # which is what runs wherever BoringSSL is unavailable.
+      - run: cargo test -p aulos-provider-sc --no-default-features --locked
 
   arch:
     # The DESIGN §3 dependency-direction rules (A1-A5, WP-03) plus the WP-01 packaging gates: the

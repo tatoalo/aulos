@@ -176,6 +176,41 @@ impl Rlimits {
     }
 }
 
+/// A real-time observer for the child's stderr lines (DESIGN §9.1).
+///
+/// The mandatory drain is the only reader of the stderr pipe, so it is the only place a line can
+/// be seen *as it arrives*; a consumer that reads [`StderrRing`] after the job instead gets the
+/// same information at the wrong time (and only the retained tail of it). Installed with
+/// [`SpawnSpec::stderr_line_hook`], it is called once per line with the child's pid, on the drain
+/// task, before the line reaches the ring.
+///
+/// It must not block: a slow observer slows the drain, and a *stalled* drain is the deadlock this
+/// module exists to prevent. Log from it; do not do IO in it.
+#[derive(Clone)]
+pub struct StderrLineHook(StderrLineObserver);
+
+/// The boxed observer behind [`StderrLineHook`]: `(pid, line)`.
+type StderrLineObserver = Arc<dyn Fn(u32, &str) + Send + Sync>;
+
+impl StderrLineHook {
+    /// Wraps an observer.
+    #[must_use]
+    pub fn new(f: impl Fn(u32, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Calls the observer.
+    pub fn call(&self, pid: u32, line: &str) {
+        (self.0)(pid, line);
+    }
+}
+
+impl std::fmt::Debug for StderrLineHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StderrLineHook(..)")
+    }
+}
+
 /// How a child process is to be spawned.
 ///
 /// Built with the chained setters; every default is the safe one (own process group, `nice(5)`,
@@ -196,6 +231,7 @@ pub struct SpawnSpec {
     max_line_bytes: usize,
     kill_grace: Duration,
     stderr_tap: Option<mpsc::Sender<Vec<u8>>>,
+    stderr_line_hook: Option<StderrLineHook>,
 }
 
 impl SpawnSpec {
@@ -222,6 +258,7 @@ impl SpawnSpec {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             kill_grace: DEFAULT_KILL_GRACE,
             stderr_tap: None,
+            stderr_line_hook: None,
         }
     }
 
@@ -321,6 +358,23 @@ impl SpawnSpec {
     #[must_use]
     pub fn stderr_tap(mut self, tx: mpsc::Sender<Vec<u8>>) -> Self {
         self.stderr_tap = Some(tx);
+        self
+    }
+
+    /// Observes every stderr **line** as the drain reads it (DESIGN §9.1).
+    ///
+    /// [`Self::stderr_tap`]'s sibling for consumers that want lines rather than raw chunks and
+    /// want them *now* rather than at the end of the job: `f` is called with the child's pid and
+    /// one complete line, on the drain task, before the line reaches the ring. The ring and the
+    /// tap are unaffected.
+    ///
+    /// This is how the yt-dlp shim's stderr reaches `tracing` at DEBUG (WARN for `ERROR:` /
+    /// `WARNING:`) while the job is still running, which is what DESIGN §9.1 asks for and what
+    /// reading [`StderrRing`] after the fact cannot do. `f` must not block — see
+    /// [`StderrLineHook`].
+    #[must_use]
+    pub fn stderr_line_hook(mut self, f: impl Fn(u32, &str) + Send + Sync + 'static) -> Self {
+        self.stderr_line_hook = Some(StderrLineHook::new(f));
         self
     }
 
@@ -702,6 +756,8 @@ pub struct Child {
     stdin: Option<ChildStdin>,
     stdout: Option<Lines<ChildStdout>>,
     stderr: StderrRing,
+    /// The mandatory stderr drain, kept so [`Child::wait_drained`] can join it.
+    drain: Option<tokio::task::JoinHandle<()>>,
     kill_grace: Duration,
     reaped: bool,
 }
@@ -749,14 +805,16 @@ impl Child {
             .map(|o| Lines::new(o, spec.tool, spec.max_line_bytes));
 
         let stderr = StderrRing::new(spec.ring_lines, spec.ring_bytes);
+        let mut drain = None;
         if let Some(pipe) = child.stderr.take() {
             let ring = stderr.clone();
             let tool = spec.tool;
             let tap = spec.stderr_tap.clone();
+            let line_hook = spec.stderr_line_hook.clone();
             // The mandatory drain (DESIGN §2.3). It ends when the pipe closes, i.e. when the child
             // exits, so it cannot outlive the job.
             let cap = spec.ring_bytes.max(4096);
-            tokio::spawn(async move {
+            drain = Some(tokio::spawn(async move {
                 let mut reader = BufReader::new(pipe);
                 let mut line: Vec<u8> = Vec::new();
                 loop {
@@ -782,7 +840,11 @@ impl Child {
                     }
                     for b in chunk {
                         if b == b'\n' || line.len() >= cap {
-                            ring.push(&String::from_utf8_lossy(&line));
+                            let text = String::from_utf8_lossy(&line);
+                            if let Some(hook) = &line_hook {
+                                hook.call(pid, &text);
+                            }
+                            ring.push(&text);
                             line.clear();
                         }
                         if b != b'\n' {
@@ -791,9 +853,13 @@ impl Child {
                     }
                 }
                 if !line.is_empty() {
-                    ring.push(&String::from_utf8_lossy(&line));
+                    let text = String::from_utf8_lossy(&line);
+                    if let Some(hook) = &line_hook {
+                        hook.call(pid, &text);
+                    }
+                    ring.push(&text);
                 }
-            });
+            }));
         }
 
         tracing::debug!(tool = spec.tool, pid, argv = ?spec.argv(), "spawned");
@@ -804,6 +870,7 @@ impl Child {
             stdin,
             stdout,
             stderr,
+            drain,
             kill_grace: spec.kill_grace,
             reaped: false,
         })
@@ -859,6 +926,52 @@ impl Child {
         })?;
         self.reaped = true;
         Ok(status)
+    }
+
+    /// The bound [`Self::wait_drained`] puts on joining the stderr drain.
+    pub const DRAIN_JOIN_GRACE: Duration = Duration::from_millis(250);
+
+    /// Waits for the child to exit **and** for the mandatory stderr drain to reach end of stream.
+    ///
+    /// [`Self::wait`] reaps the child without joining the drain task, so reading
+    /// [`Self::stderr`]'s tail the instant it returns is a race — the last chunk can still be in
+    /// the pipe, and the tail comes back empty about one run in twenty. Anything that puts the
+    /// stderr tail in a user-visible error message (DESIGN §6.5.3, §9.6) should wait here.
+    ///
+    /// The join is bounded by [`Self::DRAIN_JOIN_GRACE`], because a pipe closes only when *every*
+    /// writer closes it: a grandchild that inherited stderr and outlived its parent must not be
+    /// able to wedge the caller. A timeout is logged at debug and leaves the tail as it stands.
+    ///
+    /// # Errors
+    /// As [`Self::wait`]. A drain that panicked or timed out is logged, not returned — the exit
+    /// status is the caller's answer either way.
+    pub async fn wait_drained(&mut self) -> Result<ExitStatus, ProcError> {
+        let status = self.wait().await?;
+        self.drained().await;
+        Ok(status)
+    }
+
+    /// Waits for the mandatory stderr drain to reach end of stream, bounded by
+    /// [`Self::DRAIN_JOIN_GRACE`].
+    ///
+    /// [`Self::wait_drained`] is the one-call form. This is the same guarantee for a caller that
+    /// already has the exit status — the `select!` loops that race stdout, cancellation and the
+    /// exit (DESIGN §6.5.3, §10.5) get their status from the `select!` and only then want a
+    /// settled tail. Idempotent: a second call is a no-op.
+    pub async fn drained(&mut self) {
+        let Some(handle) = self.drain.take() else {
+            return;
+        };
+        match tokio::time::timeout(Self::DRAIN_JOIN_GRACE, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::debug!(tool = self.tool, error = %e, "stderr drain task ended abnormally");
+            }
+            Err(_) => tracing::debug!(
+                tool = self.tool,
+                "stderr drain did not settle; a grandchild may still hold the pipe"
+            ),
+        }
     }
 
     /// Kills the whole process group: `SIGTERM`, then `SIGKILL` after the grace period.

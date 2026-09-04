@@ -245,7 +245,7 @@ pub async fn gapless_mux(
     match (status.success(), size) {
         (true, Some(size)) => Ok(size),
         _ => {
-            let tail = crate::engines::settled_tail(&child.stderr()).await;
+            let tail = crate::engines::settled_tail(&mut child).await;
             tracing::error!(status = ?status.code(), tail = %tail, "the gapless mux failed");
             Err(ProviderError::Postprocessing(
                 crate::engines::MSG_MUX_FAILED.to_owned(),

@@ -26,6 +26,7 @@ use std::time::Duration;
 use aulos_core::config::Config;
 use aulos_core::paths::RelPath;
 use aulos_provider::outcome::Outcome;
+use aulos_provider::proc::Child;
 use aulos_provider::provider::{DownloadCtx, ProviderError};
 use aulos_provider::sink::{ProgressSink, Stage};
 use regex::Regex;
@@ -75,26 +76,16 @@ pub fn error_tail(lines: &[String]) -> String {
     joined.chars().skip(n - TAIL_CHARS).collect()
 }
 
-/// How long [`settled_tail`] waits for the stderr drain to catch up.
-const TAIL_SETTLE: Duration = Duration::from_millis(5);
-/// How many times it waits.
-const TAIL_SETTLE_TRIES: u32 = 20;
-
-/// [`error_tail`] of a child's stderr ring, after giving the drain a moment to catch up.
+/// [`error_tail`] of a child's stderr ring, once the drain has reached end of stream.
 ///
 /// `proc::Child`'s stderr drain is a separate task (it has to be: an undrained pipe deadlocks the
 /// child), so a child's last lines may still be in flight at the instant `wait()` returns.
 /// Quoting the ring immediately therefore *sometimes* produced `FFmpeg failed with code 3` with no
-/// reason attached — the error message a user sees would depend on task scheduling. Waiting up to
-/// 100 ms for the ring to fill costs nothing on a path that has already failed.
-pub async fn settled_tail(ring: &aulos_provider::proc::StderrRing) -> String {
-    for _ in 0..TAIL_SETTLE_TRIES {
-        if !ring.is_empty() {
-            break;
-        }
-        tokio::time::sleep(TAIL_SETTLE).await;
-    }
-    error_tail(&ring.lines())
+/// reason attached — the error message a user sees would depend on task scheduling.
+/// [`Child::drained`] joins the drain instead of polling for it, so the tail is deterministic.
+pub async fn settled_tail(child: &mut Child) -> String {
+    child.drained().await;
+    error_tail(&child.stderr().lines())
 }
 
 /// The characters legacy replaced with `_` in a title (`app/ytdl.py:574`).

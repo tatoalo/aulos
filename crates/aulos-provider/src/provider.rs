@@ -152,7 +152,12 @@ impl std::fmt::Display for MatchReason {
 pub enum ProviderError {
     /// This provider does not understand the URL after all. **The one retryable-through-the-
     /// runner-up variant** (DESIGN §6.4).
-    #[error("unsupported url: {0}")]
+    ///
+    /// The message is carried **verbatim**, with no prefix: DESIGN §8.4 and §11.7 require
+    /// `Invalid/empty data was given.` and `Unsupported resource "<etype>"` byte-identical on the
+    /// wire (the v1 shim echoes them as `{"status":"error","msg":…}` and the shipped iOS build
+    /// matches on the first). [`Self::code`] is what says the failure was an unsupported URL.
+    #[error("{0}")]
     Unsupported(String),
     /// Credentials or cookies are required (login, members-only, private).
     #[error("{0}")]
@@ -696,6 +701,22 @@ mod tests {
             ProviderError::Network("ERROR: ERROR: HTTP Error 503".into()).message(),
             "HTTP Error 503"
         );
+    }
+
+    /// DESIGN §8.4 / §11.7: these two strings reach the v1 shim byte-identical, so no variant may
+    /// decorate them. A `#[error("unsupported url: {0}")]` on `Unsupported` broke exactly this.
+    #[test]
+    fn the_verbatim_legacy_messages_are_undecorated() {
+        for text in [
+            "Invalid/empty data was given.",
+            "Unsupported resource \"unknown\"",
+        ] {
+            let e = ProviderError::Unsupported(text.into());
+            assert_eq!(e.message(), text);
+            assert_eq!(e.to_string(), text);
+            let id = ProviderId::parse("ytdlp").unwrap();
+            assert_eq!(&*e.to_wire(&id, None).message, text);
+        }
     }
 
     #[test]

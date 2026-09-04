@@ -234,7 +234,7 @@ Workspace `resolver = "3"`, edition 2024, `rust-version = "1.95"`.
 | `aulos-store` | aulos-core, rusqlite(bundled), rusqlite_migration, ulid, base64, time, tokio | `lib` (`Store` handle), `actor`, `readers`, `schema`, `items`, `subscriptions`, `telegram`, `kv`, `alloc` (hi/lo allocators), `import`, `import::legacy_model` |
 | `aulos-provider` | aulos-core, tokio, tokio-util, toml, regex, nix, url | `provider`, `entry`, `sink`, `registry`, `outcome`, `proc`, `manifest` (`plugin.toml` model), `command`, `hookspec`, `humansize`, `fake` (feature `fake`) |
 | `aulos-provider-ytdlp` | aulos-core, aulos-provider, tokio, tokio-util, nix, command-fds, url | `lib`, `formats`, `opts`, `runner`, `progress`, `outtmpl`, `errmap`, `python/ytdlp_runner.py` (shipped asset) |
-| `aulos-provider-sc` | aulos-core, aulos-provider, tokio, tokio-util, wreq \| reqwest, scraper, regex, strip-ansi-escapes, url | `lib`, `http` (`ScHttp` trait), `inertia`, `watch`, `season`, `embed`, `jit`, `nm3u8dl`, `ffmpeg`, `mux`, `progress` |
+| `aulos-provider-sc` | aulos-core, aulos-provider, tokio, tokio-util, wreq + wreq-util \| reqwest, scraper, regex, strip-ansi-escapes, url, futures-util | `lib`, `http` (`ScHttp` trait), `inertia`, `watch`, `season`, `embed`, `jit`, `nm3u8dl`, `ffmpeg`, `mux`, `progress` |
 | `aulos-queue` | aulos-core, aulos-store, aulos-provider, tokio, tokio-util, arc-swap, bytes, smallvec, indexmap, rand, url | `engine`, `cmd`, `slots`, `priority`, `resolve`, `run`, `cancel`, `recovery`, `groups`, `clear`, `aggregator`, `hub`, `publish`, `ring`, `hookstore` (`EngineHookStore`, §13.3) |
 | `aulos-api` | aulos-core, aulos-store, aulos-queue, axum, axum-server, tower, tower-http, tokio, tokio-util, arc-swap, bytes, mime_guess, percent-encoding, sha2, url, rustls, rustls-pemfile, metrics, metrics-exporter-prometheus | `lib`, `v2/*`, `ws`, `v1`, `files`, `health`, `metrics`, `error`, `cors`, `trace`, `auth` |
 | `aulos-telegram` | aulos-core, aulos-store, aulos-queue, teloxide, governor, indexmap, rand, tokio, tokio-util, url | `bot`, `commands`, `config_ui`, `urls`, `watch`, `render`, `limiter` |
@@ -2451,7 +2451,9 @@ hook (§13.3).
 | Option | Verdict |
 |---|---|
 | **`wreq`** (the maintained rename of `rquest`; BoringSSL, Chrome JA3/JA4 + HTTP/2 fingerprint) | **Primary**, behind cargo feature `sc-impersonate` (default on for `x86_64-unknown-linux-gnu`). Legacy relies on `curl_cffi impersonate="chrome"`; the vixcloud/Cloudflare fronting is fingerprint-sensitive and losing it silently breaks every SC download. |
+| **`wreq-util`** (the profile tables) | **Required with `wreq`.** `wreq` ships only `Emulation`/`EmulationBuilder`; the named browser profiles — the actual cipher/curve/sigalg lists, GREASE, extension permutation and Chrome's HTTP/2 SETTINGS and pseudo-header *order* — live in this separate crate. A hand-built `TlsOptions` gets a Chrome-*shaped* ClientHello, not a byte-exact JA3/JA4. `http::impersonate` uses `Profile::Chrome131`, which must stay in step with the `USER_AGENT` and `sec-ch-ua` this crate sends. |
 | plain **`reqwest`** (rustls) with hand-set Chrome headers | **Compiled-in fallback**, always present. Selected by `AULOS_SC_HTTP=plain`, and the only client used in the test matrix (no BoringSSL in CI). |
+| the pinned versions | `wreq = 6.0.0-rc.31` and `wreq-util = 3.0.0-rc.14`. Both 6.x/3.x lines are still release candidates, and Cargo will not match a prerelease from a bare `"6"`/`"3"` requirement. Verified to compile and link on the pinned 1.95 toolchain (WP-08), so the BRIEF's plain-`reqwest` escape hatch is **not** taken and `sc-impersonate` stays default-on. The builder stage and the `clippy`/`test`/`release` CI jobs must keep their `cmake clang libclang-dev` installs for the vendored BoringSSL and bindgen. |
 | shipping `curl-impersonate` in the image | **Rejected.** A third code path for the least likely case. If Cloudflare escalates to a JS challenge, TLS impersonation is not enough anyway and the answer is a `command` plugin, which is exactly what the plugin system is for. |
 
 Both sit behind one trait, so the scraping logic is client-agnostic and unit-testable against
@@ -4468,6 +4470,7 @@ four changes that matter:
 | `governor` | 0.8 | per-chat + global GCRA token buckets, no background task |
 | `reqwest` | 0.12 | Jellyfin, POT probe, hook HTTP, SC `plain` mode; `rustls-tls`, no OpenSSL |
 | `wreq` | 6 | Chrome TLS/HTTP2 impersonation for SC (feature `sc-impersonate`) |
+| `wreq-util` | 3 | the named Chrome fingerprint profiles `wreq` itself does not ship (feature `sc-impersonate`) |
 | `scraper` | 0.23 | html5ever CSS selection for the SC pages |
 | `quick-xml` | 0.38 | NFO writing with correct escaping |
 | `strip-ansi-escapes` | 0.2 | N_m3u8DL-RE / Spectre.Console frame cleaning |

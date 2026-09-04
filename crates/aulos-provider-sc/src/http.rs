@@ -7,7 +7,7 @@
 //!
 //! | Implementation | Feature | Selected by |
 //! |---|---|---|
-//! | [`WreqClient`] — BoringSSL, Chrome cipher/curve/sigalg lists, Chrome HTTP/2 settings | `sc-impersonate` (default on) | `AULOS_SC_HTTP=auto` (when compiled in) or `=impersonate` |
+//! | [`WreqClient`] — BoringSSL with `wreq-util`'s real Chrome 131 TLS and HTTP/2 profile | `sc-impersonate` (default on) | `AULOS_SC_HTTP=auto` (when compiled in) or `=impersonate` |
 //! | [`PlainClient`] — `reqwest` + rustls with hand-set Chrome headers | always | `AULOS_SC_HTTP=plain`, or `auto` with the feature off |
 //!
 //! Everything above this module is client-agnostic, which is what makes the pipeline testable
@@ -319,34 +319,14 @@ mod impersonate {
         ScInitError, ScReq, ScRes, USER_AGENT, Url, async_trait,
     };
 
-    /// Chrome's TLS 1.3 + TLS 1.2 cipher preference, in BoringSSL's cipher-list syntax.
+    /// The Chrome build this client claims to be.
     ///
-    /// This is the list `curl-impersonate`/`curl_cffi`'s `chrome` target sends, which is what
-    /// legacy was fingerprinted as.
-    const CHROME_CIPHERS: &str = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:\
-         TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-         ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:\
-         ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
-         AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
-
-    /// Chrome's supported-groups list. Deliberately the conservative three rather than a
-    /// post-quantum group name a given BoringSSL vintage may not know: an unknown name makes
-    /// `ClientBuilder::build()` fail, and a working fingerprint-shaped client beats no client.
-    const CHROME_CURVES: &str = "X25519:P-256:P-384";
-
-    /// Chrome's signature-algorithm list.
-    const CHROME_SIGALGS: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
-         ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:\
-         rsa_pkcs1_sha512";
-
-    /// Chrome's `SETTINGS_INITIAL_WINDOW_SIZE`.
-    const H2_INITIAL_WINDOW: u32 = 6_291_456;
-    /// Chrome's connection-level window.
-    const H2_CONNECTION_WINDOW: u32 = 15_728_640;
-    /// Chrome's `SETTINGS_HEADER_TABLE_SIZE`.
-    const H2_HEADER_TABLE: u32 = 65_536;
-    /// Chrome's `SETTINGS_MAX_HEADER_LIST_SIZE`.
-    const H2_MAX_HEADER_LIST: u32 = 262_144;
+    /// It must agree with [`USER_AGENT`] and the `sec-ch-ua` value in `CHROME_HEADERS`: a JA3/JA4
+    /// from one Chrome version behind a user agent from another is a *worse* signal to a bot
+    /// filter than no impersonation at all. `wreq-util` owns the table itself — the cipher, curve
+    /// and sigalg lists, GREASE, extension permutation, and Chrome's HTTP/2 SETTINGS and
+    /// pseudo-header **order**, none of which a hand-built `TlsOptions` can express.
+    pub(super) const CHROME_PROFILE: wreq_util::Profile = wreq_util::Emulation::Chrome131;
 
     /// `wreq` over BoringSSL with a Chrome TLS and HTTP/2 profile.
     pub struct WreqClient {
@@ -371,28 +351,20 @@ mod impersonate {
         headers
     }
 
+    /// Chrome 131's real fingerprint, with this crate's header set layered on top.
+    ///
+    /// `wreq-util`'s profile already carries Chrome's own headers in Chrome's own order; the few
+    /// this crate overrides are the site-specific ones (the Italian `accept-language` legacy
+    /// scraped with) plus the user agent, so the impersonating and the plain `reqwest` client
+    /// present one identical header set. Overriding an existing key keeps its position in the
+    /// map, so the emulated header order survives.
     fn chrome_emulation() -> wreq::Emulation {
-        let tls = wreq::tls::TlsOptions::builder()
-            .cipher_list(CHROME_CIPHERS)
-            .curves_list(CHROME_CURVES)
-            .sigalgs_list(CHROME_SIGALGS)
-            .grease_enabled(true)
-            .permute_extensions(true)
-            .enable_ocsp_stapling(true)
-            .enable_signed_cert_timestamps(true)
-            .session_ticket(true)
-            .build();
-        let http2 = wreq::http2::Http2Options::builder()
-            .initial_window_size(H2_INITIAL_WINDOW)
-            .initial_connection_window_size(H2_CONNECTION_WINDOW)
-            .header_table_size(H2_HEADER_TABLE)
-            .max_header_list_size(H2_MAX_HEADER_LIST)
-            .build();
-        wreq::Emulation::builder()
-            .tls_options(tls)
-            .http2_options(http2)
-            .headers(chrome_headers())
-            .build(wreq::Group::default())
+        let mut emulation = wreq::IntoEmulation::into_emulation(CHROME_PROFILE);
+        let ours = chrome_headers();
+        for (name, value) in &ours {
+            emulation.headers.insert(name.clone(), value.clone());
+        }
+        emulation
     }
 
     impl WreqClient {
@@ -623,8 +595,8 @@ mod tests {
     #[cfg(feature = "sc-impersonate")]
     fn the_chrome_profile_is_accepted_by_boringssl() {
         // `ClientBuilder::build()` constructs the connector eagerly, so this is a real assertion
-        // that the cipher, curve and sigalg strings parse — the failure mode that would otherwise
-        // only show up on the first download in production.
+        // that `wreq-util`'s Chrome tables are accepted by this BoringSSL vintage — the failure
+        // mode that would otherwise only show up on the first download in production.
         let c = WreqClient::new().expect("wreq client");
         assert!(
             c.impersonating(),
@@ -632,5 +604,31 @@ mod tests {
         );
         let selected = build_client(&cfg("impersonate")).expect("impersonate");
         assert!(selected.impersonating());
+    }
+
+    #[test]
+    #[cfg(feature = "sc-impersonate")]
+    fn the_fingerprint_and_the_user_agent_claim_the_same_chrome() {
+        // A JA3/JA4 from one Chrome version behind a user agent from another is a worse signal to
+        // a bot filter than no impersonation at all, and the two now come from different places:
+        // the table from `wreq-util`, the UA and `sec-ch-ua` from this file.
+        let preset = wreq::IntoEmulation::into_emulation(impersonate::CHROME_PROFILE);
+        let ua = preset
+            .headers
+            .get(wreq::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .expect("the profile must set a user agent")
+            .to_owned();
+        assert!(
+            ua.contains("Chrome/131."),
+            "the emulated profile is {ua}, but this crate advertises {USER_AGENT}"
+        );
+        assert!(USER_AGENT.contains("Chrome/131."), "{USER_AGENT}");
+        assert!(
+            CHROME_HEADERS
+                .iter()
+                .any(|(n, v)| *n == "sec-ch-ua" && v.contains("131")),
+            "sec-ch-ua must claim the same major"
+        );
     }
 }

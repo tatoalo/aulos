@@ -123,20 +123,14 @@ async fn a_megabyte_of_stderr_does_not_deadlock_the_child() {
     .expect("spawn");
     assert_eq!(first_line(&mut child).await, "done");
 
-    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait_drained())
         .await
         .expect("the child must not deadlock")
         .expect("wait");
     assert!(status.success());
 
+    // `wait_drained` joined the drain, so the ring is settled with no polling.
     let ring = child.stderr();
-    // The drain runs in its own task; give it a moment to see the pipe close.
-    for _ in 0..200 {
-        if !ring.is_empty() && ring.dropped() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     assert!(ring.lines().len() <= 64, "the ring is line-bounded");
     assert!(ring.dropped() > 1000, "most of a megabyte was evicted");
     assert!(ring.tail(2048).len() <= 2048, "the tail is byte-bounded");
@@ -274,4 +268,89 @@ async fn a_file_size_rlimit_stops_a_runaway_write() {
         written <= 4096,
         "RLIMIT_FSIZE must cap the file, got {written} bytes"
     );
+}
+
+#[tokio::test]
+async fn wait_drained_settles_the_stderr_tail_without_polling() {
+    // `wait` reaps the child without joining the drain task, so the tail read immediately after it
+    // came back empty about one run in twenty (the WP-11 entry in `docs/INTEGRATION-NOTES.md`).
+    // `wait_drained` is the fix, and every consumer that quotes stderr in an error message wants
+    // it. Repeated, because the race it closes is a race.
+    for _ in 0..25 {
+        let mut child = Child::spawn(&sh("echo boom >&2; exit 3")).expect("spawn");
+        let status = child.wait_drained().await.expect("wait");
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(
+            child.stderr().tail(2048),
+            "boom",
+            "the tail must be settled the instant wait_drained returns"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wait_drained_is_not_wedged_by_a_grandchild_holding_stderr() {
+    // A pipe closes only when every writer closes it. `sh` exits immediately here while its
+    // grandchild keeps the inherited stderr open, so an unbounded join would hang forever.
+    let mut child = Child::spawn(&sh("echo first >&2; sleep 60 & exit 0")).expect("spawn");
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait_drained())
+        .await
+        .expect("wait_drained must be bounded")
+        .expect("wait");
+    assert!(status.success());
+    // Whatever the lingering grandchild does, the exit status is still the caller's answer.
+    child.kill_group().await;
+}
+
+#[tokio::test]
+async fn the_stderr_line_hook_sees_lines_while_the_child_is_still_running() {
+    // DESIGN §9.1 wants the child's stderr in the log *as it arrives*, not in a post-mortem. The
+    // child here blocks on stdout until the hook has already seen its first two stderr lines, so
+    // "before the exit" is asserted rather than assumed.
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Vec<(u32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let spec = sh("echo one >&2; echo two >&2; echo ready; sleep 0.2; echo three >&2")
+        .stderr_line_hook(move |pid, line| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((pid, line.to_owned()));
+        });
+    let mut child = Child::spawn(&spec).expect("spawn");
+    let pid = child.pid();
+
+    assert_eq!(first_line(&mut child).await, "ready");
+    // The two lines printed before `ready` must already be in hand.
+    for _ in 0..200 {
+        if seen.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let early: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, l)| l.clone())
+        .collect();
+    assert_eq!(
+        early,
+        ["one", "two"],
+        "the hook must fire before the child exits"
+    );
+
+    child.wait_drained().await.expect("wait");
+    let all = seen.lock().unwrap().clone();
+    assert_eq!(
+        all.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(),
+        ["one", "two", "three"],
+        "and every line must arrive exactly once"
+    );
+    assert!(
+        all.iter().all(|(p, _)| *p == pid),
+        "each call carries the child's pid"
+    );
+    // The ring is unaffected by the hook.
+    assert_eq!(child.stderr().tail(2048), "one\ntwo\nthree");
 }

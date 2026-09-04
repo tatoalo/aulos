@@ -15,3 +15,19 @@ workspace = true
 [dev-dependencies]
 aulos-core = { workspace = true }
 toml = { workspace = true }
+# `tests/sc_import_equivalence.rs` is the one cross-crate assertion no single crate can own: it
+# needs the importer (`aulos-store`), the SC provider's resolution and state shape
+# (`aulos-provider-sc`) and the NFO renderer (`aulos-hooks`) in one process, and no provider crate
+# may dev-depend on the store (arch rule A1). The SC client feature does not matter here — the
+# assertion is about the state blob, not the TLS fingerprint — and the resolution runs against a
+# loopback `wiremock` server, so there is still no network at test time.
+aulos-store = { workspace = true }
+aulos-provider = { workspace = true }
+aulos-provider-sc = { workspace = true }
+aulos-provider-ytdlp = { workspace = true }
+aulos-hooks = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+url = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

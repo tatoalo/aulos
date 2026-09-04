@@ -94,7 +94,9 @@ pub async fn capture(
                     stdout.push('\n');
                 }
             }
-            child.wait().await
+            // `wait_drained` (not `wait`) so the stderr tail is settled the instant this
+            // returns: it is what the failure path quotes in the error message.
+            child.wait_drained().await
         };
         tokio::select! {
             () = cancel.cancelled() => Err(HookError::Canceled),
@@ -108,11 +110,7 @@ pub async fn capture(
 
     match outcome {
         Ok(status) => {
-            let stderr = if status.success() {
-                child.stderr().tail(STDERR_TAIL)
-            } else {
-                settled_stderr(&child).await
-            };
+            let stderr = child.stderr().tail(STDERR_TAIL);
             Ok(Captured {
                 success: status.success(),
                 code: status.code(),
@@ -130,23 +128,6 @@ pub async fn capture(
 
 /// How many bytes of stderr a failure reports.
 pub const STDERR_TAIL: usize = 2048;
-
-/// The stderr tail, once the drain has caught up.
-///
-/// `aulos_provider::proc::Child::wait` reaps the child without joining the stderr drain task, so
-/// reading the ring the instant `wait` returns is a race — the tail is empty about one run in
-/// twenty. This gives the drain a bounded chance to finish, and is only on the failure path,
-/// where the tail is the whole point of the error message.
-async fn settled_stderr(child: &Child) -> String {
-    for _ in 0..50 {
-        let tail = child.stderr().tail(STDERR_TAIL);
-        if !tail.is_empty() {
-            return tail;
-        }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    String::new()
-}
 
 /// `ffprobe -v error -select_streams v -show_entries stream=codec_type -of json` (DESIGN §13.3
 /// step 2): whether the file has at least one video stream.
