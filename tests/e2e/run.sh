@@ -315,10 +315,17 @@ v1_msg="$(req "${BASE}/history" | jget done.0.msg)"
 [ -z "$v1_msg" ] \
   && ok "v1 history: done[0].msg is null" \
   || fail "v1 history: done[0].msg=${v1_msg}"
-nfo_runs="$(req "${BASE}/healthz" | jget components.nfo.runs_total)"
+# `healthz` is rate-limited and answers a cached component set when polled again too soon (the
+# suite called it a moment ago), and the hooks run after the terminal write — so poll for a while.
+nfo_runs=0
+for _ in $(seq 1 30); do
+  nfo_runs="$(req "${BASE}/healthz" | jget components.nfo.runs_total)"
+  [ "${nfo_runs:-0}" -ge 1 ] 2>/dev/null && break
+  sleep 1
+done
 [ "${nfo_runs:-0}" -ge 1 ] 2>/dev/null \
   && ok "healthz: components.nfo.runs_total=${nfo_runs}" \
-  || fail "healthz: components.nfo.runs_total=${nfo_runs:-<absent>} after a completed download"
+  || fail "healthz: components.nfo.runs_total=${nfo_runs:-<absent>} 30 s after a completed download"
 
 # The file route, then the same route with a Range.
 full_code="$(code "${BASE}/${download_url}")"
