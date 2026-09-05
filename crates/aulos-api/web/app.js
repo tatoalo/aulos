@@ -48,6 +48,14 @@ function resolveUrl(u) {
   return ABSOLUTE.test(u) ? u : new URL(PREFIX + u.replace(/^\//, ''), location.origin).href;
 }
 
+/** `window.open`, but only on http(s): an imported `url` can carry any scheme. */
+function openExternal(u) {
+  let p;
+  try { p = new URL(u, location.href); } catch { /* not a URL */ }
+  if (p && (p.protocol === 'http:' || p.protocol === 'https:')) window.open(p.href, '_blank', 'noopener');
+  else toast('error', 'That link is not a web address.');
+}
+
 /* --------------------------------------------------------------- 2. icons */
 
 const P = {
@@ -135,6 +143,10 @@ let token = store.get('aulos.token', '') || '';
 
 const ACTIVE = new Set(['resolving', 'preparing', 'downloading', 'postprocessing']);
 const TERMINAL = new Set(['finished', 'error', 'canceled']);
+/** §3.1's closed vocabulary; anything else renders inert. */
+const KNOWN = new Set([...ACTIVE, 'queued', ...TERMINAL]);
+/** Completed rows kept in the DOM; `Show older` raises it. */
+let doneLimit = 200;
 
 /* --------------------------------------------------------------- 5. REST */
 
@@ -168,15 +180,19 @@ let ws = null;
 let backoff = 500;
 let reconnectTimer = null;
 let sawFrame = false;
+let probedAuth = false;
 
 function wsUrl() {
   const path = state.caps?.protocol?.ws_path || 'ws';
   const u = new URL(PREFIX + path.replace(/^\//, ''), location.href);
   u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (state.seq && state.bootId) { u.searchParams.set('since', String(state.seq)); u.searchParams.set('boot', state.bootId); }
-  if (token) u.searchParams.set('token', token);
   return u.toString();
 }
+
+// §1.4 takes the token as `bearer.<token>` in the subprotocol list, which — unlike
+// `?token=` — stays out of the proxy access log.
+const wsProtocols = () => (token ? ['aulos.v2', `bearer.${token}`] : ['aulos.v2']);
 
 function connect() {
   clearTimeout(reconnectTimer);
@@ -185,13 +201,15 @@ function connect() {
   sawFrame = false;
   setConn(state.seq ? 'reconnecting' : 'connecting');
   let sock;
-  try { sock = new WebSocket(wsUrl(), ['aulos.v2']); } catch { scheduleReconnect(); return; }
+  try { sock = new WebSocket(wsUrl(), wsProtocols()); } catch { scheduleReconnect(); return; }
   ws = sock;
   // No client `ping` timer: §5.11 makes every client → server frame optional, and the server
   // already pings at the WebSocket level every 20 s and closes a socket that stops answering.
-  sock.onopen = () => { backoff = 500; setConn('live'); };
+  // NOT `backoff = 500` here: an accepted upgrade is no working session — a server closing with
+  // 1013 (§5.1: back off) would pin this to a ~500 ms hot loop. A frame is what proves it.
+  sock.onopen = () => setConn('live');
   sock.onmessage = (ev) => {
-    sawFrame = true;
+    if (!sawFrame) { sawFrame = true; backoff = 500; probedAuth = false; }
     setConn('live');
     let frame;
     try { frame = JSON.parse(ev.data); } catch { return; }
@@ -202,9 +220,12 @@ function connect() {
     if (ws !== sock) return;
     ws = null;
     scheduleReconnect();
-    // An upgrade rejected for auth closes without ever delivering a frame and the browser hides
-    // the status code, so ask REST — it answers with the §1.5 envelope.
-    if (!sawFrame) api('api/v2/capabilities').catch(() => { /* needAuth already ran on 401 */ });
+    // An auth-rejected upgrade closes with no frame and hides its code, so ask REST — once per
+    // run of failures, not once per close, or a flap becomes a REST flood.
+    if (!sawFrame && !probedAuth) {
+      probedAuth = true;
+      api('api/v2/capabilities').catch(() => { /* needAuth already ran on 401 */ });
+    }
   };
 }
 
@@ -227,6 +248,13 @@ function applyFrame(f) {
       state.hasOlder = !!(f.truncated && f.truncated.done);
       state.cursor = null;
       kidsFetched.clear();
+      // §5.11: a fresh snapshot means re-asking a large group for its children. Open groups stay
+      // open — collapsing them every reconnect is its own bug — so re-fetch instead.
+      for (const gid of [...expanded]) {
+        const g = state.items.get(gid);
+        if (!g) expanded.delete(gid);
+        else if (g.children_inline === false) fetchKids(gid);
+      }
       break;
     }
     case 'resume':
@@ -256,7 +284,9 @@ function applyFrame(f) {
       }
       break;
     case 'providers':
-      loadCapabilities().catch(() => { /* keep the current picker */ });
+      // §5.9: capabilities *and* catalog — capabilities alone replaces a URL-refined picker
+      // mid-add with the generic ladder and loses the §4.6 notices.
+      loadCapabilities().then(() => { if (add.url.trim()) loadCatalog(); }).catch(() => { /* keep the picker */ });
       break;
     case 'error':
       toast('error', f.message || 'Protocol error');
@@ -284,9 +314,14 @@ function flush() {
   const all = sorted([...state.items.values()]);
   const top = all.filter((i) => !i.group_id);
 
-  const active = top.filter((i) => ACTIVE.has(i.status) || (i.status === 'queued' && i.auto_start));
+  // §3.1: an unknown status renders inert, not nowhere — `subFor`'s default branch labels it.
+  const active = top.filter((i) => ACTIVE.has(i.status) || (i.status === 'queued' && i.auto_start) || !KNOWN.has(i.status));
   const waiting = top.filter((i) => i.status === 'queued' && !i.auto_start);
-  const done = top.filter((i) => TERMINAL.has(i.status));
+  // ord-ascending, so the tail is newest: render a window of the completed history and evict the
+  // rest — which `Show older` pages back — or the DOM and the maps grow without bound.
+  const allDone = top.filter((i) => TERMINAL.has(i.status));
+  const done = allDone.slice(Math.max(0, allDone.length - doneLimit));
+  for (let i = 0; i < allDone.length - done.length; i++) { state.items.delete(allDone[i].id); state.hasOlder = true; }
 
   reconcile($('rows-active'), active);
   reconcile($('rows-waiting'), waiting);
@@ -519,17 +554,21 @@ function subFor(it) {
 
 /* ---------------------------------------------------- group children */
 
+/** §5.3: a `children_inline: false` group has no children in the snapshot. */
+function fetchKids(id) {
+  if (kidsFetched.has(id)) return;
+  kidsFetched.add(id);
+  api(`api/v2/items?group_id=${encodeURIComponent(id)}&limit=200`)
+    .then((r) => { for (const it of r.items || []) state.items.set(it.id, it); markDirty(); })
+    .catch((e) => { kidsFetched.delete(id); if (e.code !== 'unauthorized') toast('error', e.message); });
+}
+
 function toggleGroup(id) {
   if (expanded.has(id)) expanded.delete(id);
   else {
     expanded.add(id);
     const g = state.items.get(id);
-    if (g && g.children_inline === false && !kidsFetched.has(id)) {
-      kidsFetched.add(id);
-      api(`api/v2/items?group_id=${encodeURIComponent(id)}&limit=200`)
-        .then((r) => { for (const it of r.items || []) state.items.set(it.id, it); markDirty(); })
-        .catch((e) => toast('error', e.message));
-    }
+    if (g && g.children_inline === false) fetchKids(id);
   }
   markDirty();
 }
@@ -619,8 +658,8 @@ function actsFor(it) {
 async function runAction(id, action) {
   const it = state.items.get(id);
   if (!it) return;
-  if (action === 'open') { const u = resolveUrl(it.download_url); if (u) window.open(u, '_blank', 'noopener'); return; }
-  if (action === 'source') { window.open(it.url, '_blank', 'noopener'); return; }
+  if (action === 'open') { const u = resolveUrl(it.download_url); if (u) openExternal(u); return; }
+  if (action === 'source') { openExternal(it.url); return; }
   if (action === 'copy') {
     try { await navigator.clipboard.writeText(it.url); toast('info', 'Link copied'); }
     catch { toast('error', 'Could not copy the link'); }
@@ -664,7 +703,7 @@ function pickerFromCapabilities(caps) {
   const byType = new Map();
   for (const f of caps.formats || []) {
     const t = f.download_type;
-    if (!byType.has(t)) byType.set(t, { id: t, label: cap1(t), formats: [] });
+    if (!byType.has(t)) byType.set(t, { id: t, label: cap1(t), default_format: null, formats: [] });
     byType.get(t).formats.push({
       id: f.id,
       label: f.text || f.id,
@@ -699,7 +738,12 @@ function pickerFromCatalog(cat) {
 }
 
 function currentType() { return picker.types.find((t) => t.id === add.download_type) || picker.types[0]; }
-function currentFormat() { const t = currentType(); return t && (t.formats.find((f) => f.id === add.format) || t.formats[0]); }
+// §4.6: honour the type's `default_format`; `formats[0]` is `Any` where it said `MP4`.
+function currentFormat() {
+  const t = currentType();
+  const at = (id) => t.formats.find((f) => f.id === id);
+  return t && (at(add.format) || at(t.default_format) || t.formats[0]);
+}
 
 function qualityLabel(formatId, qualityId) {
   for (const t of picker.types) {
@@ -910,8 +954,12 @@ let theme = store.get('aulos.theme', '') || DEFAULT_THEME;
 function applyTheme() {
   const dark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.mode = dark ? 'dark' : 'light';
-  const tc = meta('theme-color');
-  if (tc) tc.content = dark ? '#000000' : '#F2F2F7';
+  // Two media-scoped `theme-color` tags ship in the document so an installed PWA paints its
+  // toolbar right before this module runs. After it, the resolved theme is the answer.
+  for (const tc of document.querySelectorAll('meta[name="theme-color"]')) {
+    tc.removeAttribute('media');
+    tc.content = dark ? '#000000' : '#F2F2F7';
+  }
   const btn = $('theme-btn');
   btn.innerHTML = icon(theme === 'auto' ? 'auto' : theme === 'light' ? 'sun' : 'moon', 20, 1.8);
   btn.setAttribute('aria-label', `Theme: ${theme === 'auto' ? 'system' : theme}`);
@@ -988,31 +1036,61 @@ function openMenu(anchor, id) {
 function onDocDown(e) { if (!$('menu').contains(e.target)) closeMenu(); }
 function closeMenu() { $('menu').hidden = true; }
 
-/* sheets */
+/* sheets — `aria-modal` is a promise: inert behind, Tab cycles inside, focus returns. */
 
-function openSheet() {
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+let sheetReturn = null;
+
+/** The sheet on top (the token sheet stacks over the add sheet), or null. */
+const topSheet = () => (!$('token-sheet').hidden ? $('token-sheet') : $('sheet').hidden ? null : $('sheet'));
+
+
+function inertBg(on) {
+  for (const bg of [$('hdr'), $('wrap')]) {
+    bg.inert = on;
+    if (on) bg.setAttribute('aria-hidden', 'true'); else bg.removeAttribute('aria-hidden');
+  }
+}
+
+function openOverlay(el, focus) {
+  if (!topSheet()) sheetReturn = document.activeElement;
   $('scrim').hidden = false;
-  $('sheet').hidden = false;
-  $('sheet-url').focus();
+  el.hidden = false;
+  inertBg(true);
+  focus.focus();
 }
 
-function closeSheet() {
-  $('sheet').hidden = true;
-  if ($('token-sheet').hidden) $('scrim').hidden = true;
+function closeOverlay(el) {
+  el.hidden = true;
+  if (topSheet()) return;
+  $('scrim').hidden = true;
+  inertBg(false);
+  const back = sheetReturn;
+  sheetReturn = null;
+  if (back && back.isConnected) back.focus();
 }
+
+function trapTab(e) {
+  const sheet = e.key === 'Tab' && topSheet();
+  if (!sheet) return;
+  const items = [...sheet.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null);
+  if (!items.length) return;
+  const at = document.activeElement;
+  if (at === (e.shiftKey ? items[0] : items[items.length - 1]) || !sheet.contains(at)) {
+    e.preventDefault();
+    (e.shiftKey ? items[items.length - 1] : items[0]).focus();
+  }
+}
+
+function openSheet() { openOverlay($('sheet'), $('sheet-url')); }
+function closeSheet() { closeOverlay($('sheet')); }
+function closeToken() { closeOverlay($('token-sheet')); }
 
 function needAuth() {
   setConn('auth');
   if (!$('token-sheet').hidden) return;
-  $('scrim').hidden = false;
-  $('token-sheet').hidden = false;
   $('token-input').value = token;
-  $('token-input').focus();
-}
-
-function closeToken() {
-  $('token-sheet').hidden = true;
-  if ($('sheet').hidden) $('scrim').hidden = true;
+  openOverlay($('token-sheet'), $('token-input'));
 }
 
 /* boot */
@@ -1103,7 +1181,10 @@ function wire() {
       const q = new URLSearchParams({ status: 'finished,error,canceled', order: 'ord', limit: '50' });
       if (state.cursor) q.set('cursor', state.cursor);
       const r = await api(`api/v2/items?${q}`);
-      for (const it of r.items || []) if (!state.items.has(it.id)) state.items.set(it.id, it);
+      const fetched = r.items || [];
+      for (const it of fetched) if (!state.items.has(it.id)) state.items.set(it.id, it);
+      // Grow the cap by what was revealed, or the window drops what the user just asked for.
+      doneLimit += fetched.length;
       state.cursor = r.next_cursor || null;
       state.hasOlder = !!r.next_cursor;
       markDirty();
@@ -1117,16 +1198,19 @@ function wire() {
     if (token) store.set('aulos.token', token); else store.del('aulos.token');
     closeToken();
     backoff = 500;
+    probedAuth = false;
     boot();
   });
   $('token-cancel').addEventListener('click', closeToken);
   $('token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-save').click(); });
 
+  document.addEventListener('keydown', trapTab);
+
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     closeMenu();
-    if (!$('sheet').hidden) closeSheet();
-    else if (!$('token-sheet').hidden) closeToken();
+    if (!$('token-sheet').hidden) closeToken();
+    else if (!$('sheet').hidden) closeSheet();
   });
 
   // Paste anywhere outside a field → focus the URL field and fill it.
