@@ -1,10 +1,10 @@
 name: docker
 
 # DESIGN §18.4, SIMPLIFIED by the BRIEF v1.0 scope trims: linux/amd64 only (no QEMU, no arm64),
-# push to GHCR on master and tags. `trivy` and the `syft` SBOM are CUT.
+# push to GHCR on main and tags. `trivy` and the `syft` SBOM are CUT.
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ['v*']
     paths-ignore: ['**.md']
   pull_request:
@@ -69,7 +69,7 @@ jobs:
           context: .
           file: docker/Dockerfile
           platforms: linux/amd64
-          push: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))) || inputs.push }}
+          push: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || inputs.push }}
           load: ${{ github.event_name == 'pull_request' }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}

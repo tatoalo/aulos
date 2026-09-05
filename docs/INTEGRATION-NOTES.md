@@ -1919,7 +1919,7 @@ Recorded because each is the kind of thing an integration pass would otherwise r
 
 ### Things the integrator (or the owning crate) should act on
 
-- **`aulos-provider-ytdlp`: the shim logs at ERROR when the parent kills it.** Confirmed in the
+- **`aulos-provider-ytdlp`: the shim logs at ERROR when the parent kills it.** **APPLIED (final integration).** `ytdlp_runner.py`'s `__main__` grew a `BrokenPipeError` arm that writes a `DEBUG:` line and exits `EXIT_CANCELED`, ahead of the `OSError` arm that used to catch it. Confirmed in the
   container: 0.1 s after `wiring` reports `the shutdown grace expired with downloads still running;
   killing them active=1`, the Python shim writes `ERROR: ytdlp_runner protocol channel failed:
   [Errno 32] Broken pipe` on the way out. The parent closing the pipe it is killing the child
@@ -1928,7 +1928,7 @@ Recorded because each is the kind of thing an integration pass would otherwise r
   it stands — `aulos-server` forwards it at WARN, and the e2e's ERROR sweep now anchors on the
   `tracing` level field rather than the message text — but it reads as a failure in a log a user
   is looking at after a restart, which is the one moment they *are* looking.
-- **`aulos-queue`: `Engine::run` cannot terminate.** `Engine` keeps a clone of its **own**
+- **`aulos-queue`: `Engine::run` cannot terminate.** **APPLIED (final integration)**, by the `EngineCmd::Shutdown` route below rather than by `drop(self.tx)`: an ack the caller can wait on is what lets step 6 stay inside the engine. `wiring::shutdown_tasks`'s aborts are gone. `Engine` keeps a clone of its **own**
   `EngineCmd` sender (`Engine::tx`, handed to every job task), so `rx.recv()` never returns `None`
   however many `EngineHandle`s the process drops. Combined with the fact that the aggregator, the
   hook dispatcher and the Telegram actor each hold an `EngineHandle` *and* wait on an `EventInbox`
@@ -1942,7 +1942,7 @@ Recorded because each is the kind of thing an integration pass would otherwise r
   **The clean fix is one line in `aulos-queue`**: `Engine::run` should `drop(self.tx)` after taking
   `rx` (job tasks hold their own clones), or `EngineCmd` should grow a `Shutdown` variant. Either
   would let this module delete the aborts.
-- **`aulos-queue`: no shutdown command, so DESIGN §16.4 step 6 is written from outside.** The
+- **`aulos-queue`: no shutdown command, so DESIGN §16.4 step 6 is written from outside.** **APPLIED (final integration).** `EngineCmd::Shutdown { ack }` + `EngineHandle::shutdown() -> ShutdownReport` + `Engine::handle_shutdown`, which captures the ids, cancels, writes `queued`/`SHUTDOWN_MSG` and ends the loop as one uninterrupted sequence. `crates/aulos-queue/tests/shutdown.rs` pins it; `wiring` now calls it instead of writing the rows itself. The
   interrupted ids are captured from the published snapshot *before* the jobs are killed, and after
   the engine settles they are rewritten `queued` with `msg = "Interrupted by shutdown"` and
   `auto_start = true` through `aulos_store::WriteOp::SetStatus`. The store has exactly one writer,
@@ -1951,42 +1951,42 @@ Recorded because each is the kind of thing an integration pass would otherwise r
   Verified against a real yt-dlp download: `handing interrupted downloads back to the next boot
   count=1`, then `boot recovery … scheduled=1`, then the item reads `downloading | Interrupted by
   shutdown`.
-- **`aulos-core`: `EventInbox::dropped()` is unreadable after the inbox is moved.** The counter is
+- **`aulos-core`: `EventInbox::dropped()` is unreadable after the inbox is moved.** **APPLIED (final integration).** `EventInbox::dropped_handle() -> Arc<AtomicU64>`, taken in `wiring` before `spawn` consumes the inbox, so `healthz.components.events.dropped.telegram` is measured rather than reported as `0`. The counter is
   an `Arc<AtomicU64>` the router and the inbox share, but the inbox is consumed by
   `TelegramActor::spawn`, so `healthz.components.events.dropped.telegram` is reported as `0` rather
   than measured. `HooksHealth::events_dropped` gives the hooks half honestly. An additive
   `EventInbox::dropped_handle() -> Arc<AtomicU64>` (or `EventRouter::dropped_counter(name)`) closes
   it in four lines. Every drop is still WARN-logged by the router itself.
-- **`aulos-telegram`: no `health_handle()`.** `TelegramActor::health()` needs `&self` and `spawn`
+- **`aulos-telegram`: no `health_handle()`.** **APPLIED (final integration).** `TelegramActor::health_handle() -> TelegramHealthHandle`, taken before `spawn`; `edits_throttled_total` now moves after boot. `TelegramActor::health()` needs `&self` and `spawn`
   consumes the actor, so `components.telegram` is published once, after `load()`, and
   `edits_throttled_total` stops at its boot value. `HookDispatcher::health_handle()` is the shape
   to copy.
-- **`aulos-telegram`: `TelegramActor::new` hides its `teloxide::Bot`.** `transport::poll_updates`
+- **`aulos-telegram`: `TelegramActor::new` hides its `teloxide::Bot`.** **APPLIED (final integration).** `TelegramActor::bot() -> Option<teloxide::Bot>` (`None` after `with_transport`, which has no token), so `wiring::spawn_telegram` polls the bot `new` built instead of rebuilding one. `telegram_will_run` stays, for the reason the next bullet gives. `transport::poll_updates`
   needs one, so the wiring builds `TeloxideTransport` itself and uses `with_transport` — which
   means the three startup gates of `new` are reproduced in `wiring::telegram_will_run`. A
   `TelegramActor::bot()` accessor, or a `new` that returns the bot alongside the actor, would
   remove the duplication. (`telegram_will_run` is needed anyway: see the next bullet.)
-- **`aulos-provider`: `HookSpec` is not `Clone`.** `CommandPluginLoader::hooks()` caches
+- **`aulos-provider`: `HookSpec` is not `Clone`.** **APPLIED (final integration).** `#[derive(Clone)]` on `HookSpec` and `HookAction`; `bootstrap::build_registry` reads the loader's cached specs and no longer walks the plugin directory a second time. `CommandPluginLoader::hooks()` caches
   `Arc<HookSpec>` for a later re-scan, but `HookDispatcher::new` and `ManifestHook::new` both take
   an **owned** `HookSpec`, and the loader's `Arc` cannot be unwrapped because the loader keeps a
   reference. `bootstrap::build_registry` therefore walks the plugin directory a second time with
   `command::scan_with` to get owned specs. Either `#[derive(Clone)]` on `HookSpec` or a
   `ManifestHook::from_arc(Arc<HookSpec>)` would drop the second walk.
-- **`aulos-store`: no `checkpoint()`.** DESIGN §7.1 asks for `wal_checkpoint(TRUNCATE)` "on
+- **`aulos-store`: no `checkpoint()`.** **APPLIED (final integration).** `Store::checkpoint()` over a `WriteMsg::Checkpoint` the writer runs after the in-flight batch commits; `wiring` schedules it six-hourly. DESIGN §7.1 asks for `wal_checkpoint(TRUNCATE)` "on
   graceful shutdown **and every 6 h**". The shutdown half is `Store::close()`; the six-hourly half
   is **not implemented**, because the only route to a `PRAGMA` from here is `Store::read`, whose
   `&Connection` parameter cannot be named without a `rusqlite` dependency that `tests/arch.rs`
   rule A2 forbids. `pragma wal_autocheckpoint = 512` already bounds the WAL and `healthz` reports
   `wal_bytes`, so nothing is unbounded — but an additive `pub async fn checkpoint(&self)` would let
   the wiring schedule it in three lines.
-- **`.github/workflows/docker.yml`'s PR smoke step will fail.** It runs
+- **`.github/workflows/docker.yml`'s PR smoke step will fail.** **APPLIED (final integration).** The line is now `if docker run --rm "$img" healthcheck; then …exit 1; fi` — the non-zero exit is asserted rather than tolerated, so an "always exit 0" regression fails the build. It runs
   `docker run --rm "$img" healthcheck` under `set -eu`, and `healthcheck` against a *stopped*
   server exits **1** by design (DESIGN §3.1, and PLAN WP-17 asks for exactly that). The line was
   written when the subcommand printed "not implemented" and exited 0. `docker run --rm "$img"
   healthcheck || true` — or better, dropping the line, since the `URL_PREFIX=metube` container
   check two lines below already proves the subcommand works — fixes it. `.github/` is not this
   package's to edit.
-- **`aulos-core`: `HealthRegistry`'s roll-up cannot produce the DESIGN §16.3 payload.** `set()`
+- **`aulos-core`: `HealthRegistry`'s roll-up cannot produce the DESIGN §16.3 payload.** **APPLIED (final integration)** in `aulos-core`, as the bullet's own "proper fix" asked: `HealthView::roll_up()` caps the worst component at `degraded` unless `is_fatal()` holds, and `HealthRegistry::set` uses it. The two local workarounds stay — they are independently right — but they are no longer load-bearing. `set()`
   recomputes `HealthView.status` as the **worst** component (`fold(Ok, worse)`), so a single `down`
   component makes the whole view `down` — while `aulos-api`'s `healthz` still answers `200`,
   because §16.3 reserves `503` for an unusable store or a runaway WAL. §16.3's own example payload
@@ -2003,7 +2003,7 @@ Recorded because each is the kind of thing an integration pass would otherwise r
   line in `aulos-core`: cap the roll-up at `Degraded` unless the fatal condition holds, i.e.
   `if worst == Down && name != "store" { Degraded }` — or let `HealthView` carry the roll-up and
   the fatal flag separately.
-- **`aulos-core`: an engine-task panic cannot be discriminated in a panic hook.**
+- **`aulos-core`: an engine-task panic cannot be discriminated in a panic hook.** **NOT APPLIED — no fix exists on stable.** Both routes the bullet names are still unstable (`tokio::task::Builder::name` needs `tokio_unstable`), so this stands as a known limitation rather than an open task.
   `signals::install_panic_hook` aborts on a panic on the store's writer **thread** (matched by
   name, cross-checked against `aulos-store`'s source by a test), which is DESIGN §16.4's rule for
   the store. The engine is a tokio *task*, not a named thread, and tokio exposes no "current task
@@ -2167,3 +2167,87 @@ occurrence will say why:
   the `pystub` package into a shared `__pycache__` (CPython's write is atomic, so this was wasted
   work rather than the race it looked like — but the test runs the shim once and has no use for a
   cache it leaves behind in a checked-in fixture directory).
+
+---
+
+## Final integration — workspace gates, the still-open bullets, README, docker + e2e
+
+The pass that finishes the build. It owns no new feature work: it re-runs every gate over the
+whole workspace, closes the requests the per-package notes left addressed to "the integrator",
+rebuilds the image, re-runs the end-to-end suite against it, and writes the README.
+
+### The gates
+
+All four are green on this commit, from a cold `cargo` state:
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` | 80 test binaries, 0 failed |
+| `cargo test -p aulos-workspace-tests` | 10 passed (arch A1–A5 + the packaging gates) |
+
+And the three checks CI runs that the four gates do not, so the first Actions run is not the place
+they are discovered:
+
+| CI-only check | Result |
+|---|---|
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo test -p aulos-provider-sc --no-default-features --locked` (the plain `reqwest` path) | 5 passed |
+| `shellcheck --severity=warning` over the three shipped scripts | clean |
+| `ruff` + `py_compile` + `shim_contract.py` + `tools/capture/verify.py` | clean, `131 v1 case(s) verified` |
+
+**Nothing was deleted, weakened or `#[ignore]`d to get there** — the WIP commit's edits were
+already correct, they had simply never been compiled together. The one "ignored" line in the whole
+run is still the same ```` ```ignore ```` doc block in `aulos-store`'s `import::canonical`, for the
+reason wave 1 recorded.
+
+### The carried-forward bullets
+
+Every request in this file addressed to the integrator or to an owning crate is now marked
+**APPLIED** at its own bullet, with the shape it landed in. Ten of the eleven were closed; the
+eleventh — discriminating an engine-task panic in the panic hook — is marked **NOT APPLIED**,
+because both routes it names still require `tokio_unstable`. It is a known limitation, not an open
+task.
+
+Two of them were closed in the crate that owned the problem rather than worked around downstream,
+which is worth recording because the notes had proposed both fixes and both had a cheaper local
+alternative:
+
+- **`HealthRegistry::roll_up` caps at `degraded`** in `aulos-core`, so DESIGN §16.3's own example
+  payload — `"status": "degraded"` wrapped around a `down` `pot` — is representable. `aulos-server`
+  and `tests/e2e/run.sh` keep their own defences (an optional tool's component is `degraded`, and
+  `healthcheck` decides on the HTTP status rather than the body's word), but they are no longer
+  the only thing standing between a missing `deno` and Docker restarting a healthy container.
+- **`EngineCmd::Shutdown { ack }`** puts DESIGN §16.4 step 6 back inside the engine. It is what
+  let `wiring::shutdown_tasks` delete the abort dance it had documented as a workaround: the engine
+  now ends its own loop, so the realtime chain closes by dropping senders, the way §16.4 describes.
+
+### Two defects this pass found on its own
+
+1. **Neither `ci.yml` nor `docker.yml` would ever have run.** Both were written with
+   `on: push: branches: [master]` and `docker.yml` gated its GHCR push on
+   `github.ref == 'refs/heads/master'`, but the repository's default branch is **`main`**. Every
+   push to `main` would have triggered nothing at all — no fmt, no clippy, no tests, no image —
+   and the failure mode is silence, which is the worst kind: a green-looking repository with no
+   evidence behind it. Both files now say `main`. (`release.yml` and `update-yt-dlp.yml` are tag-
+   and schedule-triggered and were never affected.)
+2. **`docker/compose.example.yml` pointed at an image that is never published.** It read
+   `ghcr.io/tatoalo/aulos-server:latest`, which is the name DESIGN §18.3 was written with, before
+   the repository was named `aulos`. `docker.yml` publishes `ghcr.io/${GITHUB_REPOSITORY}`, i.e.
+   `ghcr.io/tatoalo/aulos`. A user copying the example would have got a pull failure on the first
+   command of the quickstart. The compose file now carries the real name and a comment saying why
+   it differs from the design text. **DESIGN.md §18.3/§19 still say `aulos-server`** and are left
+   alone here: the fix belongs with whoever decides the published package name, and changing the
+   design's prose from an integration pass would hide the decision rather than record it.
+
+### README.md
+
+Rewritten from the WP-01 skeleton (which still said "Status: **skeleton**… `serve` binds nothing")
+into a quickstart: what Aulos is, a compose snippet adapted from `docker/compose.example.yml`, the
+first `curl`s, the pointer to the env var table (DESIGN §17.3) and to `PROTOCOL.md`, how to add a
+community plugin (DESIGN §6.5/§13.4 and `plugins/examples/`), how to import legacy MeTube state,
+and the dev commands — the four gates and the e2e. 204 lines, under the 250-line ceiling the task set. Every command and every JSON body in
+it was checked against the code rather than against the design: the `POST api/v2/downloads` body is
+the one `tests/e2e/run.sh` actually sends, and the `plugin.toml` fragment uses the placeholder
+vocabulary of the shipped `plugins/examples/bandcamp/plugin.toml`.

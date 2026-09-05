@@ -1,9 +1,13 @@
 # DESIGN §18.3. A drop-in replacement for the legacy MeTube-POT service: same env var names, same
 # volumes. `STATE_DIR` is unchanged on purpose — the importer reads the legacy JSON from it on
 # first start.
+#
+# The image tag is what `.github/workflows/docker.yml` actually publishes,
+# `ghcr.io/${GITHUB_REPOSITORY}` — DESIGN §18.3 was written as `aulos-server`, before the
+# repository was named `aulos`.
 services:
   aulos:
-    image: ghcr.io/tatoalo/aulos-server:latest
+    image: ghcr.io/tatoalo/aulos:latest
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]

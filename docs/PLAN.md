@@ -2,6 +2,12 @@
 
 Status: **binding**. Derived from `docs/DESIGN.md`; the wire contract is `docs/PROTOCOL.md`.
 
+**All 18 work packages (WP-00…WP-17) are complete, and so is the final integration pass.**
+This file has no per-package status table of its own; the one that is kept up to date is in
+`docs/STATUS.md`, and the deviations each package took from DESIGN are in
+`docs/INTEGRATION-NOTES.md`. Read the package sections below as the specification each one was
+built against, not as a to-do list.
+
 18 work packages in three waves (4 · 8 · 6). Every package is scoped to roughly one engineer-day of focused
 work, states the exact public interfaces it must expose or consume (signatures copied verbatim from
 DESIGN.md), names its dependencies on other packages, and lists acceptance tests plus a definition

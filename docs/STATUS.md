@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-04 22:45 (paused after WP-17; final integration interrupted). Update this file at every checkpoint.
+Last updated: 2026-09-05 (build complete: all 18 work packages plus the final integration pass). Update this file at every checkpoint.
 
 ## What this is
 
@@ -52,22 +52,32 @@ Read in this order when picking the project back up:
 | 15 | `aulos-api`: v1 compatibility shim (golden corpus replay) | done | 82c31d2 |
 | — | integrate wave 2 | green | (this commit) |
 | 17 | `aulos-server`: wiring, POT supervisor, config watcher, CLI, docker e2e | done — image built, `AULOS_E2E=1 tests/e2e/run.sh` PASS (real YouTube download via POT, restart-resume, legacy import) | 652396b |
-| — | final integration (workspace gates, README quickstart, PLAN status table, docker build + e2e rerun) | **interrupted** — partial edits committed as WIP, gates not re-verified | (wip commit) |
+| — | final integration (workspace gates, carried-forward bullets, README quickstart, docker build + e2e rerun) | **done** — four gates green, `AULOS_E2E=1 tests/e2e/run.sh` ends `END-TO-END: PASS` (35 assertions, 0 failures), README written | (this commit) |
 
 
-## ▶ RESUME HERE — the very last step of the build
+## ✅ Build complete
 
-The build was paused at 22:45 on 2026-09-04 while the *final integration* agent was mid-way. Its
-partial edits are committed as `wip: final integration pass (interrupted…)`. To finish (≈30–60 min
-for one agent):
+Every work package (WP-00…WP-17) and the final integration pass are done, on `main`.
 
-1. `cd ~/Development/aulos_server && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo test -p aulos-workspace-tests` — fix whatever the WIP commit broke (the integrator was touching CI workflows, telegram/store/queue glue, `crates/aulos-queue/tests/shutdown.rs`, `crates/aulos-provider-ytdlp/tests/smoke_extract.sh`).
-2. Apply any still-open bullets in `docs/INTEGRATION-NOTES.md`.
-3. `docker build -f docker/Dockerfile -t aulos-server:dev .` then `AULOS_E2E=1 tests/e2e/run.sh` (needs ≥ 20 GB free on the host; the shared `target/` dir grows fast — `rm -rf target/debug/incremental` is safe; if Docker reports a read-only filesystem, `orbctl stop && orbctl start`).
-4. Write the README quickstart (compose snippet from DESIGN §18.3, env var pointer to DESIGN §17.3, plugin how-to pointer to DESIGN §6.5/§13.4) and refresh the table above.
-5. Commit (no AI attribution), push `main`, confirm the first GitHub Actions run (`ci.yml`, `docker.yml`) is green and the image is on GHCR.
+- **Gates**: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (80 test binaries, 0 failed) and `cargo test -p aulos-workspace-tests`
+  (10 passed) are all green, as are the three checks CI runs that the four gates do not
+  (`clippy --all-features --locked`, `cargo test -p aulos-provider-sc --no-default-features`,
+  `shellcheck` over the three shipped scripts) and the `python` job.
+- **Image + e2e**: `docker build -f docker/Dockerfile -t aulos-server:dev .` produces a 796 MB
+  `linux/arm64` image (CI builds `linux/amd64`), and `AULOS_E2E=1 tests/e2e/run.sh` ends in
+  `END-TO-END: PASS` — 35 assertions, 0 failures, across both profiles, including a real 690 MB
+  CC-BY download through the supervised POT sidecar, a restart mid-download that resumes rather
+  than stranding the item, and a legacy `STATE_DIR` import with `errors: []`.
+- **Carried-forward bullets**: every request `docs/INTEGRATION-NOTES.md` left addressed to the
+  integrator is marked **APPLIED** at its own bullet. The one exception is marked **NOT APPLIED**
+  and says why: discriminating an engine-task panic in the panic hook needs `tokio_unstable`.
+- **Two defects the final pass found**: `ci.yml` and `docker.yml` triggered on `master` while the
+  default branch is `main`, so **no workflow would ever have run**; and
+  `docker/compose.example.yml` named `ghcr.io/tatoalo/aulos-server`, which `docker.yml` never
+  publishes (it pushes `ghcr.io/${GITHUB_REPOSITORY}`, i.e. `ghcr.io/tatoalo/aulos`). Both fixed.
 
-Then continue with "Next steps" below (review workflow → OrbStack smoke → iOS migration → cutover).
+Continue with "Next steps" below (review workflow → OrbStack smoke → iOS migration → cutover).
 
 ## How the work is being done
 
@@ -78,8 +88,7 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 
 ## Next steps (in order)
 
-1. Finish the final integration (see RESUME HERE above).
-2. **Review-and-fix workflow**: parallel reviewers (DESIGN conformance, PROTOCOL conformance, legacy
+1. **Review-and-fix workflow**: parallel reviewers (DESIGN conformance, PROTOCOL conformance, legacy
    parity vs `docs/reference/legacy-backend-spec.md`, security: path containment / SSRF / process
    kill, hot-path performance), adversarial verification of each finding, fix agents, repeat until
    dry. Then run the docker e2e again.
@@ -98,10 +107,17 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 
 ## Known open items (from INTEGRATION-NOTES.md)
 
-- **Two of WP-17's wiring steps are on its critical path**, and both fail silently rather than
-  loudly: the `HookFinalizer` + `Engine::with_pre_terminal` pair (without them a `best_remux` item
-  never finalises) and `Aggregator::with_done_total` (without it a restart reports `done_total` as
-  the done-window length). The wave-2 integration section lists all eight carried-forward items.
+- **No code request is open any more.** Every carried-forward bullet in INTEGRATION-NOTES.md is
+  marked APPLIED (WP-17 closed the nine addressed to it, including both ⚠ critical-path ones; the
+  final integration pass closed the eleven addressed to the integrator). The single **NOT APPLIED**
+  one is a stable-Rust limitation, not a task: an engine-task panic cannot be discriminated in a
+  panic hook without `tokio_unstable`, so such a panic is logged and the API then answers
+  `state_unavailable` rather than aborting the process the way a store-thread panic does.
+- **Documentation debt**: DESIGN.md §18.3/§19 still name the published image
+  `ghcr.io/tatoalo/aulos-server`, but `docker.yml` publishes `ghcr.io/tatoalo/aulos`
+  (`ghcr.io/${GITHUB_REPOSITORY}`). `docker/compose.example.yml` and README.md use the real name;
+  DESIGN was deliberately left alone, because which name is *correct* is the repository owner's
+  call — either rename the design text or add a `images:` override to `docker.yml`.
 - Five wave-0 deviations from DESIGN are recorded only in INTEGRATION-NOTES (types hoisted into
   `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl` in `aulos-provider`,
   `FormatSpec.flags.slow` placement, `ChatConfig` key count). DESIGN.md should be updated to match.
