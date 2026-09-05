@@ -37,6 +37,21 @@ fn hanging() -> FakeProvider {
     .unwrap()
 }
 
+/// A provider whose resolution hangs until cancelled, so the item is genuinely mid-resolve.
+fn slow_resolve() -> FakeProvider {
+    FakeProvider::from_toml(
+        r#"
+        id = "fake"
+        score = 200
+        hosts = ["fake.test"]
+
+        [[timeline]]
+        resolve = [{ kind = "hang" }]
+    "#,
+    )
+    .unwrap()
+}
+
 /// Waits until the engine's command channel has closed, i.e. `Engine::run` has returned.
 async fn until_stopped(h: &Harness) {
     for _ in 0..2_000 {
@@ -71,7 +86,10 @@ async fn shutdown_hands_a_running_download_back_as_queued_and_ends_the_loop() {
         "`canceled` is terminal and the next boot would never resume it"
     );
     assert_eq!(row.msg.as_deref(), Some(SHUTDOWN_MSG));
-    assert!(row.auto_start, "the next boot schedules it without asking");
+    assert!(
+        row.auto_start,
+        "under the default `resume` policy the next boot schedules it without asking"
+    );
 
     until_stopped(&h).await;
 
@@ -80,6 +98,56 @@ async fn shutdown_hands_a_running_download_back_as_queued_and_ends_the_loop() {
     let row = h.item(id).await.unwrap();
     assert_eq!(row.status, Status::Queued);
     assert_eq!(row.msg.as_deref(), Some(SHUTDOWN_MSG));
+}
+
+/// The shutdown write feeds boot recovery, so it has to apply the same DESIGN §8.9 policy.
+///
+/// `AULOS_RESTART_POLICY=pause` exists for an operator who wants to inspect before resuming. It
+/// used to work only after a *crash*: an ordinary `docker restart` runs this path first, and the
+/// hardcoded `auto_start = true` it wrote turned every parked row back into a scheduled one before
+/// recovery ever saw it.
+#[tokio::test]
+async fn the_pause_policy_hands_an_interrupted_download_back_parked() {
+    let h = Harness::builder()
+        .provider(Arc::new(hanging()))
+        .env("AULOS_RESTART_POLICY", "pause")
+        .build()
+        .await;
+    let id = h.add("https://fake.test/watch/hang").await;
+    h.until_status(id, Status::Downloading).await;
+
+    assert_eq!(h.handle.shutdown().await.interrupted, 1);
+    let row = h.item(id).await.expect("the row survives the shutdown");
+    assert_eq!(row.status, Status::Queued);
+    assert_eq!(row.msg.as_deref(), Some(SHUTDOWN_MSG));
+    assert!(
+        !row.auto_start,
+        "DESIGN §8.9: `pause` parks in-flight items, restart or crash"
+    );
+    until_stopped(&h).await;
+}
+
+/// An item added into the pending bucket still resolves (DESIGN §8.3). Being stopped mid-resolve
+/// must not turn it into a download the user never asked to start.
+#[tokio::test]
+async fn an_interrupted_resolution_keeps_its_pending_bucket() {
+    let h = Harness::builder()
+        .provider(Arc::new(slow_resolve()))
+        .build()
+        .await;
+    let mut req = support::request("https://fake.test/watch/slow");
+    req.auto_start = false;
+    let id = h.add_request(req).await.unwrap().ids[0];
+    h.until_status(id, Status::Resolving).await;
+
+    assert_eq!(h.handle.shutdown().await.interrupted, 1);
+    let row = h.item(id).await.expect("the row survives the shutdown");
+    assert_eq!(row.status, Status::Queued);
+    assert!(
+        !row.auto_start,
+        "it was never asked to start, so the next boot must not start it"
+    );
+    until_stopped(&h).await;
 }
 
 #[tokio::test]

@@ -80,6 +80,134 @@ async fn the_counters_follow_the_children_all_the_way_to_finished() {
     assert_eq!(view.percent, 100.0);
     assert_eq!(view.speed, None);
     assert_eq!(view.eta, None);
+    // PROTOCOL §3.3: the byte fields on a group are the child sums, and `total_bytes` is null.
+    assert_eq!(view.downloaded_bytes, Some(3 * 1_024));
+    assert_eq!(view.total_bytes_estimate, Some(3 * 1_024));
+    assert_eq!(
+        view.total_bytes, None,
+        "an exact total for a whole playlist is not knowable"
+    );
+}
+
+/// A child the user deletes stops counting. Without the accumulator bookkeeping the group kept
+/// the deleted child's status in its roll-up: two finished children out of two rendered as a
+/// **cancelled** playlist, because `counts[Canceled]` still held the row that no longer exists.
+#[tokio::test]
+async fn a_deleted_child_stops_counting_against_its_group() {
+    let h = Harness::builder()
+        .provider(Arc::new(expanding(3)))
+        .env("MAX_CONCURRENT_DOWNLOADS", "1")
+        .build()
+        .await;
+    let mut req = request("https://fake.test/playlist/deleted-child");
+    req.auto_start = false;
+    let group = h.add_request(req).await.unwrap().ids[0];
+    h.until_all("the children", |rows| rows.len() == 4).await;
+    let children = h.children(group).await;
+    assert_eq!(children.len(), 3);
+    let doomed = children[2].id;
+
+    h.handle
+        .actions(aulos_queue::Action::Cancel, vec![doomed], None)
+        .await;
+    h.until_status(doomed, Status::Canceled).await;
+    h.handle
+        .actions(aulos_queue::Action::Delete, vec![doomed], Some(false))
+        .await;
+    h.until_all("the child is gone", |rows| rows.len() == 3)
+        .await;
+
+    h.handle
+        .actions(aulos_queue::Action::Start, vec![group], None)
+        .await;
+    let row = h
+        .until(group, "the roll-up after the deletion", |i| {
+            i.status == Status::Finished
+        })
+        .await;
+    assert_eq!(row.status, Status::Finished);
+    h.settle().await;
+
+    let view = last_group_view(&h, group);
+    assert_eq!(view.children_done, Some(2));
+    assert_eq!(view.children_error, Some(0));
+    assert_eq!(
+        view.children_total,
+        Some(3),
+        "the declared count is a fact about the playlist, not about how many rows survive"
+    );
+    assert_eq!(view.percent, 100.0);
+}
+
+/// The five-minute drift pass rebuilds from the **item cache**, which holds only the most recent
+/// `AULOS_MEM_DONE_ITEMS` terminal rows. A group whose finished children have aged out of that
+/// window must be left alone: "correcting" against a partial view is how the pass that exists to
+/// remove drift ends up creating it.
+#[tokio::test]
+async fn the_drift_pass_leaves_a_group_whose_children_have_aged_out_alone() {
+    let provider = aulos_provider::fake::FakeProvider::from_toml(
+        r#"
+        id = "fake"
+        score = 200
+        hosts = ["fake.test"]
+
+        [[timeline]]
+        url_regex = "fake_index=3"
+        download = [
+            { kind = "stage", stage = "preparing" },
+            { kind = "stage", stage = "downloading" },
+            { kind = "hang" },
+        ]
+
+        [[timeline]]
+        url_regex = "playlist"
+        resolve = [{ kind = "expand_playlist", count = 3 }]
+
+        [[timeline]]
+        resolve = []
+    "#,
+    )
+    .unwrap();
+    let h = Harness::builder()
+        .provider(Arc::new(provider))
+        // One terminal row in memory, so the first finished child is evicted while the group is
+        // still live.
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .env("MAX_CONCURRENT_DOWNLOADS", "1")
+        .build()
+        .await;
+    let group = h.add("https://fake.test/playlist/aged-out").await;
+    h.until_all("two finished children and one running", |rows| {
+        rows.iter()
+            .filter(|i| i.status == Status::Finished && i.group_id == Some(group))
+            .count()
+            == 2
+    })
+    .await;
+    h.until(group, "the third child running", |i| {
+        i.status == Status::Downloading
+    })
+    .await;
+
+    // Past the five-minute drift window, then a write that republishes the group.
+    h.advance(Duration::from_secs(301)).await;
+    h.settle().await;
+    let third = h.children(group).await[2].id;
+    h.handle
+        .actions(aulos_queue::Action::Pause, vec![third], None)
+        .await;
+    h.until(third, "parked", |i| i.status == Status::Queued)
+        .await;
+    h.settle().await;
+
+    let view = last_group_view(&h, group);
+    assert_eq!(
+        view.children_done,
+        Some(2),
+        "the two finished children are still counted, cached or not"
+    );
+    assert_eq!(view.children_total, Some(3));
+    assert_eq!(view.status, Status::Queued, "one child is parked");
 }
 
 #[tokio::test]

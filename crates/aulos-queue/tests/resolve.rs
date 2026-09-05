@@ -122,6 +122,36 @@ async fn a_five_hundred_item_expansion_is_cheap_and_schedulable_immediately() {
     );
 }
 
+/// Promotion writes the group's own status, not just its `kind` and `children_total`.
+///
+/// The cache and the wire said `queued` while the persisted row still said `resolving` (with
+/// whatever `msg` the resolution left behind). Anything reading the row rather than the published
+/// snapshot disagreed with the socket, and a restart at that point had boot recovery re-queue a
+/// perfectly good group as an interrupted resolution.
+#[tokio::test]
+async fn a_promoted_group_persists_its_status_not_just_its_shape() {
+    let h = Harness::builder()
+        .provider(Arc::new(expanding(2)))
+        .build()
+        .await;
+    let mut req = request("https://fake.test/playlist/persisted");
+    // The pending bucket, so the children never leave `queued` and the roll-up stays put.
+    req.auto_start = false;
+    let id = h.add_request(req).await.unwrap().ids[0];
+    h.until_all("the children", |rows| rows.len() == 3).await;
+    h.settle().await;
+
+    let row = h.item(id).await.unwrap();
+    assert_eq!(row.kind, Kind::Group);
+    assert_eq!(
+        row.status,
+        Status::Queued,
+        "the persisted group agrees with the snapshot"
+    );
+    assert_eq!(row.msg, None, "and carries no leftover resolution message");
+    assert_eq!(row.error, None);
+}
+
 #[tokio::test]
 async fn the_playlist_item_limit_truncates_the_children() {
     let h = Harness::builder()

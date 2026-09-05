@@ -46,7 +46,7 @@
 //! `docs/INTEGRATION-NOTES.md`, WP-13, for the one input this loses (a queued child's
 //! `filesize_approx`, which lives in the entry blob and not on the wire) and what it costs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -343,6 +343,12 @@ fn acc_apply(acc: &mut GroupAcc, old: Option<ChildFacts>, new: Option<ChildFacts
 }
 
 /// Writes a group accumulator's progress roll-up onto the group's own row.
+///
+/// PROTOCOL §3.3: on a group, `downloaded_bytes` and `total_bytes_estimate` are the child sums and
+/// `total_bytes` is always `null` — an exact total for a whole playlist is not knowable until it
+/// finishes. The sum is `finished_bytes + downloaded`, the numerator §3.3's percent formula pairs
+/// against `total_est`, so the three numbers a client renders as "123 MB of 5.1 GB" agree with the
+/// bar in the same frame. Mirrored by `Engine::view`, which projects the same three fields.
 fn apply_group(acc: &GroupAcc, view: &mut ItemView) {
     view.percent = if view.status == Status::Finished {
         100.0
@@ -351,6 +357,9 @@ fn apply_group(acc: &GroupAcc, view: &mut ItemView) {
     };
     view.speed = acc.speed();
     view.eta = acc.eta();
+    view.downloaded_bytes = Some(acc.finished_bytes.saturating_add(acc.downloaded));
+    view.total_bytes_estimate = (acc.total_est > 0).then_some(acc.total_est);
+    view.total_bytes = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,16 +856,37 @@ impl Aggregator {
     }
 
     /// Drops every trace of a removed row.
+    ///
+    /// A removal for a record this aggregator is not holding is necessarily a **terminal** row
+    /// that aged out of the bounded done window: `current` holds every non-terminal record (boot
+    /// recovery replays them and `Added` announces every later one), and only [`Self::enter_done`]
+    /// ever evicts, which it does for done-bucket records only. That is why `done_total` comes
+    /// down either way — `EngineCmd::Clear` and the `CLEAR_COMPLETED_AFTER` sweep read terminal
+    /// rows straight out of SQLite, so most of what they remove was never in the window, and a
+    /// window-only decrement would leave the client paging for history that no longer exists.
     fn forget(&mut self, id: ItemId) {
-        if let Some(view) = self.current.remove(&id) {
-            self.counts.remove(view.status);
-            if bucket(&view) == Bucket::Done {
-                self.done_total = self.done_total.saturating_sub(1);
+        match self.current.remove(&id) {
+            Some(view) => {
+                self.counts.remove(view.status);
+                if bucket(&view) == Bucket::Done {
+                    self.done_total = self.done_total.saturating_sub(1);
+                }
+                self.membership_dirty = true;
+                self.state_dirty = true;
+                if let Some(group) = view.group_id {
+                    self.update_child(group, id, None);
+                }
             }
-            self.membership_dirty = true;
-            self.state_dirty = true;
-            if let Some(group) = view.group_id {
-                self.update_child(group, id, None);
+            None => {
+                if self.done_total > 0 {
+                    self.done_total -= 1;
+                    self.state_dirty = true;
+                }
+                // An evicted child keeps contributing to its group while it merely aged out of
+                // the window; a *removed* one no longer exists, so its facts go with it.
+                if let Some((group, _)) = self.child_facts.get(&id).copied() {
+                    self.update_child(group, id, None);
+                }
             }
         }
         self.last_sent.remove(&id);
@@ -953,6 +983,20 @@ impl Aggregator {
         // A dirty id with no baseline has never been sent. A `delta` may not introduce a record
         // (PROTOCOL §5.4), so it is promoted to an `added` upsert rather than dropped — unless a
         // full object for it is already queued in this same flush, which is the ordinary case.
+        // One `HashSet` over both queues rather than a linear scan of each per dirty id: a
+        // 500-child playlist expansion lands ~500 ids in `pending_added` and the same ~500 in
+        // `dirty` inside one urgent window, which is a quadratic scan on the realtime task at
+        // exactly the moment it is busiest.
+        let queued_full: HashSet<ItemId> = self
+            .pending_completed
+            .iter()
+            .copied()
+            .chain(
+                self.pending_added
+                    .iter()
+                    .flat_map(|(_, ids)| ids.iter().copied()),
+            )
+            .collect();
         let orphans: Vec<ItemId> = self
             .dirty
             .iter()
@@ -960,11 +1004,7 @@ impl Aggregator {
             .filter(|id| {
                 !self.last_sent.contains_key(id)
                     && self.current.contains_key(id)
-                    && !self.pending_completed.contains(id)
-                    && !self
-                        .pending_added
-                        .iter()
-                        .any(|(_, queued)| queued.contains(id))
+                    && !queued_full.contains(id)
             })
             .collect();
         if !orphans.is_empty() {
@@ -2003,6 +2043,42 @@ mod tests {
         }
     }
 
+    /// `Clear` (and the `CLEAR_COMPLETED_AFTER` sweep) removes terminal rows straight out of
+    /// SQLite, most of which the aggregator has never held. Decrementing only for records inside
+    /// the window left `done_total` counting history that no longer exists, so a client kept being
+    /// offered pages of it.
+    #[test]
+    fn clearing_history_from_outside_the_window_takes_done_total_with_it() {
+        let mut rig = Rig::new(&[("AULOS_MEM_DONE_ITEMS", "5")]);
+        let mut ids = Vec::new();
+        for i in 0..20 {
+            let v = view(Status::Downloading, i64::from(i));
+            ids.push(v.id);
+            rig.added(std::slice::from_ref(&v));
+            let mut done = (*v).clone();
+            done.status = Status::Finished;
+            rig.completed(&Arc::new(done));
+        }
+        rig.agg.flush();
+        let published = rig.state.load();
+        assert_eq!(published.done.len(), 5, "the window");
+        assert_eq!(published.done_total, 20, "the history behind it");
+        assert!(published.truncated.done);
+
+        rig.removed(&ids, RemoveReason::Cleared);
+        rig.agg.flush();
+        let published = rig.state.load();
+        assert!(published.done.is_empty());
+        assert_eq!(
+            published.done_total, 0,
+            "every terminal row went, window or not"
+        );
+        assert!(
+            !published.truncated.done,
+            "there is no history left to page for"
+        );
+    }
+
     #[test]
     fn a_retry_pulls_a_record_back_out_of_the_done_window() {
         let mut rig = Rig::new(&[]);
@@ -2060,6 +2136,14 @@ mod tests {
             group.percent
         );
         assert_eq!(group.speed, Some(1_024.0), "the sum over running children");
+        // PROTOCOL §3.3: the byte fields on a group are the child sums, so a client can render
+        // "500 B of 1 000 B" on the playlist header row.
+        assert_eq!(group.downloaded_bytes, Some(500), "the child sum");
+        assert_eq!(group.total_bytes_estimate, Some(1_000), "the child sum");
+        assert_eq!(
+            group.total_bytes, None,
+            "`total_bytes` on a group is always null"
+        );
         assert_eq!(
             group.children_active,
             Some(0),

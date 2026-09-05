@@ -292,6 +292,29 @@ async fn orphan_temp_files_are_logged_not_deleted_by_default() {
     assert!(!temp.join(ghost.to_string()).exists());
 }
 
+/// A resolved row owns **two** dedupe keys — the URL-derived one it was added under and the
+/// `media_id`-derived one resolution produced (DESIGN §8.5). Boot recovery used to reinstate only
+/// the second, so re-posting the very same URL after a restart quietly created a second item for
+/// the same video: the legacy bug §8.5 exists to close, reopened across the restart.
+#[tokio::test]
+async fn a_recovered_row_still_dedupes_the_url_it_was_added_under() {
+    const URL: &str = "https://fake.test/watch/dupe";
+    let mut seed = row(7, Status::Queued, false);
+    let url = url::Url::parse(URL).unwrap();
+    seed.url = url.clone();
+    seed.media_id = Some("fake:dupe".into());
+    seed.canonical_key = aulos_store::canonical_key("fake", URL, Some("fake:dupe"));
+    seed.request = DownloadRequest::new(url, selection());
+
+    let h = Harness::builder().seed(vec![seed]).build().await;
+    let outcome = h.add_request(support::request(URL)).await.unwrap();
+    assert!(
+        outcome.ids.is_empty(),
+        "the URL is already queued, so nothing new is minted"
+    );
+    assert_eq!(outcome.duplicates.len(), 1, "{outcome:?}");
+}
+
 #[tokio::test]
 async fn recovery_on_an_empty_database_finds_nothing() {
     let (_h, report) = Harness::builder().recovering().build_reporting().await;

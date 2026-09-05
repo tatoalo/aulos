@@ -366,6 +366,21 @@ impl Harness {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
+    /// Waits until a path is gone, or panics after two seconds.
+    ///
+    /// A delete's unlinks run on a blocking pool rather than on the engine task (DESIGN §8.2, §8.10
+    /// — a bulk clear is tens of thousands of syscalls and nothing waits on their result), so
+    /// "the file is gone" is an eventual assertion, not an immediate one.
+    pub async fn until_gone(&self, path: &Path) {
+        for _ in 0..4_000 {
+            if !path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_micros(500)).await;
+        }
+        panic!("timed out waiting for {} to be removed", path.display());
+    }
+
     /// The absolute download root.
     #[must_use]
     pub fn download_dir(&self) -> PathBuf {

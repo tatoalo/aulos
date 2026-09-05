@@ -255,6 +255,75 @@ async fn pause_from_downloading_keeps_the_part_file_and_the_attempt() {
         .await;
 }
 
+/// The regression for the pause → start gesture inside the kill grace.
+///
+/// `park_running` settles the slot and drops the permit, but the job task lives on for the whole
+/// `killpg` SIGTERM → SIGKILL ladder — seconds, on a real download. A start pressed in that window
+/// used to write `auto_start = true`, get dropped from the ready deque by the very next
+/// `schedule()` (the item was still in `running`), and never come back: the row sat `queued`,
+/// `auto_start = true`, in no deque, for the life of the process.
+#[tokio::test]
+async fn a_start_inside_the_kill_grace_still_restarts_the_download() {
+    let h = Harness::builder()
+        .provider(Arc::new(Lingering(hanging("fake.test"))))
+        .env("MAX_CONCURRENT_DOWNLOADS", "1")
+        .build()
+        .await;
+    let id = h.add("https://fake.test/watch/hang").await;
+    h.until_status(id, Status::Downloading).await;
+
+    assert_eq!(
+        h.handle
+            .actions(Action::Pause, vec![id], None)
+            .await
+            .applied,
+        vec![id]
+    );
+    h.until(id, "parked", |i| {
+        i.status == Status::Queued && !i.auto_start
+    })
+    .await;
+
+    // Immediately, i.e. while the killed job is still draining.
+    let started = h.handle.actions(Action::Start, vec![id], None).await;
+    assert_eq!(started.applied, vec![id]);
+    assert!(
+        h.item(id).await.unwrap().auto_start,
+        "the flag is set either way; the bug was that nothing ever acted on it"
+    );
+
+    h.until(id, "running again after the grace", |i| {
+        i.status.is_running()
+    })
+    .await;
+}
+
+/// The same window, reached through cancel → retry rather than pause → start.
+#[tokio::test]
+async fn a_retry_inside_the_kill_grace_still_restarts_the_download() {
+    let h = Harness::builder()
+        .provider(Arc::new(Lingering(hanging("fake.test"))))
+        .env("MAX_CONCURRENT_DOWNLOADS", "1")
+        .build()
+        .await;
+    let id = h.add("https://fake.test/watch/hang").await;
+    h.until_status(id, Status::Downloading).await;
+    h.handle.actions(Action::Cancel, vec![id], None).await;
+    h.until_status(id, Status::Canceled).await;
+
+    assert_eq!(
+        h.handle
+            .actions(Action::Retry, vec![id], None)
+            .await
+            .applied,
+        vec![id]
+    );
+    h.until(id, "running again after the grace", |i| {
+        i.status.is_running()
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn pause_is_refused_from_resolving_and_from_a_terminal_item() {
     let h = Harness::builder()
@@ -423,9 +492,9 @@ async fn delete_removes_the_row_the_files_and_the_siblings() {
     assert_eq!(result.applied, vec![id]);
     h.until_all("the row is gone", <[aulos_core::Item]>::is_empty)
         .await;
-    assert!(!file.exists(), "the produced file went with it");
-    assert!(!info.exists(), "and the .info.json sibling");
-    assert!(!nfo.exists(), "and the .nfo sibling");
+    h.until_gone(&file).await;
+    h.until_gone(&info).await;
+    h.until_gone(&nfo).await;
     assert_eq!(h.events.removed(), vec![(vec![id], RemoveReason::Deleted)]);
 }
 
@@ -460,10 +529,7 @@ async fn deleting_a_group_cancels_its_children_first_and_cascades() {
     h.until_all("the row is gone", <[aulos_core::Item]>::is_empty)
         .await;
     h.settle().await;
-    assert!(
-        !h.job_temp_dir(id).exists(),
-        "and its scratch directory went with it"
-    );
+    h.until_gone(&h.job_temp_dir(id)).await;
 }
 
 #[tokio::test]
@@ -556,6 +622,46 @@ async fn a_successful_download_records_its_file_and_drops_its_entry_blob() {
         child.entry, None,
         "a finished item drops its entry blob (DESIGN §7.5)"
     );
+}
+
+/// A provider whose download keeps running for a moment after its token is cancelled, the way a
+/// real `killpg` SIGTERM → SIGKILL ladder does (`AULOS_KILL_GRACE_MS`, five seconds by default).
+///
+/// The engine settles the slot at once but only removes the item from `running` when this task
+/// finally reports, which is the window the two tests above exercise.
+struct Lingering(FakeProvider);
+
+#[async_trait::async_trait]
+impl aulos_provider::Provider for Lingering {
+    fn id(&self) -> aulos_provider::ProviderId {
+        self.0.id()
+    }
+
+    fn matches(&self, url: &url::Url) -> aulos_provider::Match {
+        self.0.matches(url)
+    }
+
+    fn catalog(&self) -> Arc<aulos_core::FormatCatalog> {
+        self.0.catalog()
+    }
+
+    async fn resolve(
+        &self,
+        url: &url::Url,
+        ctx: aulos_provider::ResolveCtx<'_>,
+    ) -> Result<Vec<aulos_provider::MediaEntry>, aulos_provider::ProviderError> {
+        self.0.resolve(url, ctx).await
+    }
+
+    async fn download(
+        &self,
+        ctx: aulos_provider::DownloadCtx<'_>,
+        sink: aulos_provider::ProgressSink,
+    ) -> Result<aulos_provider::Outcome, aulos_provider::ProviderError> {
+        let result = self.0.download(ctx, sink).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        result
+    }
 }
 
 /// A provider that fails every download with one code.

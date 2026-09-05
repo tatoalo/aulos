@@ -31,11 +31,6 @@ impl Engine {
         let id = item.id;
         let out_dir = self.out_dir_for(item);
         let tmp_dir = self.tmp_dir_for(id);
-        for dir in [&out_dir, &tmp_dir] {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                tracing::warn!(item = %id, dir = %dir.display(), error = %e, "cannot create");
-            }
-        }
 
         if !self
             .write_status(
@@ -168,6 +163,9 @@ impl Engine {
     /// [`EngineCmd::Finished`]: the provider produced a file (DESIGN §8.7, §13).
     pub(crate) async fn handle_finished(&mut self, id: ItemId, outcome: Box<Outcome>) {
         if !self.release_job(id) {
+            // The slot this job held is gone, so whatever `release_job` put back on a deque — a
+            // start pressed during the kill grace — can run now.
+            self.schedule().await;
             return;
         }
         let Some(item) = self.cached(id) else {
@@ -267,6 +265,7 @@ impl Engine {
     /// [`EngineCmd::Failed`]: the provider gave up (DESIGN §8.8).
     pub(crate) async fn handle_failed(&mut self, id: ItemId, err: ProviderError) {
         if !self.release_job(id) {
+            self.schedule().await;
             return;
         }
         let Some(item) = self.cached(id) else {
@@ -351,6 +350,13 @@ impl Engine {
     ///
     /// Returns `false` when the engine has already written this job's outcome itself — a cancel or
     /// a pause — in which case the task's own report is discarded rather than overwriting it.
+    ///
+    /// A settled slot lingers in `running` for the whole `killpg` SIGTERM → SIGKILL ladder
+    /// (`AULOS_KILL_GRACE_MS`, seconds). A `start` (or a `retry` after a cancel) inside that window
+    /// only writes `auto_start = true` and enqueues, and `schedule()` cannot admit the row while
+    /// the slot exists — so the row is re-enqueued here, the moment the blocker is gone. Both
+    /// callers run `schedule()` on this path; without that the item would sit `queued` with
+    /// `auto_start = true` in no deque, and nothing would ever start it again.
     pub(crate) fn release_job(&mut self, id: ItemId) -> bool {
         self.beats.disarm(id);
         let Some(mut slot) = self.running.remove(&id) else {
@@ -360,7 +366,16 @@ impl Engine {
         if let Some(w) = slot.watchdog.take() {
             w.abort();
         }
-        !slot.settled
+        if slot.settled {
+            if self
+                .cached(id)
+                .is_some_and(|i| i.status == Status::Queued && i.auto_start)
+            {
+                self.enqueue(id);
+            }
+            return false;
+        }
+        true
     }
 
     /// Removes an item's partial files (DESIGN §8.7, §8.10).
@@ -459,6 +474,20 @@ impl RunJob {
             tx: tx.clone(),
             armed: true,
         };
+        // The two directories, created on this task rather than on the engine's: the download
+        // roots are bind-mounted volumes on the VPS, and a slow or hung mount must cost this job
+        // its own start, never every other queue command behind it (DESIGN §8.2).
+        for dir in [&out_dir, &tmp_dir] {
+            let dir = dir.clone();
+            let created = tokio::task::spawn_blocking(move || {
+                std::fs::create_dir_all(&dir).map_err(|e| (dir, e))
+            })
+            .await;
+            if let Ok(Err((dir, e))) = created {
+                tracing::warn!(item = %id, dir = %dir.display(), error = %e, "cannot create");
+            }
+        }
+
         let ctx = DownloadCtx {
             item_id: id,
             entry: &entry,

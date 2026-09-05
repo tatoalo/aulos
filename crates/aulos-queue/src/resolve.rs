@@ -310,6 +310,13 @@ impl Engine {
             title
         };
 
+        // `PromoteToGroup` writes `kind`, `children_total` and `title` only, so without the
+        // `SetStatus` the persisted row would keep the `resolving` status (and any fall-through
+        // `msg`) the cache is about to drop: a restart at this point would then classify a
+        // perfectly good group as an interrupted resolution (DESIGN §8.9). `sync_group_status`
+        // cannot repair it either — it short-circuits, because the cached status already equals
+        // the accumulator's roll-up.
+        let at = self.clock.now_ms();
         if !self
             .apply(
                 vec![
@@ -325,6 +332,14 @@ impl Engine {
                         id,
                         children_total: total,
                         title: title.clone(),
+                    },
+                    WriteOp::SetStatus {
+                        id,
+                        status: Status::Queued,
+                        msg: FieldUpdate::Clear,
+                        error: FieldUpdate::Clear,
+                        auto_start: None,
+                        at,
                     },
                 ],
                 Durability::Batched,

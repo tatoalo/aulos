@@ -162,7 +162,6 @@ impl Engine {
             self.absorb(item);
         }
         self.next_clear_at = self.next_clear_at.or(boot.next_clear_at);
-        self.done_total = boot.done_total;
 
         if !ops.is_empty() {
             self.store.write(ops, Durability::Sync).await?;
@@ -220,6 +219,13 @@ impl Engine {
     }
 
     /// Puts a recovered row into the cache and its indexes without re-publishing anything.
+    ///
+    /// A resolved row owns **two** dedupe keys at runtime and both are reinstated here: the
+    /// `media_id`-derived `canonical_key` resolution produced, and the URL-derived one the item
+    /// was added under. Registering only the first would let a fresh `POST` of the very same URL
+    /// through after a restart — `DedupeKey::for_url` computes the URL-derived value — which is
+    /// exactly the legacy bug DESIGN §8.5 closes, reopened across the restart boot recovery
+    /// exists for.
     fn absorb(&mut self, item: Item) {
         let id = item.id;
         let terminal = item.status.is_terminal();
@@ -227,11 +233,13 @@ impl Engine {
             && item.kind == Kind::Item
             && let Some(provider) = item.provider.clone()
         {
-            let _ = provider;
-            self.dedupe.insert(
-                DedupeKey::new(item.canonical_key.clone(), item.request.selection.clone()),
-                id,
-            );
+            let selection = item.request.selection.clone();
+            let by_url = DedupeKey::for_url(&provider, &item.url, selection.clone());
+            let by_media = DedupeKey::new(item.canonical_key.clone(), selection);
+            if by_url != by_media {
+                self.dedupe.insert(by_url, id);
+            }
+            self.dedupe.insert(by_media, id);
         }
         if let Some(group) = item.group_id
             && let Some(acc) = self.groups.get_mut(&group)

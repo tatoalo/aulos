@@ -91,6 +91,35 @@ impl GroupAcc {
         }
     }
 
+    /// Records a child that has gone away — deleted, cleared or swept (DESIGN §8.10).
+    ///
+    /// The mirror of [`Self::add_child`], and the reason a group's roll-up does not keep counting
+    /// a child the user has deleted. `total` is deliberately **not** lowered: it is the *declared*
+    /// child count (`children_total`), which is a fact about the playlist rather than about how
+    /// many of its rows still exist.
+    ///
+    /// `total_hint` is the contribution [`Self::add_child`] took ([`crate::entry::size_hint`] of
+    /// the row being dropped) and `finished_size` its exact `size`, which is what a finished child
+    /// put into [`Self::finished_bytes`].
+    pub fn remove_child(
+        &mut self,
+        status: Status,
+        total_hint: Option<u64>,
+        finished_size: Option<u64>,
+    ) {
+        let slot = &mut self.counts[status as usize];
+        *slot = slot.saturating_sub(1);
+        self.resolved = self.resolved.saturating_sub(1);
+        if let Some(bytes) = total_hint.filter(|b| *b > 0) {
+            self.total_est = self.total_est.saturating_sub(bytes);
+            self.n_with_total = self.n_with_total.saturating_sub(1);
+        }
+        if status == Status::Finished {
+            let bytes = finished_size.or(total_hint).unwrap_or(0);
+            self.finished_bytes = self.finished_bytes.saturating_sub(bytes);
+        }
+    }
+
     /// Moves one child between statuses.
     ///
     /// `from == to` is legal — it is the engine's generic "re-diff this row" signal — and is a
@@ -405,6 +434,47 @@ mod tests {
         acc.on_child_status(Status::Finished, Status::Finished);
         acc.on_child_status(Status::Canceled, Status::Finished);
         assert_eq!(acc.count(Status::Canceled), 0);
+    }
+
+    #[test]
+    fn removing_a_child_backs_its_contribution_out_again() {
+        let mut acc = GroupAcc::new(3);
+        acc.add_child(Status::Finished, Some(1_000));
+        acc.add_child(Status::Canceled, Some(500));
+        acc.add_child(Status::Queued, Some(500));
+        assert_eq!(acc.status(), Status::Queued);
+
+        // The cancelled child is deleted: the group must stop reporting it.
+        acc.remove_child(Status::Canceled, Some(500), None);
+        assert_eq!(acc.count(Status::Canceled), 0);
+        assert_eq!(acc.resolved, 2);
+        assert_eq!(acc.n_with_total, 2);
+        assert_eq!(acc.total_est, 1_500);
+        assert_eq!(
+            acc.total, 3,
+            "`children_total` is what the playlist declared, not what survives"
+        );
+
+        // And once the last live child finishes the group is finished, not cancelled.
+        acc.on_child_status(Status::Queued, Status::Finished);
+        acc.on_child_finished(Some(500), Some(500));
+        assert_eq!(acc.status(), Status::Finished);
+
+        // A finished child's bytes come back out with it.
+        acc.remove_child(Status::Finished, Some(1_000), Some(1_000));
+        assert_eq!(acc.finished_bytes, 500);
+        assert_eq!(acc.total_est, 500);
+        assert_eq!(acc.count(Status::Finished), 1);
+
+        // And removing more children than exist cannot underflow.
+        for _ in 0..4 {
+            acc.remove_child(Status::Finished, Some(500), Some(500));
+        }
+        assert_eq!(acc.children(), 0);
+        assert_eq!(acc.resolved, 0);
+        assert_eq!(acc.finished_bytes, 0);
+        assert_eq!(acc.total_est, 0);
+        assert_eq!(acc.n_with_total, 0);
     }
 
     #[test]

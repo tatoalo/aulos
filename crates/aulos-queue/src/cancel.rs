@@ -8,7 +8,8 @@
 //! as soon as the token is cancelled and the status is persisted. The HTTP response does not wait
 //! for `SIGKILL`.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use aulos_core::{FieldUpdate, GroupId, ItemId, Kind, RemoveReason, Status, WireError};
 use aulos_store::{Durability, WriteOp, retry_ops};
@@ -52,8 +53,14 @@ impl Engine {
                     self.sync_group_of(id).await;
                     result.applied.push(id);
                 }
-                // Already on its way: `start` is idempotent.
-                Status::Queued => result.applied.push(id),
+                // Already on its way: `start` is idempotent. It still re-enqueues, because
+                // "queued with `auto_start`" and "on a ready deque" are two different facts —
+                // a start pressed while a paused job was still being killed leaves the first
+                // without the second until its slot is released (`Engine::release_job`).
+                Status::Queued => {
+                    self.enqueue(id);
+                    result.applied.push(id);
+                }
                 s if s.is_terminal() => result.skip(id, SkipReason::AlreadyTerminal),
                 _ => result.skip(id, SkipReason::NotStartable),
             }
@@ -216,10 +223,9 @@ impl Engine {
                 i.source = source.clone();
                 i.finished_at = None;
             });
-            // The row leaves the done window, so the terminal total it was counted in has to
-            // come back down with it.
+            // The row leaves the done window; the published terminal total is the aggregator's
+            // and follows the `terminal → queued` view it is about to see.
             self.done_order.retain(|d| *d != id);
-            self.done_total = self.done_total.saturating_sub(1);
             self.on_child_status(id, from, Status::Queued).await;
             self.publish_changed(id, from, Status::Queued).await;
             // A retried item that was never resolved has to resolve again before it can run.
@@ -312,66 +318,84 @@ impl Engine {
     }
 
     /// Deletes rows, optionally their files, and publishes one `Removed` per reason.
+    ///
+    /// The unlinks run on a blocking pool rather than on the engine task: a bulk clear of a few
+    /// thousand rows is tens of thousands of syscalls against a bind-mounted volume, and nothing
+    /// here depends on their result — the row is deleted regardless (DESIGN §8.10). The engine
+    /// only collects the paths, which costs no syscall at all.
+    ///
+    /// Every affected group is resynchronised afterwards, because [`Engine::forget`] has just
+    /// taken the removed children out of their accumulators.
     pub(crate) async fn remove_rows(
         &mut self,
         ids: &[ItemId],
         remove_files: bool,
         reason: RemoveReason,
     ) {
+        // One pass per id, so a caller that named a group and one of its children does not remove
+        // — or un-count — the same row twice. The order the caller chose is kept: it is the order
+        // the `removed` frame lists.
+        let mut seen: HashSet<ItemId> = HashSet::with_capacity(ids.len());
+        let ids: Vec<ItemId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
         if remove_files {
-            for id in ids {
-                self.delete_files_of(*id);
+            let paths: Vec<PathBuf> = ids.iter().flat_map(|id| self.files_of(*id)).collect();
+            if !paths.is_empty() {
+                drop(tokio::task::spawn_blocking(move || {
+                    for path in paths {
+                        remove_path(&path);
+                    }
+                }));
             }
         }
         if !self
-            .apply(
-                vec![WriteOp::DeleteItems(ids.to_vec())],
-                Durability::Batched,
-            )
+            .apply(vec![WriteOp::DeleteItems(ids.clone())], Durability::Batched)
             .await
         {
             return;
         }
-        for id in ids {
-            let was_terminal = self.cached(*id).is_some_and(|i| i.status.is_terminal());
+        let mut groups: Vec<GroupId> = ids
+            .iter()
+            .filter_map(|id| self.cached(*id).and_then(|i| i.group_id))
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        for id in &ids {
             self.forget(*id);
-            if was_terminal {
-                self.done_total = self.done_total.saturating_sub(1);
-            }
         }
-        self.publish_removed(ids.to_vec(), reason).await;
+        for group in groups {
+            // A group whose children were all removed with it is gone too; `sync_group_status`
+            // returns without writing in that case.
+            self.sync_group_status(group).await;
+        }
+        self.publish_removed(ids, reason).await;
     }
 
-    /// Removes every file an item produced (DESIGN §8.10).
+    /// Every path an item produced (DESIGN §8.10).
     ///
-    /// `filename`, **every** `chapter_files`/`subtitle_files` entry, and the StreamingCommunity
-    /// `.info.json` and `.nfo` siblings. Legacy orphaned all of those. Each unlink is best-effort
-    /// with a WARN; the row is deleted regardless.
-    fn delete_files_of(&self, id: ItemId) {
+    /// `filename`, **every** `chapter_files`/`subtitle_files` entry, the StreamingCommunity
+    /// `.info.json` and `.nfo` siblings, and the scratch directory. Legacy orphaned all of those.
+    fn files_of(&self, id: ItemId) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
         let Some(item) = self.cached(id) else {
-            return;
+            return paths;
         };
         let dir = self.out_dir_for(&item);
         if let Some(name) = item.filename.as_ref() {
             let primary = dir.join(name.as_path());
-            unlink(&primary);
-            for sibling in [".info.json", ".nfo"] {
-                if let Some(stem) = primary.file_stem() {
+            if let Some(stem) = primary.file_stem() {
+                for sibling in [".info.json", ".nfo"] {
                     let mut side = stem.to_os_string();
                     side.push(sibling);
-                    unlink(&dir.join(side));
+                    paths.push(dir.join(side));
                 }
             }
+            paths.push(primary);
         }
         for file in item.chapter_files.iter().chain(item.subtitle_files.iter()) {
-            unlink(&dir.join(&*file.filename));
+            paths.push(dir.join(&*file.filename));
         }
-        let tmp = self.tmp_dir_for(id);
-        if tmp.exists()
-            && let Err(e) = std::fs::remove_dir_all(&tmp)
-        {
-            tracing::warn!(item = %id, error = %e, "cannot remove the scratch directory");
-        }
+        paths.push(self.tmp_dir_for(id));
+        paths
     }
 
     /// [`crate::EngineCmd::CancelResolve`] (DESIGN §8.1, §8.4).
@@ -478,12 +502,19 @@ impl Engine {
     }
 }
 
-/// Best-effort unlink with a WARN (DESIGN §8.10).
-fn unlink(path: &Path) {
-    if !path.exists() {
+/// Best-effort removal of one file or directory, with a WARN (DESIGN §8.10).
+///
+/// Runs on a blocking pool, never on the engine task — see [`Engine::remove_rows`].
+fn remove_path(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
-    }
-    if let Err(e) = std::fs::remove_file(path) {
+    };
+    let removed = if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(e) = removed {
         tracing::warn!(path = %path.display(), error = %e, "cannot remove");
     }
 }

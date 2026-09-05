@@ -12,8 +12,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use aulos_core::{
     AddReason, Clock, Config, DomainEvent, EventSender, FieldUpdate, GroupId, Item, ItemId,
-    ItemView, Kind, RemoveReason, Status, StatusEdge, UnixMs, ViewExtras, YtdlOptions,
-    can_transition,
+    ItemView, Kind, RemoveReason, RestartPolicy, Status, StatusEdge, UnixMs, ViewExtras,
+    YtdlOptions, can_transition,
 };
 use aulos_provider::{MediaEntry, Outcome, ProgressSinkFactory, Provider, ProviderId, Registry};
 use aulos_store::{Durability, Store, StoreError, WriteOp};
@@ -136,7 +136,6 @@ pub struct Engine {
     /// (DESIGN §8.7): `schedule()` and the published snapshot never go through the store actor.
     pub(crate) items: HashMap<ItemId, Arc<Item>>,
     pub(crate) done_order: VecDeque<ItemId>,
-    pub(crate) done_total: u64,
 
     pub(crate) ready: [VecDeque<ItemId>; Priority::COUNT],
     pub(crate) resolving: HashMap<ItemId, ResolveSlot>,
@@ -217,7 +216,6 @@ impl Engine {
             tx,
             items: HashMap::new(),
             done_order: VecDeque::new(),
-            done_total: 0,
             ready: std::array::from_fn(|_| VecDeque::new()),
             resolving: HashMap::new(),
             running: HashMap::new(),
@@ -344,10 +342,24 @@ impl Engine {
     /// which parks the item with `auto_start = false`); handing the row to the next boot is not a
     /// live transition but the same thing boot recovery does in reverse, and there is no client
     /// left to publish it to.
+    ///
+    /// `auto_start` is computed **per row**, exactly as [`Engine::recover`] computes it from the
+    /// DESIGN §8.9 table: this write replaces the `resolving`/`downloading` status the recovery
+    /// path would otherwise classify, so it has to apply the same policy itself. Hardcoding
+    /// `true` here would make `AULOS_RESTART_POLICY=pause` a no-op on an ordinary restart, and
+    /// would un-park an item the user added with `auto_start = false` that happened to be
+    /// resolving (DESIGN §8.3, §8.9).
     async fn handle_shutdown(&mut self) -> ShutdownReport {
-        let mut ids: Vec<ItemId> = self.running.keys().copied().collect();
-        ids.extend(self.resolving.keys().copied());
-        ids.sort_unstable();
+        let resume = self.cfg.restart_policy == RestartPolicy::Resume;
+        // A running row: `resume` alone, because its `auto_start` was necessarily true.
+        // A resolving row: it also has to have been asked to start, or the pending bucket it was
+        // added into would silently start downloading on the next boot.
+        let mut ids: Vec<(ItemId, bool)> = self.running.keys().map(|id| (*id, resume)).collect();
+        ids.extend(self.resolving.keys().map(|id| {
+            let wanted = self.items.get(id).is_some_and(|i| i.auto_start);
+            (*id, resume && wanted)
+        }));
+        ids.sort_unstable_by_key(|(id, _)| *id);
         self.stop_jobs();
 
         if ids.is_empty() {
@@ -359,12 +371,12 @@ impl Engine {
         let now = self.clock.now_ms();
         let ops: Vec<WriteOp> = ids
             .iter()
-            .map(|id| WriteOp::SetStatus {
+            .map(|(id, auto_start)| WriteOp::SetStatus {
                 id: *id,
                 status: Status::Queued,
                 msg: FieldUpdate::Set(SHUTDOWN_MSG.into()),
                 error: FieldUpdate::Keep,
-                auto_start: Some(true),
+                auto_start: Some(*auto_start),
                 at: now,
             })
             .collect();
@@ -373,12 +385,12 @@ impl Engine {
             "handing interrupted downloads back to the next boot"
         );
         let persisted = self.apply(ops, Durability::Sync).await;
-        for id in &ids {
+        for (id, auto_start) in &ids {
             if let Some(item) = self.items.get_mut(id) {
                 let mut next = (**item).clone();
                 next.status = Status::Queued;
                 next.msg = Some(SHUTDOWN_MSG.into());
-                next.auto_start = true;
+                next.auto_start = *auto_start;
                 *item = Arc::new(next);
             }
         }
@@ -552,12 +564,34 @@ impl Engine {
     }
 
     /// Recomputes one group's accumulator, correcting and reporting any drift.
+    ///
+    /// The rebuild reads the **item cache**, which holds every non-terminal row but only the most
+    /// recent `AULOS_MEM_DONE_ITEMS` terminal ones ([`Engine::mark_done`]). A group whose finished
+    /// children have aged out of that window is therefore invisible to this pass, and "correcting"
+    /// against it would rewrite a complete playlist's counters downwards — the pass that exists to
+    /// remove drift would be the only thing creating it. So a cache that cannot see every child
+    /// says nothing about drift: the recompute is skipped instead.
     pub(crate) fn recompute_group(&mut self, id: GroupId) {
         let declared = self
             .items
             .get(&id)
             .and_then(|i| i.children_total)
             .unwrap_or(0);
+        let cached_children = self
+            .items
+            .values()
+            .filter(|i| i.group_id == Some(id))
+            .count();
+        let known = self.groups.get(&id).map_or(0, |acc| acc.resolved as usize);
+        if cached_children < known {
+            tracing::debug!(
+                group = %id,
+                cached = cached_children,
+                known,
+                "not recomputing a group the item cache no longer holds every child of"
+            );
+            return;
+        }
         let fresh = GroupAcc::recomputed(
             declared,
             self.items
@@ -608,30 +642,61 @@ impl Engine {
         arc
     }
 
-    /// Records a terminal row in the bounded done window, evicting the oldest.
+    /// Records a terminal row in the bounded done window, evicting the oldest (DESIGN §15.5).
+    ///
+    /// A terminal group is evicted like any other row **once none of its children are cached**:
+    /// its own row is what the children's roll-up is published from, so it cannot go first, but it
+    /// must go eventually or a long-running server keeps one `Item` plus one [`GroupAcc`] per
+    /// completed playlist for the life of the process, outside the window this bound is.
+    ///
+    /// Eviction also drops the row's dedupe entries. A terminal row never takes part in dedupe
+    /// ([`Engine::live_duplicate`]), so leaving its keys behind would grow the index without bound
+    /// and slow every later [`Engine::drop_dedupe`] scan.
     pub(crate) fn mark_done(&mut self, id: ItemId) {
         if self.done_order.contains(&id) {
             return;
         }
         self.done_order.push_back(id);
-        self.done_total += 1;
         let window = self.cfg.mem_done_items as usize;
-        while self.done_order.len() > window {
-            if let Some(old) = self.done_order.pop_front() {
-                // Never evict a row something still points at: a group whose children are cached
-                // needs its own row for the roll-up.
-                if self.groups.contains_key(&old) {
-                    continue;
-                }
-                self.items.remove(&old);
+        // Rows this pass refuses to evict, put back at the front afterwards so the window stays
+        // ordered and the loop cannot spin on them.
+        let mut kept: Vec<ItemId> = Vec::new();
+        let mut budget = self.done_order.len();
+        while self.done_order.len() + kept.len() > window && budget > 0 {
+            budget -= 1;
+            let Some(old) = self.done_order.pop_front() else {
+                break;
+            };
+            if self.groups.contains_key(&old)
+                && self.items.values().any(|i| i.group_id == Some(old))
+            {
+                kept.push(old);
+                continue;
             }
+            if let Some(item) = self.items.remove(&old) {
+                self.drop_dedupe(&item);
+            }
+            self.groups.remove(&old);
+        }
+        for id in kept.into_iter().rev() {
+            self.done_order.push_front(id);
         }
     }
 
     /// Drops a row from every index it appears in.
+    ///
+    /// Including its **group's accumulator**: a deleted, cleared or auto-cleared child that went
+    /// on being counted would keep a finished playlist reading `canceled` (or leave
+    /// `children_done` short) for as long as the group lives. [`Engine::remove_rows`] persists and
+    /// republishes the corrected roll-up afterwards.
     pub(crate) fn forget(&mut self, id: ItemId) {
         if let Some(item) = self.items.remove(&id) {
             self.drop_dedupe(&item);
+            if let Some(group) = item.group_id
+                && let Some(acc) = self.groups.get_mut(&group)
+            {
+                acc.remove_child(item.status, crate::entry::size_hint(&item), item.size);
+            }
         }
         self.done_order.retain(|d| *d != id);
         self.groups.remove(&id);
@@ -686,6 +751,13 @@ impl Engine {
             }
             view.speed = acc.speed();
             view.eta = acc.eta();
+            // PROTOCOL §3.3: on a group these are the child sums, and `total_bytes` is always
+            // null — an exact total for a whole playlist is not knowable until it finishes. The
+            // sum is `finished_bytes + downloaded`, which is the numerator §3.3's percent formula
+            // pairs against `total_est`.
+            view.downloaded_bytes = Some(acc.finished_bytes.saturating_add(acc.downloaded));
+            view.total_bytes_estimate = (acc.total_est > 0).then_some(acc.total_est);
+            view.total_bytes = None;
         }
         Arc::new(view)
     }
@@ -921,15 +993,26 @@ impl Engine {
         }
         let prio = Priority::of(item.source.kind, item.group_id.is_some());
         let ord = item.ord;
-        let deque = &mut self.ready[prio.index()];
-        if deque.contains(&id) {
+        if self.ready[prio.index()].contains(&id) {
             return;
         }
         // The deques are append-mostly and already `ord`-ordered, so this is a tail insert in the
-        // overwhelming majority of cases.
-        let at = deque
+        // overwhelming majority of cases — and the tail is one comparison, while the search below
+        // costs a `HashMap` lookup per element scanned. Expanding a 500-child playlist enqueues
+        // its children in ascending `ord`, which is exactly the case that never finds a position
+        // and would otherwise walk the whole deque 500 times.
+        let tail_first = self.ready[prio.index()]
+            .back()
+            .and_then(|last| self.items.get(last))
+            .is_some_and(|last| last.ord <= ord);
+        if tail_first {
+            self.ready[prio.index()].push_back(id);
+            return;
+        }
+        let at = self.ready[prio.index()]
             .iter()
             .position(|other| self.items.get(other).is_some_and(|o| o.ord > ord));
+        let deque = &mut self.ready[prio.index()];
         match at {
             Some(i) => deque.insert(i, id),
             None => deque.push_back(id),
@@ -956,10 +1039,19 @@ impl Engine {
                 if item.kind == Kind::Group
                     || item.status != Status::Queued
                     || !item.auto_start
-                    || self.running.contains_key(&id)
                     || self.retries.iter().any(|r| r.id == id)
                 {
                     self.ready[prio.index()].remove(cursor);
+                    continue;
+                }
+                // A `RunSlot` this row still owns is a *temporary* blocker, not a reason to drop
+                // it: a job the engine has already settled (a pause or a cancel) lingers in
+                // `running` for the whole `killpg` ladder, and a Start inside that window must
+                // still be honoured once the slot is gone. An id that is genuinely running is not
+                // in this deque at all — `start_job`'s caller removed it below.
+                if self.running.contains_key(&id) {
+                    scanned += 1;
+                    cursor += 1;
                     continue;
                 }
                 let Some(provider_id) = item.provider.clone() else {
@@ -1278,5 +1370,145 @@ pub(crate) fn map_port_error(e: StoreError) -> aulos_core::PortError {
         StoreError::NotFound(id) => aulos_core::PortError::NotFound(id),
         StoreError::Closed => aulos_core::PortError::Unavailable,
         other => aulos_core::PortError::Store(other.to_string().into_boxed_str()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    //! Unit tests for the parts of the engine's own bookkeeping an integration test cannot see:
+    //! the bounded done window and the dedupe index behind it (DESIGN §15.5).
+
+    use aulos_core::config::{RawEnv, load};
+    use aulos_core::{EventRouter, SystemClock};
+    use aulos_provider::Registry;
+    use aulos_store::StoreOptions;
+
+    use super::*;
+    use crate::aggregator::tests_support::item as row;
+    use crate::dedupe::DedupeKey;
+
+    /// An engine over a throwaway SQLite file, with no loop running.
+    fn engine(dir: &std::path::Path, overrides: &[(&str, &str)]) -> (Engine, EventRouter) {
+        let mut env: Vec<(String, String)> = vec![
+            ("STATE_DIR".into(), dir.display().to_string()),
+            (
+                "AULOS_DB_PATH".into(),
+                dir.join("aulos.db").display().to_string(),
+            ),
+        ];
+        env.extend(
+            overrides
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        let cfg = Arc::new(load(&RawEnv::from_pairs(env)).unwrap());
+        let store = Store::open(StoreOptions::from_config(&cfg).with_flush_ms(5)).unwrap();
+        let (router, sender) = EventRouter::new(64);
+        let (progress, _rx) = mpsc::channel(8);
+        let (engine, _handle) = Engine::new(
+            store,
+            Arc::new(RwLock::new(Registry::new())),
+            cfg,
+            Arc::new(ArcSwap::from_pointee(YtdlOptions::empty())),
+            Arc::new(SystemClock),
+            sender,
+            progress,
+        );
+        (engine, router)
+    }
+
+    fn cache(engine: &mut Engine, item: Item) -> ItemId {
+        let id = item.id;
+        engine.items.insert(id, Arc::new(item));
+        id
+    }
+
+    /// A terminal group is held back only while its children are cached, and then goes too.
+    /// Otherwise a long-running server keeps one `Item` plus one `GroupAcc` per completed playlist
+    /// for the life of the process, outside the bound DESIGN §15.5 is.
+    #[tokio::test]
+    async fn a_terminal_group_leaves_the_done_window_once_its_children_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, _router) = engine(dir.path(), &[("AULOS_MEM_DONE_ITEMS", "1")]);
+
+        let mut group_row = row(Status::Finished, 1);
+        group_row.kind = Kind::Group;
+        let group = cache(&mut engine, group_row);
+        engine.groups.insert(group, GroupAcc::new(1));
+
+        let mut child_row = row(Status::Finished, 2);
+        child_row.group_id = Some(group);
+        let child = cache(&mut engine, child_row);
+
+        engine.mark_done(child);
+        engine.mark_done(group);
+        assert!(
+            engine.items.contains_key(&group),
+            "the group outlives the window while its child is cached"
+        );
+
+        // One more completion: the child ages out, and the group with it.
+        let other = cache(&mut engine, row(Status::Finished, 3));
+        engine.mark_done(other);
+        assert!(!engine.items.contains_key(&child));
+        let last = cache(&mut engine, row(Status::Finished, 4));
+        engine.mark_done(last);
+        assert!(
+            !engine.items.contains_key(&group),
+            "nothing points at it any more, so it is evicted like any other terminal row"
+        );
+        assert!(!engine.groups.contains_key(&group), "and its accumulator");
+        assert!(engine.done_order.len() <= 1, "{:?}", engine.done_order);
+    }
+
+    /// The tail fast path must not change what the deque holds: `ord` order, no duplicates.
+    #[tokio::test]
+    async fn enqueue_keeps_the_ready_deque_in_ord_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, _router) = engine(dir.path(), &[]);
+        let mut ids = Vec::new();
+        // Ascending (the tail-insert case), then one that belongs in the middle.
+        for ord in [10, 20, 30, 15] {
+            let mut item = row(Status::Queued, ord);
+            item.auto_start = true;
+            ids.push(cache(&mut engine, item));
+        }
+        for id in &ids {
+            engine.enqueue(*id);
+        }
+        // Twice, because `enqueue` is idempotent.
+        for id in &ids {
+            engine.enqueue(*id);
+        }
+        let prio = crate::priority::Priority::of(aulos_core::SourceKind::ApiV2, false);
+        let deque: Vec<i64> = engine.ready[prio.index()]
+            .iter()
+            .map(|id| engine.items[id].ord)
+            .collect();
+        assert_eq!(deque, vec![10, 15, 20, 30]);
+    }
+
+    /// A terminal row never takes part in dedupe, so its keys must not outlive its cache entry —
+    /// they would grow the index for the life of the process and slow every `drop_dedupe` scan.
+    #[tokio::test]
+    async fn an_evicted_row_takes_its_dedupe_keys_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, _router) = engine(dir.path(), &[("AULOS_MEM_DONE_ITEMS", "1")]);
+
+        let first = row(Status::Finished, 1);
+        let key = DedupeKey::new(first.canonical_key.clone(), first.request.selection.clone());
+        let id = cache(&mut engine, first);
+        engine.dedupe.insert(key.clone(), id);
+        engine.mark_done(id);
+        assert_eq!(engine.dedupe.len(), 1);
+
+        let next = cache(&mut engine, row(Status::Finished, 2));
+        engine.mark_done(next);
+        assert!(!engine.items.contains_key(&id), "evicted");
+        assert!(
+            engine.dedupe.is_empty(),
+            "and its dedupe entry went with it"
+        );
     }
 }
