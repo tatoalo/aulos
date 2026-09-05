@@ -1,10 +1,10 @@
 {
   "artboards": [
-    { "file": "Main.dc.html", "title": "Desktop · queue", "x": 0, "y": 0, "w": 1440, "h": 900 },
+    { "file": "Main.dc.html", "title": "Desktop · queue", "x": 0, "y": 0, "w": 1440, "h": 1180 },
     { "file": "Mobile.dc.html", "title": "Phone · queue", "x": 1540, "y": 0, "w": 390, "h": 844 },
     { "file": "MobileAdd.dc.html", "title": "Phone · add sheet", "x": 2030, "y": 0, "w": 390, "h": 844 },
-    { "file": "AltDense.dc.html", "title": "Option B · dense", "x": 0, "y": 1060, "w": 720, "h": 460 },
-    { "file": "AltCanvas.dc.html", "title": "Option C · thumbnail wall", "x": 820, "y": 1060, "w": 720, "h": 460 }
+    { "file": "AltDense.dc.html", "title": "Option B · dense", "x": 0, "y": 1340, "w": 720, "h": 460 },
+    { "file": "AltCanvas.dc.html", "title": "Option C · thumbnail wall", "x": 820, "y": 1340, "w": 720, "h": 460 }
   ],
   "annotations": [
     { "id": "brief", "x": 1540, "y": 900, "w": 380, "text": "Option A (top row) is the deliverable: it lifts the iOS app's own vocabulary — terracotta→burgundy brand gradient, 16px cards with the 0 2px 8px shadow, 32px status discs, SF system type (20/15/13/12), 4px gradient progress with a gold phase bar for post-processing.\n\nDark mode is the 'dark' tweak on each artboard.\n\nB and C below are low-fi alternates in case a different direction is wanted." },

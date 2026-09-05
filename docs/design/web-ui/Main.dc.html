@@ -10,7 +10,7 @@
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
     a { color: #E07850; text-decoration: none; } a:hover { color: #8B3A4C; }
-    .app { --accent: #E07850; --accent-deep: #8B3A4C; --wine: #5C2030; --gold: #C9A030;
+    .app { --accent: #E07850; --accent-deep: #8B3A4C; --gold: #C9A030;
            --ok: #33C759; --err: #D94040; --warn: #C9A030;
            --bg: #F2F2F7; --card: #FFFFFF; --field: #F2F2F7; --text: #000000; --text2: rgba(60,60,67,0.6); --text3: rgba(60,60,67,0.3);
            --sep: rgba(60,60,67,0.16); --track: rgba(60,60,67,0.12); --shadow: 0 2px 8px rgba(0,0,0,0.08);
@@ -30,7 +30,7 @@
     input::placeholder { color: var(--text3); }
   </style>
 </helmet>
-<div class="app {{theme}}" style="width: 1440px; min-height: 900px; display: flex; flex-direction: column; align-items: stretch;">
+<div class="app {{theme}}" style="width: 1440px; min-height: 1180px; display: flex; flex-direction: column; align-items: stretch;">
 
   <!-- Header: 3px brand bar + 64px row, card background, full width -->
   <div style="height: 3px; background: linear-gradient(135deg, #E07850, #8B3A4C);"></div>
@@ -250,7 +250,7 @@
   </div>
 </div>
 </x-dc>
-<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"$preview":{"width":1440,"height":900}}'>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"$preview":{"width":1440,"height":1180}}'>
 class Component extends DCLogic {
   renderVals() {
     return { theme: this.props.dark ? 'dark' : 'light' };
