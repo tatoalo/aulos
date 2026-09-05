@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="aulos-prefix" content="{{PREFIX}}">
+<meta name="aulos-theme" content="{{THEME}}">
+<meta name="theme-color" content="#F2F2F7">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Aulos">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Aulos</title>
+<link rel="stylesheet" href="{{PREFIX}}assets/app.css">
+<link rel="manifest" href="{{PREFIX}}manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="{{PREFIX}}assets/icon.svg">
+<link rel="apple-touch-icon" href="{{PREFIX}}assets/icon-180.png">
+<script type="module" src="{{PREFIX}}assets/app.js"></script>
+</head>
+<body>
+
+<div class="brandbar"></div>
+
+<header class="hdr">
+  <div class="hdr-in">
+    <div class="brand">
+      <div class="mark" id="mark" aria-hidden="true"></div>
+      <div class="brand-txt">
+        <h1>Aulos</h1>
+        <p class="sub" id="summary">Connecting…</p>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <div class="pill wait" id="conn" role="status" aria-live="polite"><span class="dot"></span><span id="conn-text">Connecting…</span></div>
+      <button class="iconbtn lg" id="theme-btn" type="button" aria-label="Theme: system"></button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card addbar" id="addbar" aria-label="Add a download">
+    <div class="add-row">
+      <div class="field url-field">
+        <span class="ico" id="url-ico" aria-hidden="true"></span>
+        <input id="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Link to download" placeholder="Paste a link">
+      </div>
+      <label class="field sel" id="type-field"><select id="type" aria-label="Download type"></select><span class="ico chevron" aria-hidden="true"></span></label>
+      <label class="field sel" id="quality-field"><select id="quality" aria-label="Quality"></select><span class="ico chevron" aria-hidden="true"></span></label>
+      <button class="btn-primary" id="add-btn" type="button"><span class="ico" aria-hidden="true"></span><span class="btn-label">Add</span></button>
+    </div>
+    <div class="add-meta">
+      <button class="sw sw-sm" id="autostart" type="button" role="switch" aria-checked="true" aria-label="Start automatically"></button>
+      <span>Start automatically</span>
+      <span class="dotsep" aria-hidden="true">·</span>
+      <span class="fold-wrap" id="folder-wrap" hidden>Folder: <select id="folder" class="inline-sel" aria-label="Folder"></select></span>
+      <span class="dotsep" id="folder-sep" aria-hidden="true" hidden>·</span>
+      <button class="link" id="more-opts" type="button" aria-expanded="false">More options</button>
+    </div>
+    <div class="add-extra" id="add-extra" hidden>
+      <label class="xfield"><span class="label">Format</span><span class="field sel"><select id="format" aria-label="Format"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+      <label class="xfield" id="codec-x"><span class="label">Codec</span><span class="field sel"><select id="codec" aria-label="Codec"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+      <label class="xfield"><span class="label">Filename prefix</span><span class="field"><input id="prefix" type="text" autocomplete="off" spellcheck="false" aria-label="Filename prefix"></span></label>
+    </div>
+    <p class="prov" id="prov" hidden></p>
+    <p class="add-err" id="add-err" role="alert" hidden></p>
+  </section>
+
+  <section class="sec" id="sec-active" hidden>
+    <div class="sec-hd"><h2>In progress</h2><span class="sec-meta" id="active-meta"></span></div>
+    <div class="rows" id="rows-active"></div>
+  </section>
+
+  <section class="sec" id="sec-waiting" hidden>
+    <div class="sec-hd"><h2>Waiting for you</h2><button class="link" id="start-all" type="button">Start all</button></div>
+    <div class="rows" id="rows-waiting"></div>
+  </section>
+
+  <section class="sec" id="sec-done" hidden>
+    <div class="sec-hd"><h2>Completed</h2><button class="danger-link" id="clear" type="button"><span class="ico" aria-hidden="true"></span><span>Clear</span></button></div>
+    <div class="card list" id="rows-done"></div>
+    <div class="more-wrap"><button class="link" id="show-older" type="button" hidden>Show older</button></div>
+  </section>
+
+  <p class="empty" id="empty" hidden>Nothing in the queue. Paste a link above to start.</p>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
+  <div class="grab" aria-hidden="true"></div>
+  <div class="sheet-hd">
+    <h2 id="sheet-title">Add download</h2>
+    <button class="text-btn" id="sheet-cancel" type="button">Cancel</button>
+  </div>
+  <div class="grp">
+    <textarea class="sheet-url" id="sheet-url" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Link to download" placeholder="Paste a link"></textarea>
+    <p class="prov" id="sheet-prov" hidden></p>
+  </div>
+  <div class="grp">
+    <div class="label" id="lbl-type">Type</div>
+    <div class="seg" id="sheet-type" role="group" aria-labelledby="lbl-type"></div>
+  </div>
+  <div class="grp">
+    <div class="label" id="lbl-quality">Quality</div>
+    <div class="chips" id="sheet-quality" role="group" aria-labelledby="lbl-quality"></div>
+  </div>
+  <div class="pair">
+    <label class="grp"><span class="label">Format</span><span class="field sel"><select id="sheet-format" aria-label="Format"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+    <label class="grp" id="sheet-codec-wrap"><span class="label">Codec</span><span class="field sel"><select id="sheet-codec" aria-label="Codec"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+  </div>
+  <div class="rowset">
+    <div class="rs-row"><span>Start automatically</span><button class="sw" id="sheet-autostart" type="button" role="switch" aria-checked="true" aria-label="Start automatically"></button></div>
+    <label class="rs-row" id="sheet-folder-row" hidden><span>Folder</span><span class="field sel bare"><select id="sheet-folder" aria-label="Folder"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+  </div>
+  <p class="add-err" id="sheet-err" role="alert" hidden></p>
+  <button class="btn-block" id="sheet-add" type="button">Add to queue</button>
+</div>
+
+<div class="sheet tokensheet" id="token-sheet" role="dialog" aria-modal="true" aria-labelledby="token-title" hidden>
+  <div class="grab" aria-hidden="true"></div>
+  <div class="sheet-hd"><h2 id="token-title">Sign in</h2><button class="text-btn" id="token-cancel" type="button">Cancel</button></div>
+  <p class="note">This server asked for an API token. It is stored in this browser only.</p>
+  <label class="grp"><span class="label">API token</span><span class="field"><input id="token-input" type="password" autocomplete="current-password" aria-label="API token"></span></label>
+  <button class="btn-block" id="token-save" type="button">Save and connect</button>
+</div>
+
+<div class="menu" id="menu" role="menu" hidden></div>
+<div class="toasts" id="toasts" role="region" aria-label="Notifications"></div>
+
+</body>
+</html>

@@ -92,6 +92,37 @@ jobs:
           n=$(grep -c 'ARG YTDLP_VERSION=' docker/Dockerfile)
           test "$n" -eq 1 || { echo "::error::yt-dlp pin appears $n times"; exit 1; }
 
+  web:
+    # The page shipped in `crates/aulos-api/web/` and its Playwright smoke (`tools/web/`).
+    # Offline: the suite drives `tools/web/mock-server.mjs`, never a real server and never a
+    # real download site.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/web/package-lock.json
+      - run: npm ci
+        working-directory: tools/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: tools/web
+      - name: the shipped page stays under the 70 KB budget
+        run: |
+          set -eu
+          n=$(cat crates/aulos-api/web/app.js crates/aulos-api/web/app.css | wc -c)
+          echo "app.js + app.css = $n bytes"
+          test "$n" -lt 71680 || { echo "::error::the shipped page is over the 70 KB budget"; exit 1; }
+      - run: npx playwright test
+        working-directory: tools/web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-screenshots
+          path: tools/web/screenshots
+          if-no-files-found: warn
+
   python:
     # DESIGN §18.4. Present from day one so the required check exists; each step no-ops until the
     # file it needs lands (the shim in WP-07, the capture tooling in WP-00).

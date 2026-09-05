@@ -1,0 +1,16 @@
+{
+  "name": "Aulos",
+  "short_name": "Aulos",
+  "description": "Queue and watch downloads on your Aulos server.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#E07850",
+  "background_color": "#F2F2F7",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "assets/icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" }
+  ]
+}

@@ -25,3 +25,9 @@ __pycache__/
 
 # insta review leftovers
 **/*.snap.new
+
+# Web UI dev tooling (tools/web)
+node_modules/
+/tools/web/screenshots/
+/tools/web/playwright-report/
+/tools/web/test-results/

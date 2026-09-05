@@ -1,0 +1,16 @@
+{
+  "name": "aulos-web-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev mock server and Playwright smoke for the page shipped in crates/aulos-api/web.",
+  "scripts": {
+    "serve": "node mock-server.mjs --port 8099",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "playwright": "1.63.0",
+    "ws": "8.21.3"
+  }
+}
