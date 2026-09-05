@@ -87,6 +87,28 @@ Every work package (WP-00…WP-17) and the final integration pass are done, on `
 
 Continue with "Next steps" below (review workflow → OrbStack smoke → iOS migration → cutover).
 
+## Review round 1 (2026-09-05)
+
+Six parallel reviewers (engine/store, protocol, providers, security, perf, ops) produced 43 findings
+(1 blocker, 22 major, 20 minor). Each blocker/major was handed to a skeptic verifier: 22 of 23
+confirmed, 1 refuted (`perf-2`, the hub does not block on SQLite). Twelve per-crate fix commits
+landed (`63f3d36`..`e69fef0`), each with regression tests; highlights: start/retry during the kill
+grace stranded items; graceful shutdown ignored `AULOS_RESTART_POLICY=pause`; group roll-ups did not
+account for deleted children; `state` ETag could pin a stale snapshot; a WS client connecting
+mid-flush could lose a frame; `POST downloads` returned `id: null` on full dedupe; the SSRF knob had
+no reader; `STATE_DIR` was reachable through the download route; `YTDL_OPTIONS` secrets were logged;
+CSRF on empty-body POSTs; batched store writes waited the full flush window; audio dir not chowned;
+signals unhandled during boot; no `stop_grace_period` in the compose example; Telegram stall alerts
+for merely-queued items.
+
+Workspace gates re-run by the orchestrator on `e69fef0` after all fixes: fmt clean, clippy
+`-D warnings` clean, `cargo test --workspace` all green.
+
+**Not yet done for round 1**: docker image rebuild + `AULOS_E2E=1 tests/e2e/run.sh` on the fixed
+tree; the image-name alignment in docs (published image is `ghcr.io/tatoalo/aulos`). **Round 2**
+(regression review, blind end-to-end trace, shipped-iOS simulation against the v1 shim) has not run.
+Both were interrupted by the org's API spend limit; resume from here.
+
 ## How the work is being done
 
 Claude Code orchestrates; Opus 5 agents implement one WP each in a shared checkout, commit only
