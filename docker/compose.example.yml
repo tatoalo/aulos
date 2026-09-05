@@ -11,6 +11,13 @@ services:
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]
+    # Docker's default stop timeout is 10 s, which SIGKILLs the container in the middle of the
+    # DESIGN §21.4 shutdown: in-flight downloads are killed instead of being given their grace,
+    # the interrupted rows never get `msg="Interrupted by shutdown"`, and the WAL is never
+    # checkpointed. The stop timeout must exceed AULOS_SHUTDOWN_GRACE_SECS (20) + the kill ladder
+    # (AULOS_KILL_GRACE_MS, 5 s) + the WS close grace (2 s) + the task-tracker ceiling (10 s) = 37 s
+    # at the defaults. Raise this with AULOS_SHUTDOWN_GRACE_SECS if you raise that.
+    stop_grace_period: 40s
     environment:
       PUID: "1000"
       PGID: "1000"

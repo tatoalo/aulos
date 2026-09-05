@@ -14,7 +14,8 @@
 #   7. a restart mid-download resumes rather than stranding the item
 #   8. `docker logs` contains no ERROR
 #   9. a second profile seeds a legacy STATE_DIR and asserts the import report has zero errors,
-#      does not re-import on the next boot, and runs with CHOWN_DIRS=false and UMASK=077
+#      does not re-import on the next boot, runs with CHOWN_DIRS=false and UMASK=077, and hands
+#      every root it created (including a split AUDIO_DOWNLOAD_DIR) to PUID:PGID
 #
 # Gated on AULOS_E2E=1 so a plain `cargo test` / `./run.sh` never reaches for the network.
 #
@@ -409,6 +410,7 @@ docker run -d --name "$NAME" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
   -p "127.0.0.1:${PORT}:8081" \
   -v "${SEED}:/downloads" \
   -e PUID="$(id -u)" -e PGID="$(id -g)" -e CHOWN_DIRS=false -e UMASK=077 \
+  -e AUDIO_DOWNLOAD_DIR=/downloads/audio \
   -e AULOS_E2E=1 -e TELEGRAM_BOT_ENABLED=false \
   "$IMAGE" >/dev/null || die "docker run (profile B) failed"
 
@@ -453,6 +455,16 @@ db_mode="$(docker exec "$NAME" stat -c '%a' /downloads/.metube/aulos.db 2>/dev/n
 [ "$db_mode" = "600" ] \
   && ok "UMASK=077 reached the database (mode $db_mode)" \
   || fail "UMASK=077 should make aulos.db 600, got ${db_mode:-<unreadable>}"
+
+# A root the entrypoint had to create itself must be handed to PUID:PGID even under
+# CHOWN_DIRS=false -- otherwise a split AUDIO_DOWNLOAD_DIR (which the shipped compose uses) boots
+# green and then fails every audio download with EACCES while video downloads work.
+for root in /downloads /downloads/audio /downloads/.metube /downloads/.tmp; do
+  owner="$(docker exec "$NAME" stat -c '%u:%g' "$root" 2>/dev/null || echo '')"
+  [ "$owner" = "$(id -u):$(id -g)" ] \
+    && ok "${root} is owned by PUID:PGID (${owner})" \
+    || fail "${root} should be $(id -u):$(id -g), got ${owner:-<unreadable>}"
+done
 
 # A second start must not import again: that is what stops it resurrecting deleted rows.
 docker restart -t 25 "$NAME" >/dev/null || die "profile B restart failed"

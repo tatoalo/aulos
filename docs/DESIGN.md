@@ -4231,7 +4231,7 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `AULOS_TRUSTED_PROXY_AUTH_HEADER` | `''` | str | when set, its absence on a v2 route is a 401 | N |
 | `AULOS_ALLOW_PRIVATE_TARGETS` | `true` | bool | SSRF guard for API adds (Telegram is always guarded) | N |
 | `AULOS_METRICS_ENABLED` | `false` | bool | serve `<p>metrics` in Prometheus text format | N |
-| `AULOS_SHUTDOWN_GRACE_SECS` | `20` | int | let in-flight downloads finish before killing them | N |
+| `AULOS_SHUTDOWN_GRACE_SECS` | `20` | int | let in-flight downloads finish before killing them; the container **stop timeout** (compose `stop_grace_period`, `docker stop -t`) must exceed it + `AULOS_KILL_GRACE_MS`/1000 + `WS_CLOSE_GRACE` + `TRACKER_CEILING` — 37 s at the defaults, hence the shipped `stop_grace_period: 40s`. Docker's 10 s default would `SIGKILL` mid-shutdown, before the interrupted rows and the WAL checkpoint | N |
 | `AULOS_VERSION` | `dev` | str | alias of `METUBE_VERSION`; the Dockerfile sets both | N |
 | `AULOS_IMPORT_ON_ERROR` | `fail` | `fail\|skip` | what a legacy **file** error does: `fail` = rollback + exit non-zero (default); `skip` = omit that file, downgrade to a warning, commit, and mark the importer component degraded for the life of the process. `aulos-server import --skip-corrupt` sets `skip`. This is the documented escape from a restart loop caused by one corrupt legacy JSON file (§7.6.1) | N |
 | `AULOS_V1_ADD_RESOLVE_WAIT_MS` | `10000` | int (0 = off) | how long v1 `POST <p>add` waits for resolution before answering, so a resolution failure is still reported as `{"status":"error","msg":…}` (§11.2). `0` makes the v1 route fully async and knowingly gives up body-level error reporting; the v2 add route is never affected | N |
@@ -4364,19 +4364,28 @@ QEMU, no arm64 — so arm64 is a one-line workflow change later.
 set -eu
 PUID="${UID:-$PUID}"          # legacy UID/GID still win, exactly as before
 PGID="${GID:-$PGID}"
+AUDIO_DIR="${AUDIO_DOWNLOAD_DIR:-$DOWNLOAD_DIR}"
+if [ "$(id -u)" -eq 0 ] && [ "$(id -g)" -eq 0 ]; then IS_ROOT=1; else IS_ROOT=0; fi
 echo "Setting umask to ${UMASK}"
 umask "${UMASK}"
-echo "Creating download (${DOWNLOAD_DIR}), state (${STATE_DIR}), temp (${TEMP_DIR}) directories"
-mkdir -p "${DOWNLOAD_DIR}" "${STATE_DIR}" "${TEMP_DIR}" "${AUDIO_DOWNLOAD_DIR:-$DOWNLOAD_DIR}"
+echo "Creating download (${DOWNLOAD_DIR}), state (${STATE_DIR}), temp (${TEMP_DIR}), audio (${AUDIO_DIR}) directories"
+# A directory the entrypoint itself creates as root is its own mess: chown it right away, before
+# the CHOWN_DIRS switch, so CHOWN_DIRS=false cannot leave a root-owned root behind.
+for d in "${DOWNLOAD_DIR}" "${STATE_DIR}" "${TEMP_DIR}" "${AUDIO_DIR}"; do
+  if [ ! -d "$d" ]; then
+    mkdir -p "$d"
+    if [ "${IS_ROOT}" -eq 1 ]; then chown "${PUID}:${PGID}" "$d"; fi
+  fi
+done
 
-if [ "$(id -u)" -eq 0 ] && [ "$(id -g)" -eq 0 ]; then
+if [ "${IS_ROOT}" -eq 1 ]; then
   [ "${PUID}" -eq 0 ] && echo "Warning: running as root is not recommended; check PUID/PGID (or legacy UID/GID)"
   case "${CHOWN_DIRS:-true}" in
     false)     : ;;
     recursive) echo "Changing ownership recursively (legacy behaviour)"
-               chown -R "${PUID}:${PGID}" "${DOWNLOAD_DIR}" "${STATE_DIR}" "${TEMP_DIR}" ;;
+               chown -R "${PUID}:${PGID}" "${DOWNLOAD_DIR}" "${STATE_DIR}" "${TEMP_DIR}" "${AUDIO_DIR}" ;;
     *)         echo "Changing ownership of the directories themselves and the state dir"
-               chown    "${PUID}:${PGID}" "${DOWNLOAD_DIR}" "${TEMP_DIR}"
+               chown    "${PUID}:${PGID}" "${DOWNLOAD_DIR}" "${TEMP_DIR}" "${AUDIO_DIR}"
                chown -R "${PUID}:${PGID}" "${STATE_DIR}" ;;
   esac
   echo "Running aulos-server as ${PUID}:${PGID}"
@@ -4389,6 +4398,12 @@ fi
 
 `bgutil-pot` is **not** started here — the server supervises it, so it inherits the already-dropped
 privileges and gets restarted when it dies.
+
+The audio root is part of **both** chown arms, and any of the four roots the entrypoint had to
+create itself is chowned unconditionally — even under `CHOWN_DIRS=false`. `CHOWN_DIRS=false` means
+"do not walk the operator's library", not "hand the de-privileged server a root-owned directory":
+without that, a split `AUDIO_DOWNLOAD_DIR` (which the shipped compose uses) boots green and then
+fails every audio download with `EACCES`, while video downloads keep working.
 
 `CHOWN_DIRS` gains a `recursive` value for exact legacy behaviour. `true` now means "the
 directories themselves plus the state dir", which is the useful part and is O(1) instead of
@@ -4406,6 +4421,7 @@ services:
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]
+    stop_grace_period: 40s   # > 20 (grace) + 5 (kill ladder) + 2 (WS close) + 10 (tracker)
     environment:
       PUID: "1000"
       PGID: "1000"
@@ -4767,6 +4783,11 @@ docker stop → tini forwards SIGTERM → aulos-server
   t+0     a client that reconnects with since=<old seq> and the OLD boot_id gets a full snapshot
   t+0     scheduler admits MAX_CONCURRENT_DOWNLOADS by priority; yt-dlp resumes from .part
 ```
+
+This whole ladder only runs if the container is *given* the time: Docker's default stop
+timeout is 10 s, which lands in the middle of the grace poll, so the shipped compose sets
+`stop_grace_period: 40s` (§18.3) and any deployment that raises `AULOS_SHUTDOWN_GRACE_SECS`
+must raise it too.
 
 Legacy re-`add`ed **every** queued item at once, each re-running metadata extraction on the shared
 executor before the UI could connect. Here the DB already holds the resolved title and entry, so
