@@ -150,6 +150,8 @@ docker run -d --name "$NAME" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
   -e LOGLEVEL=INFO \
   -e AULOS_WS_BATCH_MS=250 \
   -e TELEGRAM_BOT_ENABLED=false \
+  -e AULOS_NFO_ENABLED=true \
+  -e 'YTDL_OPTIONS={"writeinfojson": true}' \
   "$IMAGE" >/dev/null || die "docker run failed"
 ok "container started"
 
@@ -280,6 +282,43 @@ else
   docker exec "$NAME" ls -la /downloads || true
   fail "the file is not in the volume"
 fi
+
+# --- 4b. what the download left beside the file, and how the row reads afterwards -------------
+# Production bug round 3 (2026-09-05): the .info.json used to land in DOWNLOAD_DIR while the media
+# was still in the per-job scratch dir, the built-in NFO hook only applied to StreamingCommunity,
+# and a finished row kept yt-dlp's last postprocessor line ("MoveFiles…") as its msg.
+
+log "sidecars and the terminal row"
+stem="${filename%.*}"
+if docker exec "$NAME" test -f "/downloads/${stem}.info.json"; then
+  ok "the .info.json is beside the media"
+else
+  docker exec "$NAME" ls -la /downloads || true
+  fail "the .info.json is not beside the media (writeinfojson was on)"
+fi
+if docker exec "$NAME" test -f "/downloads/${stem}.nfo"; then
+  ok "the built-in NFO hook wrote ${stem}.nfo"
+  docker exec "$NAME" grep -q '<uniqueid type="youtube"' "/downloads/${stem}.nfo" \
+    && ok "the NFO carries the youtube uniqueid" \
+    || fail "the NFO has no <uniqueid type=\"youtube\">"
+else
+  fail "no .nfo beside the media: the NFO hook did not run for a yt-dlp item"
+fi
+[ "$(docker exec "$NAME" sh -c 'ls -d /downloads/0*/ 2>/dev/null | wc -l' | tr -d ' ')" = "0" ] \
+  && ok "no per-job scratch directory survived the download" \
+  || fail "a per-job scratch directory is still under /downloads"
+term_msg="$(printf '%s' "$item" | jget msg)"
+[ -z "$term_msg" ] \
+  && ok "the finished row carries msg=null" \
+  || fail "the finished row still carries msg=${term_msg}"
+v1_msg="$(req "${BASE}/history" | jget done.0.msg)"
+[ -z "$v1_msg" ] \
+  && ok "v1 history: done[0].msg is null" \
+  || fail "v1 history: done[0].msg=${v1_msg}"
+nfo_runs="$(req "${BASE}/healthz" | jget components.nfo.runs_total)"
+[ "${nfo_runs:-0}" -ge 1 ] 2>/dev/null \
+  && ok "healthz: components.nfo.runs_total=${nfo_runs}" \
+  || fail "healthz: components.nfo.runs_total=${nfo_runs:-<absent>} after a completed download"
 
 # The file route, then the same route with a Range.
 full_code="$(code "${BASE}/${download_url}")"
