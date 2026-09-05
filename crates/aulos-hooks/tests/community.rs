@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aulos_core::clock::FakeClock;
+use aulos_core::error::{ErrorCode, WireError};
 use aulos_core::selection::DownloadType;
-use aulos_core::status::TerminalStatus;
+use aulos_core::status::{Status, TerminalStatus};
 use aulos_hooks::hook::{BatchEntry, Hook};
 use aulos_hooks::{HookDispatcher, HookRunner, HookStore, ManifestHook};
 use aulos_provider::command::{HookSpec, load_manifest_with_env};
@@ -420,6 +421,73 @@ async fn debounced_batching_renders_count_and_titles_json() {
 
     let requests: Vec<Request> = server.received_requests().await.unwrap_or_default();
     assert_eq!(requests.len(), 1, "three completions, one call");
+    server.verify().await;
+}
+
+/// A debounced batch's single-item tokens and its batch tokens describe the **same** event: the
+/// first one of the window. Regression test for a representative that was overwritten by every
+/// later arrival, which rendered `{title}` from the last event while `{status}` and
+/// `{error_message}` still came from the first — a notification that named a failed download and
+/// reported the successful one's status (DESIGN §13.4).
+#[tokio::test]
+async fn a_debounced_batch_renders_its_first_event_not_its_last() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let toml = format!(
+        "{HEADER}\n[[hook]]\nid = \"batch\"\non = [\"finished\", \"error\"]\n\
+         debounce_ms = 150\nmax_wait_ms = 3000\n\
+         http = {{ url = \"{}/batch\", \
+         body = \"title={{title}} titles={{titles_json}} status={{status}} message={{error_message}}\" }}\n",
+        server.uri()
+    );
+    let (dir, mut hooks) = hooks_from(&toml);
+    let hook: Arc<dyn Hook> = Arc::new(ManifestHook::new(hooks.remove(0), dir.path()));
+
+    let dispatcher = HookDispatcher::with_hooks(
+        config(&[]),
+        vec![Arc::clone(&hook)],
+        Arc::new(FakeClock::default()),
+    );
+    let health = dispatcher.health_handle();
+    let mut ev = events();
+    let (factory, _rx) = sink();
+    let task = dispatcher.spawn(ev.inbox(), factory, FakeStore::new());
+
+    // Alpha finishes first; Beta fails inside the same window.
+    ev.completed(&ItemBuilder::finished("Alpha").view()).await;
+    ev.completed(
+        &ItemBuilder::finished("Beta")
+            .status(Status::Error)
+            .error(WireError::new(ErrorCode::Unavailable, "Video unavailable"))
+            .view(),
+    )
+    .await;
+
+    assert!(
+        until(|| health
+            .health()
+            .stat("hook:media/batch")
+            .is_some_and(|s| s.runs_total == 1))
+        .await,
+        "{:?}",
+        health.health()
+    );
+    drop(ev.tx);
+    task.await.expect("clean stop");
+
+    let requests: Vec<Request> = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1, "two events, one coalesced call");
+    let body = String::from_utf8(requests[0].body.clone()).expect("utf-8 body");
+    assert_eq!(
+        body, "title=Alpha titles=[\"Alpha\",\"Beta\"] status=finished message=",
+        "the single-item tokens and titles_json[0] must be the same event"
+    );
     server.verify().await;
 }
 

@@ -733,9 +733,15 @@ async fn debounce_worker(hook: Arc<dyn Hook>, mut rx: mpsc::Receiver<Job>, deps:
                 Some(job) => {
                     if pending.is_empty() {
                         first_at = tokio::time::Instant::now();
+                        // The window's FIRST event is its representative, and it stays the
+                        // representative however many more arrive: `ManifestHook::template_ctx`
+                        // reads `{status}`/`{error_code}`/`{error_message}` from `batch[0]` and
+                        // `{title}`/`{filename}`/`{url}`/… from this item, so letting a later
+                        // event win here would render a payload that names one download and
+                        // reports another's outcome (§13.4).
+                        representative = Some(job.item);
                     }
                     pending.push(job.entry);
-                    representative = Some(job.item);
                     // Each event extends the window, but never past `first_at + max_wait`.
                     let cap = first_at + d.max_wait;
                     deadline = Some((tokio::time::Instant::now() + d.window).min(cap));
@@ -788,11 +794,13 @@ async fn fire(
     if pending.is_empty() {
         return;
     }
-    let batch = std::mem::take(pending);
     // The batch's first event is the representative, so `{title}` and `{titles_json}[0]` agree.
+    // Taken before the batch is drained, so a (impossible) missing representative cannot swallow
+    // the pending events.
     let Some(item) = representative.take() else {
         return;
     };
+    let batch = std::mem::take(pending);
     if let Some(s) = deps.state.slot(&hook.id()) {
         s.pending.store(false, Atomic::Relaxed);
     }

@@ -3364,6 +3364,11 @@ server's own environment at load time:
 | `{count}` | number of coalesced events in a debounced batch (1 when `debounce_ms = 0`) |
 | `{titles_json}`, `{filenames_json}` | JSON arrays for a debounced batch |
 
+In a debounced batch every single-item token (`{title}`, `{filename}`, `{status}`,
+`{error_message}`, …) describes the batch's **first** event — the one that opened the window and
+that `{titles_json}[0]` names — so one rendered payload never mixes one download's identity with
+another's outcome.
+
 For an `http` hook, a placeholder inside `url` is percent-encoded; inside `body` and `headers` it
 is JSON-escaped when the body parses as JSON, otherwise inserted raw. A `command` hook substitutes
 at argv level, never through a shell (identical rules and identical isolation to §6.5.3).
