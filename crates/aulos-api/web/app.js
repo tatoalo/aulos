@@ -1044,7 +1044,6 @@ let sheetReturn = null;
 /** The sheet on top (the token sheet stacks over the add sheet), or null. */
 const topSheet = () => (!$('token-sheet').hidden ? $('token-sheet') : $('sheet').hidden ? null : $('sheet'));
 
-
 function inertBg(on) {
   for (const bg of [$('hdr'), $('wrap')]) {
     bg.inert = on;
