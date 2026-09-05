@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-05 (build complete: all 18 work packages plus the final integration pass). Update this file at every checkpoint.
+Last updated: 2026-09-05 evening (production bug round 3 fixed; web UI shipped). Update this file at every checkpoint.
 
 ## What this is
 
@@ -180,13 +180,68 @@ engine. One cross-crate fallout fixed by the orchestrator: the API skip-reasons 
 Integration by the orchestrator: fmt/clippy clean, `cargo test --workspace` green, image rebuilt,
 `AULOS_E2E=1 tests/e2e/run.sh` → `END-TO-END: PASS` (43 checks).
 
+## Production bug round 3 + the web UI (2026-09-05, after the VPS cutover)
+
+The owner cut the VPS over to `ghcr.io/tatoalo/aulos:latest` on 2026-09-05 (legacy import clean:
+0 errors, counts matched) and filed a bug report after the first real download. Three fix agents,
+each adversarially verified and sent back once:
+
+- **Stale `msg` on finished rows** (`6656603`, `1223e96`). `Engine::terminate` kept `msg` on every
+  terminal write, so yt-dlp's last postprocessor frame ("MoveFiles…") survived as the row's
+  subtitle. The terminal write now clears the live line, `handle_stage` also refuses frames while a
+  row awaits its hooks, and migration `0002_clear_finished_msg.sql` backfills rows a pre-fix build
+  settled. PROTOCOL §2.3/§2.4/§3.1 state the rule; `error` rows keep their text via `error`.
+- **NFO hook never ran for yt-dlp** (`fd05830`, `2e8ceb1`, `e9311d5`). Its gate required
+  `provider == "streamingcommunity"`. It now applies to every provider (`AULOS_NFO_PROVIDERS`
+  optional allow-list), renders from the stored entry or the on-disk `.info.json` with the legacy
+  generator's field mapping (fixture-tested against the Python script), writes nothing when it has
+  no metadata, and every hook now reports a skip reason: DEBUG `hook skipped` lines plus
+  `skipped_total`/`last_skip_reason` in `healthz` once anything was declined.
+- **Sidecars split from the media** (`6cab9bc`, `041fb94`). yt-dlp writes `.info.json`/`.description`
+  straight to `paths.home` while the media sits in the per-job scratch dir. Verified against real
+  yt-dlp source; the shim now keeps the whole file set in the scratch dir and sweeps it out with the
+  media, so `%(filepath)q` `Exec` hooks keep working (README: "Exec postprocessors carried over from
+  MeTube"). The legacy `jellyfin_nfo_generator.py` hook is now redundant and can be removed.
+
+Orchestrator additions: `tests/e2e/run.sh` asserts the sidecar, the `.nfo`, the cleared terminal
+`msg` (v1 and v2) and `components.nfo.runs_total >= 1` after the real download; the merged catalog
+no longer lets StreamingCommunity's advisory "Source" `mp4` shadow the yt-dlp quality ladder
+(`9e076d5` — the web UI's default picker exposed it).
+
+**Web UI** — in scope as of 2026-09-05 (BRIEF amendment, DESIGN §24). Designed on a Claude Design
+canvas (artboards in `docs/design/web-ui/`, matching the iOS app's tokens), then built by a
+front-end + server pair, an integration agent, two reviewers (15 findings, all addressed) and a docs
+agent. Framework-free HTML/CSS/ES module embedded in `aulos-api` (`src/web.rs`, `web/`), served at
+`GET <p>` to browsers only (`Accept: text/html`; the JSON identity document is byte-identical for
+everything else, with `Vary: Accept`), assets under `<p>assets/`, PWA manifest, strict CSP, ETag +
+`no-cache`, `AULOS_WEB_UI` flag, `DEFAULT_THEME` finally honoured. Live queue over the v2 WebSocket
+(snapshot + deltas, `since`/`boot` resume, rAF-coalesced row reconciliation by id), add bar driven
+by the catalog, phone layout with a bottom add sheet, token sheet on 401. Tests: 13 Rust route
+tests (`crates/aulos-api/tests/web.rs`) and a 37-test offline Playwright smoke against a PROTOCOL
+v2 mock (`tools/web`, CI job `web`). Not in the UI yet: subscriptions, the generic §4.6 option
+controls, a client `ping`.
+
+Integration by the orchestrator: `cargo fmt --all --check` clean; `cargo clippy --workspace
+--all-targets -- -D warnings` clean; `cargo test --workspace` **1856 passed, 0 failed** across 83
+test binaries; `cargo test -p aulos-workspace-tests` green (one call site followed `nfo::render`'s
+new `Source` argument); image rebuilt; `AULOS_E2E=1 tests/e2e/run.sh` → `END-TO-END: PASS`
+(47 checks; the `healthz` nfo-count assertion polls, because `healthz` is rate-limited and serves a
+cached component set when asked again too soon).
+
 ## Where things stand
 
-- **Server**: reviewed twice, gates and e2e green, published as `ghcr.io/tatoalo/aulos:latest`.
+- **Server**: in production on the VPS since 2026-09-05; round-3 fixes and the web UI are on `main`
+  and published as `ghcr.io/tatoalo/aulos:latest` by `docker.yml` on push.
 - **iOS**: `v2-protocol` branch reviewed (24 fixes), builds, 137 tests incl. live suite green.
-- **Owner tasks**: on-device test of the v2 app (Keychain Sharing on the App ID for the token access
-  group); VPS cutover per DESIGN §19 with the v2 app installed first; StreamingCommunity check against
-  the live site through the VPN; decide whether to merge `v2-protocol` into the iOS default branch.
+- **Owner tasks**: pull the new image on the VPS (the `0002` migration runs at boot and clears the
+  stale "MoveFiles…" rows); remove the `jellyfin_nfo_generator.py` `Exec` hook from
+  `ytdl_options.json` (the built-in NFO hook covers it); open the web UI at the server address;
+  StreamingCommunity check against the live site through the VPN; decide whether to merge
+  `v2-protocol` into the iOS default branch; rotate the Telegram token and Jellyfin key.
+- **Follow-ups recorded in INTEGRATION-NOTES**: the legacy importer parses `items.url` with a bare
+  `url::Url` (a `javascript:` URL in a legacy `queue.json` would be stored; the UI refuses to open
+  it); invert `Hook::applies`/`skip_reason` so the reason is the required method; a subscriptions
+  view and the §4.6 option controls in the web UI.
 
 ## How the work is being done
 
