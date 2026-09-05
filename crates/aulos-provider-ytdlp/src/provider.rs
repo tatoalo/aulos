@@ -19,6 +19,10 @@
 //! per-request overrides and appended the derived postprocessors, so this module only adds the
 //! base and the chapter-splitting step.
 //!
+//! The one thing applied *after* the user merge is [`pin_sidecars_to_the_scratch_dir`]: the
+//! `.info.json` and `.description` have to follow the media into the per-job scratch directory,
+//! and a `paths` key in `YTDL_OPTIONS` replaces the base dict's wholesale.
+//!
 //! [`YtdlpProvider::resolve`] reproduces legacy `__extract_info` with the opposite precedence:
 //! MeTube's extraction keys (`extract_flat`, `noplaylist`, `ignore_no_formats_error`) are applied
 //! **after** the user options, so a preset cannot break resolution. The shim applies them, so
@@ -320,6 +324,9 @@ impl Provider for YtdlpProvider {
         for (key, value) in user {
             options.insert(key, value);
         }
+        // After the user merge, because a `paths` key in `YTDL_OPTIONS` replaces ours wholesale
+        // and its scratch directory needs the same treatment as ours.
+        pin_sidecars_to_the_scratch_dir(&mut options);
 
         if ctx.request.split_by_chapters {
             // Legacy appended this after everything else and pinned the chapter template.
@@ -382,6 +389,48 @@ impl Provider for YtdlpProvider {
 #[must_use]
 pub const fn uses_audio_root(download_type: DownloadType) -> bool {
     matches!(download_type, DownloadType::Audio)
+}
+
+/// The sidecar output types yt-dlp resolves through `paths[<type>]` but writes straight to
+/// `paths.home` and then never moves (DESIGN §9.5).
+///
+/// Subtitles and thumbnails are already written next to the *temp* file and handed to
+/// `MoveFilesAfterDownloadPP`; these two are not. Link shortcut files (`writeurllink` and
+/// friends) share the flaw but are deliberately left alone — see the shim's
+/// `HOME_SIDECAR_TYPES`.
+const HOME_SIDECAR_TYPES: [&str; 2] = ["description", "infojson"];
+
+/// Points the sidecars of [`HOME_SIDECAR_TYPES`] at the job's scratch directory, so the whole
+/// file set lives in one directory at every stage of the download (DESIGN §9.5).
+///
+/// Legacy MeTube had `temp == home`, so nothing ever noticed that yt-dlp writes the
+/// `.info.json` and `.description` at the destination while the media is still in the scratch
+/// directory. With the per-job `/downloads/<ULID>/` of DESIGN §8.7 the split is real, and every
+/// `Exec` postprocessor that resolves a sidecar relative to `%(filepath)q` — MeTube's
+/// `jellyfin_nfo_generator.py` is the one nearly every migrating user carries — fails on it,
+/// because a postprocessor's default `when` is `post_process`, which runs *before* the move.
+///
+/// The shim's `RegisterSidecarsForTheMove` is the other half: yt-dlp does not register these two
+/// for the move, so without it they would stay in the scratch directory the engine deletes.
+///
+/// Nothing is done unless `paths` carries a `temp` that actually differs from `home`, and a
+/// per-type entry the operator set themselves is never overwritten.
+fn pin_sidecars_to_the_scratch_dir(options: &mut Map<String, Value>) {
+    let Some(paths) = options.get_mut("paths").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(temp) = paths.get("temp").and_then(Value::as_str) else {
+        return;
+    };
+    if temp.is_empty() || Some(temp) == paths.get("home").and_then(Value::as_str) {
+        return;
+    }
+    let temp = temp.to_owned();
+    for kind in HOME_SIDECAR_TYPES {
+        paths
+            .entry(kind)
+            .or_insert_with(|| Value::String(temp.clone()));
+    }
 }
 
 /// The extraction option dict: the layered user options plus legacy's `__extract_info` keys.
@@ -520,6 +569,71 @@ mod tests {
             );
             assert!(download.debug, "download policy at LOGLEVEL={level}");
         }
+    }
+
+    /// The `paths` dict the download builds, with `user` merged over it exactly as `download`
+    /// does — the smallest thing that reproduces the option assembly without a shim process.
+    fn download_paths(out: &str, tmp: &str, user: &Value) -> Value {
+        let mut options: Map<String, Value> =
+            serde_json::from_value(json!({ "paths": { "home": out, "temp": tmp } })).unwrap();
+        for (key, value) in user.as_object().cloned().unwrap_or_default() {
+            options.insert(key, value);
+        }
+        pin_sidecars_to_the_scratch_dir(&mut options);
+        options["paths"].clone()
+    }
+
+    #[test]
+    fn the_sidecars_are_written_into_the_scratch_directory_beside_the_media() {
+        let paths = download_paths("/downloads", "/downloads/01ABC", &json!({}));
+        assert_eq!(paths["home"], json!("/downloads"));
+        assert_eq!(paths["temp"], json!("/downloads/01ABC"));
+        // Bug 2b: without these two, yt-dlp writes the `.info.json`/`.description` straight to
+        // `home` while the media is still in `temp`, and `%(filepath)q` Exec hooks break.
+        for kind in HOME_SIDECAR_TYPES {
+            assert_eq!(paths[kind], json!("/downloads/01ABC"), "paths.{kind}");
+        }
+        // The two yt-dlp already writes next to the temp file and moves itself stay unpinned:
+        // pinning them would make `MoveFiles` see source == destination and strand them.
+        for kind in ["subtitle", "thumbnail"] {
+            assert!(paths.get(kind).is_none(), "paths.{kind} must stay unset");
+        }
+    }
+
+    #[test]
+    fn a_scratch_directory_that_is_the_download_directory_pins_nothing() {
+        // Legacy MeTube's layout, and the `TEMP_DIR == DOWNLOAD_DIR` default: there is no split
+        // to fix, and a pinned entry would only add noise to the job dict.
+        let paths = download_paths("/downloads", "/downloads", &json!({}));
+        for kind in HOME_SIDECAR_TYPES {
+            assert!(paths.get(kind).is_none(), "paths.{kind}");
+        }
+    }
+
+    #[test]
+    fn a_user_paths_dict_is_pinned_to_its_own_scratch_directory_but_never_overridden() {
+        let paths = download_paths(
+            "/downloads",
+            "/downloads/01ABC",
+            &json!({ "paths": { "home": "/elsewhere", "temp": "/scratch", "infojson": "/meta" } }),
+        );
+        // Their `paths` replaces ours wholesale (legacy spread `**self.ytdl_opts` last)…
+        assert_eq!(paths["home"], json!("/elsewhere"));
+        assert_eq!(paths["temp"], json!("/scratch"));
+        // …their explicit per-type entry is theirs to keep…
+        assert_eq!(paths["infojson"], json!("/meta"));
+        // …and the type they said nothing about still follows the media.
+        assert_eq!(paths["description"], json!("/scratch"));
+    }
+
+    #[test]
+    fn a_paths_dict_with_no_temp_is_left_exactly_as_it_is() {
+        let paths = download_paths(
+            "/downloads",
+            "/downloads/01ABC",
+            &json!({ "paths": { "home": "/elsewhere" } }),
+        );
+        assert_eq!(paths, json!({ "home": "/elsewhere" }));
     }
 
     #[test]

@@ -792,6 +792,133 @@ def _entry_error(code, message):
 
 
 # --------------------------------------------------------------------------------------------
+# Sidecars that must travel with the media (DESIGN §9.5)
+# --------------------------------------------------------------------------------------------
+
+HOME_SIDECAR_TYPES = ("description", "infojson")
+"""The output types yt-dlp resolves through ``paths[<type>]`` but never moves itself.
+
+``YoutubeDL.process_info`` writes subtitles and thumbnails next to the **temp** file and hands
+both to ``MoveFilesAfterDownloadPP`` through ``__files_to_move``. These two are written straight
+to ``get_output_path(<type>)`` — i.e. ``paths.home`` unless the type carries its own entry — and
+nothing registers them, so with a per-job scratch directory (``paths.temp`` != ``paths.home``)
+the media sits in the scratch directory while its ``.info.json`` and ``.description`` are already
+at the destination. Every ``Exec`` postprocessor that resolves a sidecar relative to
+``%(filepath)q`` breaks on that split, MeTube's ``jellyfin_nfo_generator.py`` included: user
+postprocessors default to ``when='post_process'``, which runs *before* the move.
+
+Rust points these types at ``paths.temp`` (``provider.rs::pin_sidecars_to_the_scratch_dir``)
+and ``RegisterSidecarsForTheMove`` registers whatever landed there, so at every stage of the job the
+whole file set lives in one directory. Link shortcut files (``writeurllink`` and friends) are
+deliberately **not** redirected: nothing resolves a ``.url`` from ``%(filepath)q``, and their
+names come from a private helper this shim would have to reimplement to register them.
+"""
+
+
+class RegisterSidecarsForTheMove:
+    """A ``before_dl`` postprocessor that hands the temp-dir sidecars to the MoveFiles step.
+
+    Duck-typed on purpose: ``YoutubeDL.add_post_processor`` only calls ``set_downloader`` and
+    ``YoutubeDL.run_pp`` only calls ``run``, so this needs neither an import of
+    ``yt_dlp.postprocessor`` nor the metaclass that would make it emit ``started``/``finished``
+    ``pp`` frames of its own and change the transcript.
+
+    ``before_dl`` is the one hook that runs *after* the sidecars are on disk and whose
+    ``__files_to_move`` yt-dlp threads back into the download (``process_info``:
+    ``new_info, files_to_move = self.pre_process(info_dict, 'before_dl', files_to_move)``, and
+    ``files_to_move`` is what ``post_process`` later hands ``MoveFilesAfterDownloadPP``). User
+    postprocessors keep their own ``when`` and their own order; nothing here touches them.
+
+    Only files that exist **under** ``get_output_path('temp')`` are registered, so an operator who
+    points ``paths.infojson`` somewhere of their own keeps their file exactly where they put it.
+    """
+
+    def __init__(self):
+        self._downloader = None
+
+    def set_downloader(self, downloader):
+        """The half of the postprocessor protocol ``add_post_processor`` uses."""
+        self._downloader = downloader
+
+    def run(self, info):
+        """Registers each existing sidecar with an empty destination.
+
+        ``''`` is yt-dlp's own convention for "put it next to the media": ``MoveFilesAfterDownload``
+        turns a falsy destination into ``os.path.join(info['__finaldir'], basename)``, which is
+        where the sidecar would have been written without the scratch directory.
+        """
+        try:
+            self._register(info)
+        except Exception as exc:  # noqa: BLE001 - a sidecar must never fail a download
+            self._debug(f"could not register the sidecars for the move: {clean_message(exc)}")
+        return [], info
+
+    def _register(self, info):
+        ydl = self._downloader
+        if ydl is None:
+            return
+        temp_root = os.path.abspath(ydl.get_output_path("temp"))
+        files_to_move = info.setdefault("__files_to_move", {})
+        for kind, path in self._sidecars(info):
+            if not path or path in files_to_move:
+                continue
+            absolute = os.path.abspath(path)
+            if absolute != temp_root and not absolute.startswith(temp_root + os.sep):
+                continue
+            if not os.path.isfile(absolute):
+                continue
+            files_to_move[path] = ""
+            self._debug(f"the {kind} sidecar moves with the media: {path}")
+
+    def _sidecars(self, info):
+        """``(type, path)`` for every ``HOME_SIDECAR_TYPES`` sidecar this job may have written."""
+        ydl = self._downloader
+        for kind in HOME_SIDECAR_TYPES:
+            if kind == "infojson" and info.get("infojson_filename"):
+                yield kind, info["infojson_filename"]
+                continue
+            yield kind, ydl.prepare_filename(info, kind)
+
+    def _debug(self, message):
+        """yt-dlp's own debug channel, which the shim's ``FrameLogger`` turns into a ``log`` frame."""
+        write_debug = getattr(self._downloader, "write_debug", None)
+        if write_debug is not None:
+            with contextlib.suppress(Exception):
+                write_debug(message)
+
+
+class RepointSidecarsAfterTheMove:
+    """An ``after_move`` postprocessor that rewrites the info dict's sidecar paths to the final ones.
+
+    ``MoveFilesAfterDownloadPP`` updates ``filepath`` but not ``infojson_filename``, because
+    upstream never moves the info json: it was written at the destination in the first place. Now
+    that it travels with the media, the recorded path would otherwise name a scratch directory
+    that the engine deletes moments later — a lie for any ``after_move`` postprocessor reading
+    ``%(infojson_filename)q``, and for anything downstream that trusts the finished info dict.
+    """
+
+    def __init__(self):
+        self._downloader = None
+
+    def set_downloader(self, downloader):
+        """The half of the postprocessor protocol ``add_post_processor`` uses."""
+        self._downloader = downloader
+
+    def run(self, info):
+        """Repoints every recorded sidecar that MoveFiles carried into the final directory."""
+        with contextlib.suppress(Exception):
+            finaldir = os.path.dirname(os.path.abspath(str(info.get("filepath") or "")))
+            for key in ("infojson_filename", "__infojson_filename"):
+                recorded = info.get(key)
+                if not recorded or os.path.isfile(recorded):
+                    continue
+                moved = os.path.join(finaldir, os.path.basename(str(recorded)))
+                if os.path.isfile(moved):
+                    info[key] = moved
+        return [], info
+
+
+# --------------------------------------------------------------------------------------------
 # mode = download
 # --------------------------------------------------------------------------------------------
 
@@ -979,6 +1106,11 @@ def run_download(channel, job, options, policy):
 
     try:
         with yt_dlp.YoutubeDL(params) as ydl:
+            # Appended, not spliced into `postprocessors`: user postprocessors keep their own
+            # `when` (the API default is `post_process`, i.e. before the move) and their own
+            # order, and these two run in stages of their own (DESIGN §9.5).
+            ydl.add_post_processor(RegisterSidecarsForTheMove(), when="before_dl")
+            ydl.add_post_processor(RepointSidecarsAfterTheMove(), when="after_move")
             retcode = ydl.download([job["url"]])
     except Exception as exc:
         if run.live_status and not isinstance(exc, _EntryError):

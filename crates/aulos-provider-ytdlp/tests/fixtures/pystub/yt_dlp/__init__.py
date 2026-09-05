@@ -21,6 +21,7 @@ Scenario keys (all optional):
 ``raise``            ``{"class": "...", "message": "...", "errno": 28}`` raised instead.
 ``retcode``          what ``download`` returns. Defaults to 0.
 ``sleep``            seconds to sleep at the end of ``download``.
+``sidecars``         runs the miniature ``process_info`` of ``_run_sidecar_plan`` below.
 """
 
 import json
@@ -36,6 +37,18 @@ __all__ = ["YoutubeDL", "__version__", "utils"]
 print("STUB NOISE: yt_dlp imported")
 sys.stdout.write('{"v":1,"t":"bye","n":99,"forged":true}\n')
 sys.stdout.flush()
+
+
+_OUTTMPL_EXTS = {"description": "description", "infojson": "info.json"}
+"""``yt_dlp.utils.OUTTMPL_TYPES``, for the two types the sidecar tests exercise."""
+
+
+def _listing(directory):
+    """The sorted file names in ``directory``, or ``[]`` when it does not exist."""
+    try:
+        return sorted(os.listdir(directory))
+    except OSError:
+        return []
 
 
 def _scenario():
@@ -70,6 +83,9 @@ class YoutubeDL:
     def __init__(self, params=None):
         self.params = dict(params or {})
         self.scenario = _scenario()
+        self.postprocessors = {}
+        self.debug_lines = []
+        self.layout = {}
 
     def __enter__(self):
         return self
@@ -89,6 +105,113 @@ class YoutubeDL:
             for spec in (f"%({key})s", f"%({key})d", f"%({key})02d"):
                 out = out.replace(spec, str(value))
         return out
+
+    def add_post_processor(self, pp, when="post_process"):
+        """Upstream appends to ``_pps[when]`` and calls ``set_downloader``; so does this."""
+        self.postprocessors.setdefault(when, []).append(pp)
+        pp.set_downloader(self)
+
+    def get_output_path(self, dir_type="", filename=None):
+        """``YoutubeDL.get_output_path``: ``paths[dir_type]`` joins **onto** ``paths['home']``.
+
+        The join is what makes an absolute per-type entry win outright and a relative one land
+        beside the temp files, which is the semantics the shim's redirect relies on.
+        """
+        paths = self.params.get("paths") or {}
+        return os.path.join(
+            paths.get("home", ""),
+            paths.get(dir_type, "") if dir_type else "",
+            filename or "",
+        )
+
+    def prepare_filename(self, info, dir_type=""):
+        """``YoutubeDL.prepare_filename`` for the flat ``%(title)s.%(ext)s`` the tests use."""
+        ext = _OUTTMPL_EXTS.get(dir_type) or info.get("ext") or "mp4"
+        title = info.get("title", "clip")
+        return self.get_output_path(dir_type, f"{title}.{ext}")
+
+    def write_debug(self, message):
+        """The debug channel the sidecar postprocessors report through."""
+        self.debug_lines.append(str(message))
+
+    def _run_pps(self, when, info):
+        for pp in self.postprocessors.get(when, []):
+            _, info = pp.run(info)
+        return info
+
+    def _run_sidecar_plan(self, plan):
+        """A miniature of ``YoutubeDL.process_info``, faithful to the three steps under test.
+
+        1. The sidecars are written to ``prepare_filename(info, <type>)`` — ``paths.home`` unless
+           the type carries its own entry — while the media is written to the temp directory.
+        2. ``before_dl`` postprocessors run with ``__files_to_move`` threaded in **and out**
+           (upstream: ``new_info, files_to_move = self.pre_process(info_dict, 'before_dl',
+           files_to_move)``).
+        3. ``MoveFilesAfterDownloadPP`` moves every registered file, resolving a falsy
+           destination to ``join(__finaldir, basename)``; then ``after_move`` postprocessors run.
+        """
+        info = dict(plan.get("info") or {"title": "Stub clip", "ext": "mp4"})
+        media = self.get_output_path("temp", "{}.{}".format(info["title"], info["ext"]))
+        final = self.prepare_filename(info)
+        files_to_move = {}
+
+        for kind in plan.get("write", []):
+            path = self.prepare_filename(info, kind)
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"{kind}\n")
+            if kind == "infojson":
+                info["infojson_filename"] = path
+                info["__infojson_filename"] = path
+            # Upstream registers the subtitle and thumbnail it wrote next to the temp file; the
+            # types this plan writes through `paths[<type>]` it does not.
+        for kind, path in (plan.get("write_registered") or {}).items():
+            path = os.path.join(self.get_output_path("temp"), path)
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"{kind}\n")
+            files_to_move[path] = os.path.join(os.path.dirname(final), os.path.basename(path))
+
+        os.makedirs(os.path.dirname(media) or ".", exist_ok=True)
+        with open(media, "w", encoding="utf-8") as handle:
+            handle.write("media\n")
+
+        info["__files_to_move"] = files_to_move
+        info = self._run_pps("before_dl", info)
+        files_to_move = info.pop("__files_to_move", {})
+        self.layout["registered"] = sorted(files_to_move)
+
+        info["filepath"] = media
+        info["__finaldir"] = os.path.dirname(os.path.abspath(final))
+        info = self._run_pps("post_process", info)
+        self.layout["at_post_process"] = _listing(os.path.dirname(media))
+
+        files_to_move[media] = final
+        for old, new in files_to_move.items():
+            new = new or os.path.join(info["__finaldir"], os.path.basename(old))
+            if os.path.abspath(old) == os.path.abspath(new) or not os.path.exists(old):
+                continue
+            os.replace(old, new)
+        info["filepath"] = final
+        info = self._run_pps("after_move", info)
+
+        self.layout["home"] = _listing(os.path.dirname(final))
+        self.layout["temp"] = _listing(os.path.dirname(media))
+        self.layout["infojson_filename"] = info.get("infojson_filename")
+        self.layout["debug"] = list(self.debug_lines)
+        dump = os.environ.get("AULOS_STUB_DUMP")
+        if dump:
+            with open(dump, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "paths": self.params.get("paths"),
+                        "postprocessors": {
+                            when: len(pps) for when, pps in self.postprocessors.items()
+                        },
+                        "layout": self.layout,
+                    },
+                    handle,
+                )
 
     def extract_info(self, url, download=False):
         """Returns the scenario's info dict, or a synthesised playlist / single video."""
@@ -153,6 +276,9 @@ class YoutubeDL:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("stub payload\n")
+
+        if self.scenario.get("sidecars"):
+            self._run_sidecar_plan(self.scenario["sidecars"])
 
         if "raise" in self.scenario:
             _raise(self.scenario["raise"])

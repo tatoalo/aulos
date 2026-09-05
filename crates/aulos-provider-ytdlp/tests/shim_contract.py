@@ -372,6 +372,114 @@ def test_outtmpl():
     check(result["templates"] == ["Mix", "3"], f"got {result.get('templates')}")
 
 
+def _sidecar_download(tmp, pinned, extra_paths=None):
+    """Runs one download whose stub writes an ``.info.json`` and a ``.description``.
+
+    ``pinned`` chooses between the two layouts: the yt-dlp default, where both sidecars are
+    written to ``paths.home`` while the media is still in the scratch directory, and the one the
+    Rust option builder now produces, where ``paths.infojson``/``paths.description`` name the
+    scratch directory. Returns the stub's dump of the option dict and the resulting layout.
+    """
+    home = os.path.join(tmp, "downloads")
+    temp = os.path.join(home, "01JOBULID")
+    os.makedirs(temp)
+    paths = {"home": home, "temp": temp}
+    if pinned:
+        paths.update({"description": temp, "infojson": temp})
+    paths.update(extra_paths or {})
+    dump = os.path.join(tmp, "dump.json")
+    scenario = scenario_file(
+        tmp,
+        {
+            "sidecars": {
+                "info": {"title": "Stub clip", "ext": "mp4"},
+                "write": ["infojson", "description"],
+            }
+        },
+    )
+    code, frames, stdout, _ = run_job(
+        {
+            "v": 1,
+            "protocol": 1,
+            "job_id": "t",
+            "mode": "download",
+            "url": "https://stub.test/x",
+            "options": {"paths": paths, "writeinfojson": True, "writedescription": True},
+            "policy": {"download_dir": home, "temp_dir": temp, "emit_progress_every_ms": 0},
+        },
+        scenario=scenario,
+        env={"AULOS_STUB_DUMP": dump},
+    )
+    check(code == 0, f"pinned={pinned}: exits 0")
+    check(kinds(frames)[-1] == "bye", f"pinned={pinned}: bye is last")
+    check(stdout == "", f"pinned={pinned}: stdout is empty")
+    with open(dump, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def test_sidecars_stay_next_to_the_media():
+    """The `.info.json` and `.description` follow the media instead of racing ahead of it.
+
+    The regression is bug 2b: with a per-job scratch directory yt-dlp writes those two straight
+    to `paths.home` while the media is still in the scratch directory, so a user `Exec`
+    postprocessor — whose default `when` is `post_process`, i.e. before the move — resolves a
+    sidecar relative to `%(filepath)q` and finds nothing.
+    """
+    print("sidecars stay next to the media (bug 2b)")
+    with tempfile.TemporaryDirectory() as tmp:
+        split = _sidecar_download(tmp, pinned=False)
+    # The shape the fix is measured against: at postprocessing time the scratch directory holds
+    # the media alone. This is what broke `jellyfin_nfo_generator.py %(filepath)q`.
+    check(
+        split["layout"]["at_post_process"] == ["Stub clip.mp4"],
+        f"unpinned: the media is alone in the scratch dir, got {split['layout']['at_post_process']}",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        got = _sidecar_download(tmp, pinned=True)
+    check(
+        got["postprocessors"] == {"before_dl": 1, "after_move": 1},
+        f"the shim registers one before_dl and one after_move pp, got {got['postprocessors']}",
+    )
+    check(
+        got["layout"]["at_post_process"]
+        == ["Stub clip.description", "Stub clip.info.json", "Stub clip.mp4"],
+        f"every file is together when postprocessors run, got {got['layout']['at_post_process']}",
+    )
+    check(
+        [os.path.basename(p) for p in got["layout"]["registered"]]
+        == ["Stub clip.description", "Stub clip.info.json"],
+        f"both sidecars are registered for the move, got {got['layout']['registered']}",
+    )
+    check(
+        got["layout"]["home"]
+        == ["01JOBULID", "Stub clip.description", "Stub clip.info.json", "Stub clip.mp4"],
+        f"and all three end up in the final directory, got {got['layout']['home']}",
+    )
+    check(got["layout"]["temp"] == [], f"the scratch dir is empty, got {got['layout']['temp']}")
+    check(
+        os.path.basename(os.path.dirname(got["layout"]["infojson_filename"] or "")) == "downloads",
+        f"the reported info.json path is the final one, got {got['layout']['infojson_filename']}",
+    )
+
+
+def test_a_sidecar_the_operator_placed_elsewhere_is_left_alone():
+    """`paths.infojson` set by hand is the operator's decision, not a file to sweep up."""
+    print("an operator's own paths entry")
+    with tempfile.TemporaryDirectory() as tmp:
+        elsewhere = os.path.join(tmp, "metadata")
+        os.makedirs(elsewhere)
+        got = _sidecar_download(tmp, pinned=True, extra_paths={"infojson": elsewhere})
+        check(
+            os.listdir(elsewhere) == ["Stub clip.info.json"],
+            f"the info.json stayed where the operator put it, got {os.listdir(elsewhere)}",
+        )
+    check(
+        [os.path.basename(p) for p in got["layout"]["registered"]] == ["Stub clip.description"],
+        f"only the scratch-dir sidecar is registered, got {got['layout']['registered']}",
+    )
+
+
 def test_replay_is_byte_faithful():
     """``--replay`` re-emits a transcript verbatim and imports nothing."""
     print("--replay")
@@ -400,6 +508,8 @@ def main():
         test_message_cleaning,
         test_progress_rate_limit,
         test_outtmpl,
+        test_sidecars_stay_next_to_the_media,
+        test_a_sidecar_the_operator_placed_elsewhere_is_left_alone,
         test_replay_is_byte_faithful,
     ):
         test()
