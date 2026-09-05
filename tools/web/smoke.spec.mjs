@@ -22,7 +22,7 @@ const IDS = {
 };
 
 async function startMock(opts = {}) {
-  const args = ['mock-server.mjs', '--port', '0'];
+  const args = ['mock-server.mjs', '--port', String(opts.port ?? 0)];
   if (opts.prefix) args.push('--prefix', opts.prefix);
   if (opts.theme) args.push('--theme', opts.theme);
   if (opts.token) args.push('--token', opts.token);
@@ -375,6 +375,22 @@ test('50 active rows and 20 deltas stay inside the frame budget', withMock({ fre
   expect(result.maxTick).toBeLessThan(50);
   expect(result.avgTick).toBeLessThan(16);
 }));
+
+test('a dropped socket reconnects with backoff and the pill tracks it', async ({ page }) => {
+  let mock = await startMock();
+  const port = mock.port;
+  try {
+    await open(page, mock);
+    mock.stop();
+    await expect(page.locator('#conn-text')).toHaveText('Reconnecting…', { timeout: 15_000 });
+
+    mock = await startMock({ port });                       // same port, a new boot_id
+    await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 25_000 });
+    await expect(page.locator(`.row[data-id="${IDS.dl}"]`)).toBeVisible();
+  } finally {
+    mock.stop();
+  }
+});
 
 test('a queued not_yet_live item reads as scheduled, not as a failure', withMock({}, async ({ page, mock }) => {
   await open(page, mock);

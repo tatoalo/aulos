@@ -438,8 +438,8 @@ function patchRow(r, it) {
     }
     v.acts = sig;
   }
+  // `.more` is what reveals the ⋯ button on desktop; on a phone the CSS always shows it.
   r.el.classList.toggle('more', !!acts.more);
-  r.el.classList.toggle('term', TERMINAL.has(it.status));
 }
 
 function actButton(id, a, primary) {
