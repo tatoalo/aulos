@@ -240,8 +240,10 @@ async fn an_imported_sc_row_and_a_freshly_resolved_one_agree_on_the_sidecar_and_
         }
         .to_json(),
     );
-    let from_imported = nfo::render(&view, Some(blob), NOW_MS).expect("the imported NFO renders");
-    let from_fresh = nfo::render(&view, Some(&fresh_blob), NOW_MS).expect("the fresh NFO renders");
+    let from_imported =
+        nfo::render(&view, blob, nfo::Source::Entry, NOW_MS).expect("the imported NFO renders");
+    let from_fresh =
+        nfo::render(&view, &fresh_blob, nfo::Source::Entry, NOW_MS).expect("the fresh NFO renders");
     assert_eq!(
         from_imported, from_fresh,
         "an imported item's .nfo must match the one a freshly resolved item would get"
