@@ -534,9 +534,17 @@ impl Harness {
 
     /// `SubCmd::Delete`.
     pub async fn delete(&self, ids: Vec<SubId>) -> Vec<SubId> {
+        self.try_delete(ids).await.unwrap()
+    }
+
+    /// `SubCmd::Delete`, keeping the error — what a test that makes the store fail needs.
+    pub async fn try_delete(
+        &self,
+        ids: Vec<SubId>,
+    ) -> Result<Vec<SubId>, aulos_core::subscription::SubError> {
         let (ack, reply) = oneshot::channel();
         self.handle.send(SubCmd::Delete { ids, ack }).await.unwrap();
-        reply.await.unwrap().unwrap()
+        reply.await.unwrap()
     }
 
     /// `SubCmd::Check`.

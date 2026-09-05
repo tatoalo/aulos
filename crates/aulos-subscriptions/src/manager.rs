@@ -461,13 +461,20 @@ impl Manager {
         Ok(Box::new(view))
     }
 
+    /// Legacy `delete_subscriptions`, persist-first (DESIGN §14.3).
+    ///
+    /// The store write comes before the in-memory removal, exactly as in [`Self::update`]. Doing
+    /// it the other way round loses the subscription on a failed write: the caller is told the
+    /// delete failed, but the slot is gone from `list`, its task is aborted so it never checks
+    /// again, and its URL no longer occupies `url_index` — so a re-subscribe to the same feed
+    /// succeeds and the next boot loads *two* rows for it. Legacy kept a whole-map rollback for
+    /// the same reason (legacy spec §7.4).
     async fn delete(&mut self, ids: Vec<SubId>) -> Result<Vec<SubId>, SubError> {
-        let mut removed = Vec::new();
+        // Unknown ids are dropped and a repeated id counted once, matching what the old
+        // `subs.remove(&id)` guard did.
+        let mut removed: Vec<SubId> = Vec::new();
         for id in ids {
-            if let Some(slot) = self.subs.remove(&id) {
-                slot.abort.abort();
-                self.order.retain(|k| k != &id);
-                self.url_index.retain(|_, v| v != &id);
+            if self.subs.contains_key(&id) && !removed.contains(&id) {
                 removed.push(id);
             }
         }
@@ -482,6 +489,13 @@ impl Manager {
             )
             .await
             .map_err(|e| SubError::Other(e.to_string().into_boxed_str()))?;
+        for id in &removed {
+            if let Some(slot) = self.subs.remove(id) {
+                slot.abort.abort();
+            }
+            self.order.retain(|k| k != id);
+            self.url_index.retain(|_, v| v != id);
+        }
         for id in &removed {
             self.deps
                 .events

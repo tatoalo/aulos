@@ -460,6 +460,49 @@ async fn deleting_a_subscription_removes_its_row_and_its_seen_set() {
     assert!(h.delete(vec![view.id]).await.is_empty());
 }
 
+/// A delete whose store write fails must leave the subscription exactly as it was: still listed,
+/// still holding its URL, still scheduled. Dropping the in-memory state first would hide a row
+/// that is still in SQLite — invisible until a restart loaded it again, by which time the operator
+/// has re-subscribed and the feed is checked by two tasks with two seen sets.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_delete_leaves_the_subscription_in_place() {
+    let (h, _p) = with_feed("chan", vec![entry("a")]).await;
+    let view = h.subscribe(&feed_url("chan")).await.expect("subscribed");
+    h.settle().await;
+    h.events.clear();
+
+    // Every later write is `StoreError::Closed` — the transient-store-failure stand-in.
+    let _ = h.store.close().await;
+
+    let err = h
+        .try_delete(vec![view.id.clone()])
+        .await
+        .expect_err("the delete must fail when the store cannot record it");
+    assert!(
+        matches!(err, SubError::Other(_)),
+        "a store failure surfaces as Other, got {err:?}"
+    );
+
+    let listed = h.list().await;
+    assert_eq!(
+        listed.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+        vec![view.id.clone()],
+        "a failed delete may not remove the subscription from the manager"
+    );
+    assert!(
+        h.events.removed().is_empty(),
+        "no subscription_removed event for a delete that did not happen"
+    );
+    // The URL index still holds it, so the operator cannot end up with a duplicate row.
+    assert!(
+        matches!(
+            h.subscribe(&feed_url("chan")).await,
+            Err(SubError::AlreadySubscribed)
+        ),
+        "the deleted-but-not-persisted url must still be taken"
+    );
+}
+
 /// `checking` is `true` while a check runs and `false` afterwards — the observable half of
 /// "`POST subscriptions/check` returns immediately" (DESIGN §14.2).
 #[tokio::test(flavor = "multi_thread")]
