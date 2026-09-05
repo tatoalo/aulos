@@ -199,12 +199,23 @@ pub fn make_dirs(cfg: &Config) -> anyhow::Result<()> {
 /// while the whole legacy queue still sits unread in `STATE_DIR`. The three-way check is exactly
 /// as strong a guard against resurrecting rows the operator deleted.
 ///
-/// On a fatal import the database is deleted and the error is returned, so the next boot retries
-/// from a clean slate rather than serving half a queue.
+/// On a fatal import the error is returned, and the database is deleted **only when this boot is
+/// the one that created it**, so the next boot retries from a clean slate rather than serving half
+/// a queue. That last qualification is not optional: [`ImportFatal::should_delete_db`] was written
+/// when the importer only ever ran against a file this boot had just created, and it is true for
+/// every fatal class except `AlreadyImported` — including the `DbWriteFailed` that the importer's
+/// own "have we already imported?" probe raises when it merely *reads* badly. Without the `fresh`
+/// gate a transient `SQLITE_IOERR` or an expired busy timeout on a flaky volume would delete an
+/// installation's whole queue, history, subscriptions and Telegram config. A database we could
+/// not read is never a database we should remove; leaving it costs nothing, because a
+/// never-imported database is picked up again by the next boot (see the half-created-database
+/// test below).
 ///
 /// # Errors
 /// A store that cannot be opened, or a fatal import.
 pub async fn open_store(cfg: &Config, health: &HealthRegistry) -> anyhow::Result<Store> {
+    // Before `Store::open`, which creates the file: afterwards the answer is always "it exists".
+    let fresh = !cfg.db_path.exists();
     let store = Store::open(StoreOptions::from_config(cfg))
         .map_err(|e| anyhow::anyhow!("could not open {}: {e}", cfg.db_path.display()))?;
     for warning in store.id_warnings() {
@@ -233,7 +244,12 @@ pub async fn open_store(cfg: &Config, health: &HealthRegistry) -> anyhow::Result
         Err(fatal) => {
             tracing::error!("\n{}", fatal.report.render_table());
             let _ = store.close().await;
-            if fatal.should_delete_db()
+            if !fresh {
+                tracing::warn!(
+                    db = %cfg.db_path.display(),
+                    "keeping the existing database: this boot did not create it"
+                );
+            } else if fatal.should_delete_db()
                 && let Err(e) = import::delete_db_files(&cfg.db_path)
             {
                 tracing::warn!("could not remove {}: {e}", cfg.db_path.display());
@@ -739,5 +755,63 @@ mod tests {
             !cfg.db_path.exists(),
             "the half-imported database must be gone so the next boot retries cleanly"
         );
+    }
+
+    /// The regression the "import on every boot" change opened: the importer is now called against
+    /// databases that hold an installation's whole life, and several of its fatal classes are
+    /// raised by conditions that wrote nothing — an unreadable `STATE_DIR` here, a transient
+    /// SQLite read error inside its own idempotence probe in production. `should_delete_db()` is
+    /// true for all of them, so without the `fresh` gate a bind mount that failed to come up would
+    /// delete the queue, the history, the subscriptions and the Telegram config.
+    #[tokio::test]
+    async fn a_fatal_import_never_deletes_a_database_this_boot_did_not_create() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        copy_fixture("v2", &state);
+        let db = root.path().join("aulos.db");
+        let cfg = config::load(&env(&[
+            ("STATE_DIR", &state.display().to_string()),
+            ("DOWNLOAD_DIR", &root.path().display().to_string()),
+            ("AULOS_DB_PATH", &db.display().to_string()),
+        ]))
+        .unwrap();
+
+        // An established installation: one good import, then a clean shutdown.
+        let health = HealthRegistry::new();
+        let store = open_store(&cfg, &health).await.unwrap();
+        assert!(import::stored_report(&store).await.unwrap().is_some());
+        store.close().await.unwrap();
+        assert!(db.is_file(), "the established database");
+
+        // The next boot finds no `STATE_DIR` at all — the volume did not mount, or the operator
+        // cleared the legacy directory once the migration was done. `import` answers
+        // `StateDirUnreadable` before it ever looks at the database, and that fatal reports
+        // `should_delete_db() == true`.
+        let vanished = root.path().join("not-mounted");
+        let cfg2 = config::load(&env(&[
+            ("STATE_DIR", &vanished.display().to_string()),
+            ("DOWNLOAD_DIR", &root.path().display().to_string()),
+            ("AULOS_DB_PATH", &db.display().to_string()),
+        ]))
+        .unwrap();
+        assert_eq!(cfg2.db_path, db, "both boots address the same database");
+
+        let health2 = HealthRegistry::new();
+        let err = open_store(&cfg2, &health2)
+            .await
+            .expect_err("an unreadable STATE_DIR is fatal");
+        assert!(err.to_string().contains("import failed"), "{err}");
+        assert!(
+            db.is_file(),
+            "a database this boot did not create must survive a fatal import"
+        );
+        // And it still holds what the first boot imported.
+        let store2 = Store::open(StoreOptions::from_config(&cfg)).unwrap();
+        assert!(
+            import::stored_report(&store2).await.unwrap().is_some(),
+            "the imported state is intact"
+        );
+        store2.close().await.unwrap();
     }
 }

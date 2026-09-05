@@ -97,6 +97,13 @@ pub async fn execute(args: &Args, cfg: &Config) -> i32 {
         None => args.db.clone(),
     };
 
+    // Asked before `Store::open` creates the file. Same rule as `bootstrap::open_store`: the only
+    // database this command may delete on a fatal is one it created itself and left empty. An
+    // import writes in a single transaction that rolls back, so a pre-existing database has lost
+    // nothing when we fail — and one fatal class (`DbWriteFailed`) is raised by a plain *read*
+    // failure of the destination, which must never be a reason to remove it.
+    let fresh = !args.db.exists();
+
     let mut store_opts = StoreOptions::from_config(cfg);
     store_opts.path = db_path.clone();
     let store = match Store::open(store_opts) {
@@ -120,9 +127,16 @@ pub async fn execute(args: &Args, cfg: &Config) -> i32 {
             print!("{}", render(&fatal.report, args.dry_run));
             eprintln!("import failed: {fatal}");
             if fatal.should_delete_db() && !args.dry_run {
-                match import::delete_db_files(&args.db) {
-                    Ok(()) => eprintln!("removed {}", args.db.display()),
-                    Err(e) => eprintln!("could not remove {}: {e}", args.db.display()),
+                if fresh {
+                    match import::delete_db_files(&args.db) {
+                        Ok(()) => eprintln!("removed {}", args.db.display()),
+                        Err(e) => eprintln!("could not remove {}: {e}", args.db.display()),
+                    }
+                } else {
+                    eprintln!(
+                        "kept {}: it existed before this run and nothing was written to it",
+                        args.db.display()
+                    );
                 }
             }
             EXIT_FAILED
@@ -269,6 +283,29 @@ mod tests {
         skip.skip_corrupt = true;
         assert_eq!(execute(&skip, &cfg()).await, EXIT_OK);
         assert!(db.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same rule as `bootstrap::open_store`: only a database this run created may be removed.
+    /// A mistyped `--state-dir` against a real `--db` used to delete the operator's database, and
+    /// nothing had been written to it — the import runs in one transaction that rolled back.
+    #[tokio::test]
+    async fn a_fatal_keeps_a_database_the_run_did_not_create() {
+        let root = tmp("keep");
+        let state = root.join("state");
+        copy_fixture("v2", &state);
+        let db = root.join("aulos.db");
+
+        assert_eq!(execute(&args(&state, &db), &cfg()).await, EXIT_OK);
+        assert!(db.is_file(), "the established database");
+
+        // A fatal that says nothing about the database: `STATE_DIR` cannot be read at all.
+        let typo = root.join("stat");
+        assert_eq!(execute(&args(&typo, &db), &cfg()).await, EXIT_FAILED);
+        assert!(
+            db.is_file(),
+            "a pre-existing database must survive a fatal that wrote nothing to it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
