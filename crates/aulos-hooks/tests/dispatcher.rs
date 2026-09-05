@@ -450,9 +450,14 @@ async fn a_hook_that_declines_every_event_is_visible_in_health() {
         "the one thing `runs_total: 0` could not say"
     );
 
-    // A hook that ran carries the counter too, at zero, and no reason.
+    // A hook that never declined anything publishes the shape it always did: no counter, no
+    // reason, nothing for the documented stock payload or its snapshot to drift against.
     let jellyfin = view.component("jellyfin").expect("the jellyfin component");
-    assert_eq!(jellyfin.detail["skipped_total"], 0);
+    assert!(
+        !jellyfin.detail.contains_key("skipped_total"),
+        "a zero counter is not published: {:?}",
+        jellyfin.detail
+    );
     assert!(!jellyfin.detail.contains_key("last_skip_reason"));
     assert!(!jellyfin.detail.contains_key("detail"));
 

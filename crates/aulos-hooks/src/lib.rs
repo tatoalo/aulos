@@ -35,9 +35,10 @@
 //!
 //! Every gate a hook applies is a [`hook::SkipReason`], not a bare `false`: the dispatcher logs
 //! `hook skipped` at DEBUG with the hook id, the item id and the reason, counts `skipped_total`
-//! per hook, and `healthz` carries that count plus `last_skip_reason`. A hook that is registered,
-//! healthy and never runs is otherwise indistinguishable from one that has simply had nothing to
-//! do.
+//! per hook, and `healthz` carries that count plus `last_skip_reason` — both only once something
+//! has actually been declined, so a hook that never skips publishes exactly the payload it always
+//! did. A hook that is registered, healthy and never runs is otherwise indistinguishable from one
+//! that has simply had nothing to do.
 
 pub mod audio_sync;
 pub mod dispatcher;

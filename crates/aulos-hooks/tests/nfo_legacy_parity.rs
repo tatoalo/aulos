@@ -19,7 +19,9 @@
 //! m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 //! base = pathlib.Path("crates/aulos-hooks/tests/fixtures")
 //! for src, dst in [("youtube_info.json", "youtube_info.nfo"),
-//!                  ("youtube_series_info.json", "youtube_series_info.nfo")]:
+//!                  ("youtube_series_info.json", "youtube_series_info.nfo"),
+//!                  ("youtube_sparse_info.json", "youtube_sparse_info.nfo"),
+//!                  ("youtube_minimal_info.json", "youtube_minimal_info.nfo")]:
 //!     xml = m.create_nfo_xml(json.loads((base / src).read_text()))
 //!     xml = re.sub(r"<dateadded>[^<]*</dateadded>", "<dateadded>FIXED</dateadded>", xml)
 //!     (base / dst).write_text(xml)
@@ -32,7 +34,7 @@ mod common;
 use std::path::Path;
 
 use aulos_core::item::EntryBlob;
-use aulos_hooks::nfo;
+use aulos_hooks::nfo::{self, Source::Sidecar};
 use common::ItemBuilder;
 
 const NOW: i64 = 1_788_480_000_000; // 2026-09-04T00:00:00Z
@@ -75,7 +77,7 @@ fn a_youtube_info_json_renders_exactly_what_the_legacy_script_rendered() {
     let view = ItemBuilder::finished("Le incredibili elezioni del 2000")
         .provider("ytdlp")
         .view();
-    let ours = nfo::render(&view, Some(&info_json("youtube_info.json")), NOW).expect("render");
+    let ours = nfo::render(&view, &info_json("youtube_info.json"), Sidecar, NOW).expect("render");
     assert_eq!(normalise(&ours), legacy_output("youtube_info.nfo"));
 }
 
@@ -87,7 +89,7 @@ fn a_series_info_json_renders_as_episodedetails_exactly_as_legacy_did() {
         .provider("ytdlp")
         .view();
     let ours =
-        nfo::render(&view, Some(&info_json("youtube_series_info.json")), NOW).expect("render");
+        nfo::render(&view, &info_json("youtube_series_info.json"), Sidecar, NOW).expect("render");
     let theirs = legacy_output("youtube_series_info.nfo");
     assert!(theirs.contains("<episodedetails>"), "{theirs}");
     assert_eq!(normalise(&ours), theirs);
@@ -100,7 +102,48 @@ fn the_comparison_would_notice_a_difference() {
     let view = ItemBuilder::finished("Le incredibili elezioni del 2000")
         .provider("ytdlp")
         .view();
-    let ours = nfo::render(&view, Some(&info_json("youtube_info.json")), NOW).expect("render");
+    let ours = nfo::render(&view, &info_json("youtube_info.json"), Sidecar, NOW).expect("render");
     let tampered = legacy_output("youtube_info.nfo").replace("<runtime>24", "<runtime>25");
     assert_ne!(normalise(&ours), tampered);
+}
+
+/// The three places the renderer used to be more helpful than legacy — and therefore wrong about
+/// the promise that the same `.info.json` yields the same bytes. This one sidecar has all three:
+/// an empty `title` (legacy's `"Unknown Title"` default fires on an **absent** key only), an
+/// `uploader` that is present and `null` (legacy's `info.get("uploader", info.get("channel", ""))`
+/// selects the `None`, so `channel` is *not* consulted and no `<studio>`/`<director>` is written),
+/// and no url of either spelling (legacy writes no `<website>` rather than reaching for the row).
+#[test]
+fn a_sparse_sidecar_gets_legacys_own_fallbacks_not_better_ones() {
+    let view = ItemBuilder::finished("Titolo dalla riga")
+        .provider("ytdlp")
+        .view();
+    let ours =
+        nfo::render(&view, &info_json("youtube_sparse_info.json"), Sidecar, NOW).expect("render");
+    assert_eq!(normalise(&ours), legacy_output("youtube_sparse_info.nfo"));
+    assert!(
+        !ours.contains("<studio>"),
+        "a null uploader writes none: {ours}"
+    );
+    assert!(
+        !ours.contains("<website>"),
+        "and no url writes none: {ours}"
+    );
+    assert!(
+        !ours.contains("Titolo dalla riga"),
+        "the row may not leak into a sidecar rendering: {ours}"
+    );
+}
+
+/// The other end of the same rule: an empty object is still a sidecar, and legacy rendered one.
+/// `Unknown Title` is not a good title, but it is the one the script wrote, and the file it wrote
+/// is the file a cutover must keep producing.
+#[test]
+fn an_empty_sidecar_renders_the_stub_legacy_rendered() {
+    let view = ItemBuilder::finished("Titolo dalla riga")
+        .provider("ytdlp")
+        .view();
+    let ours =
+        nfo::render(&view, &info_json("youtube_minimal_info.json"), Sidecar, NOW).expect("render");
+    assert_eq!(normalise(&ours), legacy_output("youtube_minimal_info.nfo"));
 }

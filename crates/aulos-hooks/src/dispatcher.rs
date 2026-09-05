@@ -697,9 +697,14 @@ fn health_of(hooks: &[Arc<dyn Hook>], state: &State, enabled: bool) -> HooksHeal
         health
             .detail
             .insert("failures_total".to_owned(), failures.into());
-        health
-            .detail
-            .insert("skipped_total".to_owned(), skipped.into());
+        // Only once something has actually been declined: a hook that has never skipped an event
+        // publishes the pre-§13 shape byte for byte, so the documented stock payload (§16.3) and
+        // the snapshot that pins it do not drift apart over a counter that is always zero there.
+        if skipped > 0 {
+            health
+                .detail
+                .insert("skipped_total".to_owned(), skipped.into());
+        }
         if let Some(reason) = &last_skip_reason {
             health
                 .detail

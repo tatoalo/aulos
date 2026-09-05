@@ -15,7 +15,7 @@ use aulos_core::clock::FakeClock;
 use aulos_core::item::EntryBlob;
 use aulos_core::status::TerminalStatus;
 use aulos_hooks::hook::{BatchEntry, Hook};
-use aulos_hooks::nfo::{self, NfoHook};
+use aulos_hooks::nfo::{self, NfoHook, Source};
 use aulos_hooks::{HookRunner, HookStore};
 use common::{Call, FakeStore, ItemBuilder, config, config_rooted, sink};
 
@@ -54,7 +54,8 @@ fn a_freshly_resolved_movie_renders() {
     let view = ItemBuilder::finished("Il Grande Film")
         .provider("streamingcommunity")
         .view();
-    let xml = nfo::render(&view, Some(&fixture("sc_movie_state.json")), NOW).expect("render");
+    let xml =
+        nfo::render(&view, &fixture("sc_movie_state.json"), Source::Entry, NOW).expect("render");
     insta::assert_snapshot!("movie_state", xml);
     assert_eq!(
         elements(&xml),
@@ -75,7 +76,8 @@ fn a_freshly_resolved_episode_renders_as_episodedetails() {
     let view = ItemBuilder::finished("Mare Fuori S01E02 - Il segreto di Napoli")
         .provider("streamingcommunity")
         .view();
-    let xml = nfo::render(&view, Some(&fixture("sc_episode_state.json")), NOW).expect("render");
+    let xml =
+        nfo::render(&view, &fixture("sc_episode_state.json"), Source::Entry, NOW).expect("render");
     insta::assert_snapshot!("episode_state", xml);
     assert_eq!(
         elements(&xml),
@@ -103,7 +105,13 @@ fn an_imported_episode_keeps_every_legacy_element() {
     let view = ItemBuilder::finished("Mare Fuori S01E02 - Il segreto di Napoli")
         .provider("streamingcommunity")
         .view();
-    let xml = nfo::render(&view, Some(&fixture("sc_imported_episode.json")), NOW).expect("render");
+    let xml = nfo::render(
+        &view,
+        &fixture("sc_imported_episode.json"),
+        Source::Entry,
+        NOW,
+    )
+    .expect("render");
     insta::assert_snapshot!("episode_imported", xml);
     assert_eq!(
         elements(&xml),
@@ -147,7 +155,13 @@ fn the_flat_entry_final_shape_renders_too() {
     let view = ItemBuilder::finished("Il Grande Film")
         .provider("streamingcommunity")
         .view();
-    let xml = nfo::render(&view, Some(&fixture("sc_entry_final_movie.json")), NOW).expect("render");
+    let xml = nfo::render(
+        &view,
+        &fixture("sc_entry_final_movie.json"),
+        Source::Entry,
+        NOW,
+    )
+    .expect("render");
     insta::assert_snapshot!("movie_entry_final", xml);
     assert!(
         xml.contains("<uniqueid type=\"streamingcommunity\">sc_1234</uniqueid>"),
@@ -165,7 +179,7 @@ fn a_youtube_entry_gets_the_youtube_uniqueid_type() {
         "title": "A clip",
         "webpage_url": "https://youtu.be/dQw4w9WgXcQ",
     }));
-    let xml = nfo::render(&view, Some(&blob), NOW).expect("render");
+    let xml = nfo::render(&view, &blob, Source::Entry, NOW).expect("render");
     assert!(
         xml.contains("<uniqueid type=\"youtube\">dQw4w9WgXcQ</uniqueid>"),
         "{xml}"
@@ -176,11 +190,14 @@ fn a_youtube_entry_gets_the_youtube_uniqueid_type() {
     );
 }
 
-/// With no blob at all the document is still valid, and the title comes from the row.
+/// A stored entry that carries almost nothing still renders from the row, because the row is the
+/// only thing a StreamingCommunity `state` has to offer for a title and a url. This is the one
+/// source that may do that; `tests/nfo_legacy_parity.rs` pins the sidecar's stricter rules.
 #[test]
-fn an_absent_blob_still_produces_a_document() {
+fn a_thin_entry_falls_back_to_the_row() {
     let view = ItemBuilder::finished("Titolo dalla riga").view();
-    let xml = nfo::render(&view, None, NOW).expect("render");
+    let blob = EntryBlob::new(serde_json::json!({ "title_id": 77 }));
+    let xml = nfo::render(&view, &blob, Source::Entry, NOW).expect("render");
     assert!(xml.contains("<title>Titolo dalla riga</title>"), "{xml}");
     assert!(
         xml.contains("<plot/>"),
@@ -194,6 +211,7 @@ fn an_absent_blob_still_produces_a_document() {
             "originaltitle",
             "plot",
             "dateadded",
+            "uniqueid",
             "website"
         ]
     );
@@ -501,9 +519,19 @@ async fn a_hints_only_blob_does_not_shadow_the_sidecar() {
     )
     .expect("sidecar");
 
+    // Every key DESIGN §7.5 keeps for a channel download, `channel` included — it renders
+    // `<studio>`, so it looks like metadata unless the source rule knows it is a hint.
     let hints = EntryBlob::new(serde_json::json!({
         "hints": { "playlist_index": 3 },
-        "state": { "playlist": "Una playlist", "n_entries": 9 },
+        "state": {
+            "playlist": "Uploads",
+            "playlist_id": "UU1",
+            "playlist_index": 3,
+            "channel": "Il Post",
+            "channel_id": "UC1",
+            "n_entries": 9,
+            "__last_playlist_index": 9,
+        },
     }));
     let store = FakeStore::with_blob(id, hints);
     let (factory, _rx) = sink();
@@ -526,6 +554,10 @@ async fn a_hints_only_blob_does_not_shadow_the_sidecar() {
     assert!(
         written.contains("<uniqueid type=\"youtube\">abc</uniqueid>"),
         "{written}"
+    );
+    assert!(
+        !written.contains("Il Post"),
+        "a hint is not metadata, so it does not render either: {written}"
     );
 }
 
@@ -571,7 +603,9 @@ async fn a_streamingcommunity_blob_wins_over_a_sidecar() {
     assert!(!written.contains("Non usare questo"), "{written}");
 }
 
-/// A sidecar that is not JSON, or is not there at all, still produces a valid document.
+/// A sidecar that is not JSON is not a hook failure — and not a file either. Legacy logged the
+/// `JSONDecodeError` and wrote nothing; writing a stub instead would hand Jellyfin a document
+/// whose only true statement is the title.
 #[tokio::test]
 async fn a_broken_sidecar_is_not_a_hook_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -599,10 +633,99 @@ async fn a_broken_sidecar_is_not_a_hook_failure() {
         )
         .await
         .expect("a broken sidecar is not an error");
-    let written = std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("the nfo exists");
     assert!(
-        written.contains("<title>Titolo dalla riga</title>"),
-        "{written}"
+        !dir.path().join("Clip.nfo").exists(),
+        "unreadable metadata writes no file"
+    );
+}
+
+/// The stock install the bug report describes: `AULOS_NFO_ENABLED` defaults to `true`, but nothing
+/// forces `writeinfojson`, so most downloads finish with no blob and no sidecar. Legacy wrote no
+/// file in that case (`generate_nfo` returns before opening the output), and neither does this —
+/// a `movie/title/plot` stub next to every media file is metadata Jellyfin would adopt.
+#[tokio::test]
+async fn nothing_to_render_from_writes_no_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Titolo dalla riga")
+        .provider("ytdlp")
+        .filename("Clip.mp4");
+    let view = item.view();
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+
+    let store = FakeStore::new();
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    let hook = NfoHook::new();
+    assert!(
+        !hook.health().detail.contains_key("wrote_nothing_total"),
+        "a counter at zero stays off the payload"
+    );
+    runner
+        .run(
+            &hook,
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("having nothing to write is not a failure");
+    // A run that writes nothing is not a skip — the hook did apply — so it needs its own line in
+    // `healthz`, or `runs_total: 1` says a file was written when none was.
+    assert_eq!(hook.wrote_nothing_total(), 1);
+    assert_eq!(hook.health().detail["wrote_nothing_total"], 1);
+    assert!(
+        !dir.path().join("Clip.nfo").exists(),
+        "no metadata, no file: {:?}",
+        std::fs::read_dir(dir.path()).map(|d| d
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>())
+    );
+    assert!(store.writes().is_empty(), "{:?}", store.writes());
+}
+
+/// The migration case the same report describes: a user whose `YTDL_OPTIONS` still runs
+/// `jellyfin_nfo_generator.py` as an `Exec` postprocessor with `"when": "after_move"`. The script
+/// writes its `.nfo` and then deletes the sidecar it read, so the hook arrives with no metadata at
+/// all — and must leave the file that is already there alone rather than truncating it with a stub.
+#[tokio::test]
+async fn an_nfo_written_by_someone_else_is_not_overwritten_with_a_stub() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Titolo dalla riga")
+        .provider("ytdlp")
+        .filename("Clip.mp4");
+    let view = item.view();
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    let theirs =
+        "<?xml version=\"1.0\" ?>\n<movie>\n  <title>Scritto dallo script</title>\n</movie>";
+    std::fs::write(dir.path().join("Clip.nfo"), theirs).expect("their nfo");
+
+    let store = FakeStore::new();
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    runner
+        .run(
+            &NfoHook::new(),
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("the hook is not a failure");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("still there"),
+        theirs,
+        "someone else's NFO survives a hook that has nothing to say"
     );
 }
 
@@ -618,6 +741,13 @@ async fn a_failing_port_does_not_lose_the_written_file() {
     let id = item.id();
     let view = item.view();
     std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    // The engine is down for every call, the blob read included, so the sidecar is what the
+    // document is rendered from — and it is on disk before `drop_entry_blob` is ever attempted.
+    std::fs::write(
+        dir.path().join("Clip.info.json"),
+        br#"{"id":"sc_1234","title":"Clip","extractor":"streamingcommunity"}"#,
+    )
+    .expect("sidecar");
 
     let store = FakeStore::with_blob(id, fixture("sc_movie_state.json"));
     store.fail_with(aulos_core::ports::PortError::Unavailable);

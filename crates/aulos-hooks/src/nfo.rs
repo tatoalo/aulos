@@ -28,12 +28,22 @@
 //! | Provider | Blob at hook time (DESIGN §7.5) | Source used |
 //! |---|---|---|
 //! | `streamingcommunity` | the whole `state` object, kept alive for this hook | the blob |
-//! | `command:<name>` | `state` + `media_id`/`title`/`url` | the blob, sidecar if it carries nothing |
-//! | `ytdlp` | nothing (a playlist child keeps only `outtmpl` hints) | the `<file>.info.json` sidecar |
+//! | `command:<name>` | nothing: `aulos-queue`'s `keeps_entry` is `provider == streamingcommunity`, so the blob is dropped at the terminal write like any other non-SC row | the `<file>.info.json` sidecar if the plugin wrote one, else nothing |
+//! | `ytdlp` | nothing (a playlist child keeps only its `outtmpl` hints, which are not metadata) | the `<file>.info.json` sidecar |
 //!
 //! The sidecar is exactly what the legacy generator read, so a yt-dlp download renders the XML
 //! legacy rendered for the same input — which is what `tests/nfo_legacy_parity.rs` pins against
 //! output captured from `jellyfin_nfo_generator.py` itself.
+//!
+//! # No source, no file
+//!
+//! When neither source carries anything — no blob, no sidecar, or a sidecar that is not JSON —
+//! **nothing is written**. That is legacy's own behaviour (`generate_nfo` returns before opening
+//! the output file when the sidecar is missing) and it is the only safe one here: `writeinfojson`
+//! is an operator's choice, `AULOS_NFO_ENABLED` defaults to `true`, and a document rendered from
+//! the row alone would be a title and an empty plot — a stub Jellyfin would happily adopt as the
+//! local metadata for the file, and a stub that would overwrite a real `.nfo` written by someone
+//! else's tooling. A hook that has nothing to say says nothing.
 //!
 //! # The three blob shapes this must read
 //!
@@ -54,6 +64,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as Atomic};
 
 use aulos_core::id::UnixMs;
 use aulos_core::item::{EntryBlob, ItemView};
@@ -90,7 +101,8 @@ pub const MAX_INFO_JSON_BYTES: u64 = 16 * 1024 * 1024;
 /// A StreamingCommunity `state` has no `title` (DESIGN §10.3 splits the identity into
 /// `title_id`/`episode_id`), while a plain yt-dlp row keeps nothing but `outtmpl` hints — so
 /// "is there a blob?" is the wrong question and "does the blob carry any element?" is the right
-/// one.
+/// one. `channel` is in this list because it renders `<studio>`, but it is also an `outtmpl` hint,
+/// so [`Meta::carries_metadata`] discounts it; see [`is_outtmpl_hint`].
 const METADATA_KEYS: [&str; 12] = [
     "title",
     "id",
@@ -115,6 +127,41 @@ const DATEADDED: &[time::format_description::FormatItem<'_>] =
 
 /// The XML declaration `minidom` writes when `encoding=None`.
 pub const XML_DECL: &str = "<?xml version=\"1.0\" ?>";
+
+/// Legacy's `info.get("title", "Unknown Title")` default, used when a sidecar has no `title` key.
+pub const UNKNOWN_TITLE: &str = "Unknown Title";
+
+/// Where the metadata being rendered came from.
+///
+/// It decides one thing: whether the item row may fill a gap the metadata leaves. A `.info.json`
+/// is rendered exactly as the legacy script rendered it, down to its odd fallbacks (a missing
+/// `title` becomes `"Unknown Title"`, a missing url means no `<website>` at all), because the
+/// promise made to anyone cutting over from `jellyfin_nfo_generator.py` is that the same sidecar
+/// yields the same bytes. A stored `entry_json` had no legacy equivalent — legacy never saw one —
+/// so there the row's own `title` and `url` are used, which is what makes a StreamingCommunity
+/// `state` (DESIGN §10.3 keeps no title in it) render at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Source {
+    /// The item's stored `entry_json`; the row may fill a gap.
+    Entry,
+    /// An on-disk `<file>.info.json`; legacy semantics exactly, no row fallbacks.
+    Sidecar,
+}
+
+/// Whether `key` is one of the output-template hints DESIGN §7.5 keeps for a playlist or channel
+/// child — `^(playlist|channel)` plus `n_entries`/`__last_playlist_index`, which is exactly
+/// `aulos_provider::entry::outtmpl_info`'s key set.
+///
+/// Such a blob is not metadata: `channel` is a hint (it names the channel a playlist child came
+/// from) *and* the source of `<studio>`, so a hint-only blob would otherwise look like metadata
+/// and shadow the sidecar that carries the whole info dict.
+#[must_use]
+pub fn is_outtmpl_hint(key: &str) -> bool {
+    key.starts_with("playlist")
+        || key.starts_with("channel")
+        || key == "n_entries"
+        || key == "__last_playlist_index"
+}
 
 /// A read-only view over an `entry_json` blob with the DESIGN §13.2 lookup chain.
 ///
@@ -193,11 +240,27 @@ impl<'a> Meta<'a> {
         }
     }
 
+    /// Whether `key` is present anywhere in the chain, **including** as an explicit `null`.
+    ///
+    /// This is Python's `key in info`, which is what legacy's nested `info.get(a, info.get(b, ""))`
+    /// idiom actually tested: a present-but-null `uploader` selected `None`, not `channel`.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.roots.iter().any(|r| r.contains_key(key))
+    }
+
     /// Whether any element-bearing key is reachable, i.e. whether rendering from this blob would
     /// produce more than the row alone already gives.
+    ///
+    /// Output-template hints do not count ([`is_outtmpl_hint`]): a yt-dlp playlist or channel
+    /// child keeps `channel`, `playlist_index` and friends in its `state` past the terminal write,
+    /// and rendering from those would produce a title-and-nothing document while the real info
+    /// dict sat unread on disk next to the file.
     #[must_use]
     pub fn carries_metadata(&self) -> bool {
-        METADATA_KEYS.iter().any(|k| self.get(k).is_some())
+        METADATA_KEYS
+            .iter()
+            .any(|k| !is_outtmpl_hint(k) && self.get(k).is_some())
     }
 
     /// `key` as a float.
@@ -287,7 +350,10 @@ impl El {
     }
 }
 
-/// Renders the NFO document for one item (DESIGN §13.2).
+/// Renders the NFO document for one item from one metadata blob (DESIGN §13.2).
+///
+/// There is no "render from nothing": a caller with no metadata writes no file, the way legacy
+/// did. `source` decides whether the row may fill a gap the metadata leaves; see [`Source`].
 ///
 /// `now_ms` is the wall clock the `dateadded` element is stamped from, so the whole renderer is
 /// deterministic under a [`aulos_core::clock::FakeClock`].
@@ -296,10 +362,11 @@ impl El {
 /// [`HookError::Other`] only if the XML writer fails, which for an in-memory `Vec<u8>` it cannot.
 pub fn render(
     item: &ItemView,
-    entry: Option<&EntryBlob>,
+    entry: &EntryBlob,
+    source: Source,
     now_ms: UnixMs,
 ) -> Result<String, HookError> {
-    let meta = Meta::new(entry);
+    let meta = Meta::new(Some(entry));
 
     // Legacy's `bool(...)` truthiness: a `season_number` of 0 does **not** make it an episode,
     // but it is still written when present.
@@ -310,14 +377,19 @@ pub fn render(
         || season.is_some_and(|n| n != 0)
         || episode_number.is_some_and(|n| n != 0);
 
-    let title = {
-        let t = meta.str("title");
-        if t.is_empty() {
-            // Legacy defaulted to "Unknown Title" because it only ever saw a sidecar; here the
-            // row's own title is both available and better, and `ItemView.title` is never empty.
-            item.title.to_string()
-        } else {
-            t
+    // Legacy: `info.get("title", "Unknown Title")` — the default fires on an absent key only, so
+    // an explicitly empty title stayed empty. A stored entry gets the row's title instead, because
+    // a StreamingCommunity `state` has no `title` key at all and "Unknown Title" would be a lie.
+    let title = match source {
+        Source::Sidecar if meta.contains("title") => meta.str("title"),
+        Source::Sidecar => UNKNOWN_TITLE.to_owned(),
+        Source::Entry => {
+            let t = meta.str("title");
+            if t.is_empty() {
+                item.title.to_string()
+            } else {
+                t
+            }
         }
     };
 
@@ -358,9 +430,13 @@ pub fn render(
     }
     els.push(El::new("dateadded", dateadded(now_ms)));
 
-    let uploader = {
-        let u = meta.str("uploader");
-        if u.is_empty() { meta.str("channel") } else { u }
+    // Legacy: `info.get("uploader", info.get("channel", ""))`. `channel` is the fallback for an
+    // **absent** `uploader` only — a present-but-null one selected `None` and wrote no `<studio>`,
+    // which is the shape a yt-dlp sidecar for a video without a named uploader actually has.
+    let uploader = if meta.contains("uploader") {
+        meta.str("uploader")
+    } else {
+        meta.str("channel")
     };
     if !uploader.is_empty() {
         els.push(El::new("studio", uploader.clone()));
@@ -376,15 +452,18 @@ pub fn render(
         els.push(El::new("uniqueid", id).with_attr("type", kind));
     }
 
+    // Legacy: `info.get("original_url", info.get("webpage_url", ""))`, with the same
+    // absent-vs-null rule as `uploader` and no third fallback — a sidecar carrying neither url got
+    // no `<website>`. A stored entry does fall back to the row's url: it is the url the item was
+    // queued with, and for a StreamingCommunity `state` it is the only one there is.
     let website = {
-        let w = meta.str("original_url");
-        if w.is_empty() {
-            let w = meta.str("webpage_url");
-            if w.is_empty() {
-                item.url.to_string()
-            } else {
-                w
-            }
+        let w = if meta.contains("original_url") {
+            meta.str("original_url")
+        } else {
+            meta.str("webpage_url")
+        };
+        if source == Source::Entry && w.is_empty() {
+            item.url.to_string()
         } else {
             w
         }
@@ -527,6 +606,14 @@ pub struct NfoHook {
     enabled: bool,
     /// `AULOS_NFO_PROVIDERS`. Empty means every provider.
     providers: Arc<[Box<str>]>,
+    /// How many applicable items had nothing to render from.
+    ///
+    /// "The hook ran and wrote no file" is the other half of the shape that hid this bug: a skip
+    /// is counted by the dispatcher, but a run that finds neither a stored entry nor a readable
+    /// `.info.json` would otherwise look exactly like a run that wrote an NFO. It is published as
+    /// `wrote_nothing_total` (§16.3), and a non-zero count on a yt-dlp install means the sidecar
+    /// is missing — almost always `writeinfojson` being off.
+    wrote_nothing: Arc<AtomicU64>,
 }
 
 impl Default for NfoHook {
@@ -542,6 +629,7 @@ impl NfoHook {
         Self {
             enabled: true,
             providers: Arc::from([]),
+            wrote_nothing: Arc::default(),
         }
     }
 
@@ -551,7 +639,14 @@ impl NfoHook {
         Self {
             enabled: cfg.nfo_enabled,
             providers: cfg.nfo_providers.iter().cloned().collect(),
+            wrote_nothing: Arc::default(),
         }
+    }
+
+    /// How many applicable items this hook found no metadata for, and so wrote no file for.
+    #[must_use]
+    pub fn wrote_nothing_total(&self) -> u64 {
+        self.wrote_nothing.load(Atomic::Relaxed)
     }
 
     /// Whether `provider` is in the allow-list. An empty list admits everything, which is the
@@ -607,11 +702,20 @@ impl Hook for NfoHook {
     }
 
     fn health(&self) -> HookHealth {
-        if self.enabled {
+        let mut health = if self.enabled {
             HookHealth::ok()
         } else {
             HookHealth::disabled()
+        };
+        // Same rule as `skipped_total` (§16.3): published once it has happened, absent otherwise,
+        // so a healthy install's payload does not grow a counter that is always zero.
+        let wrote_nothing = self.wrote_nothing_total();
+        if wrote_nothing > 0 {
+            health
+                .detail
+                .insert("wrote_nothing_total".to_owned(), wrote_nothing.into());
         }
+        health
     }
 
     async fn run(&self, ctx: HookCtx<'_>) -> Result<(), HookError> {
@@ -623,43 +727,64 @@ impl Hook for NfoHook {
         };
 
         // The stored blob first, the sidecar second. For a StreamingCommunity item the blob is the
-        // whole `state` object and there is no sidecar to read; for a yt-dlp one DESIGN §7.5 keeps
-        // nothing but the `outtmpl` hints, so the `.info.json` legacy read is the only source of
-        // title, plot and tags.
+        // whole `state` object; for every other provider `aulos-queue` drops the blob at the
+        // terminal write (DESIGN §7.5) and a playlist child's surviving `outtmpl` hints are not
+        // metadata, so the `.info.json` legacy read is the only source of title, plot and tags.
         let sidecar_path = info_json_path(file);
-        let from_disk: Option<EntryBlob> = if ctx
-            .entry
-            .is_some_and(|e| Meta::new(Some(e)).carries_metadata())
-        {
+        let from_entry = ctx.entry.filter(|e| Meta::new(Some(e)).carries_metadata());
+        let from_disk: Option<EntryBlob> = if from_entry.is_some() {
             None
         } else {
             read_info_json(&sidecar_path).await
         };
-        let entry: Option<&EntryBlob> = from_disk.as_ref().or(ctx.entry);
+        let source = from_entry
+            .map(|e| (e, Source::Entry))
+            .or_else(|| from_disk.as_ref().map(|e| (e, Source::Sidecar)));
 
-        let xml = render(ctx.item, entry, ctx.clock.now_ms())?;
-        let path = nfo_path(file);
-        tokio::fs::write(&path, xml.as_bytes())
-            .await
-            .map_err(|e| HookError::io(format!("write {}", path.display()), e))?;
-        tracing::info!(path = %path.display(), "created NFO");
+        match source {
+            Some((entry, source)) => {
+                let xml = render(ctx.item, entry, source, ctx.clock.now_ms())?;
+                let path = nfo_path(file);
+                tokio::fs::write(&path, xml.as_bytes())
+                    .await
+                    .map_err(|e| HookError::io(format!("write {}", path.display()), e))?;
+                tracing::info!(path = %path.display(), "created NFO");
 
-        if ctx.cfg.nfo_delete_info_json {
-            match tokio::fs::remove_file(&sidecar_path).await {
-                Ok(()) => tracing::info!(path = %sidecar_path.display(), "deleted info.json"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::warn!(path = %sidecar_path.display(), error = %e, "could not delete info.json");
+                if ctx.cfg.nfo_delete_info_json {
+                    match tokio::fs::remove_file(&sidecar_path).await {
+                        Ok(()) => {
+                            tracing::info!(path = %sidecar_path.display(), "deleted info.json");
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            tracing::warn!(path = %sidecar_path.display(), error = %e, "could not delete info.json");
+                        }
+                    }
                 }
+            }
+            // Legacy warned and exited 0 **without writing**, and so does this: a document
+            // rendered from the row alone is a stub, and a stub is worse than no file at all —
+            // Jellyfin adopts it as the local metadata, and writing one would truncate a `.nfo`
+            // another tool (an `Exec` postprocessor still running the legacy script, say) had
+            // already written correctly.
+            None => {
+                self.wrote_nothing.fetch_add(1, Atomic::Relaxed);
+                tracing::info!(
+                    item = %ctx.item.id,
+                    sidecar = %sidecar_path.display(),
+                    "no metadata for an NFO: no stored entry and no readable .info.json, so nothing was written"
+                );
             }
         }
 
         // DESIGN §7.5: the SC blob is kept past the terminal transition only until this ran, so a
         // StreamingCommunity row is always told to drop it — including when the blob failed to
         // load, since a failed read is not proof there is nothing to drop, and the retryable error
-        // it raises is how that gets another try. Every other provider's row either carries a blob
-        // (a `command` plugin) or had it dropped by the engine at the terminal write (plain
-        // yt-dlp), and the latter is not charged an engine round trip per download.
+        // it raises is how that gets another try. No other provider reaches this with a blob:
+        // `aulos-queue`'s `keeps_entry` is `provider == streamingcommunity`, so a `command` plugin
+        // row is dropped at the terminal write exactly like a yt-dlp one. The second arm is a
+        // guard for a future provider that keeps one, not a path anything takes today — and it is
+        // what keeps a plain download from being charged an engine round trip.
         if ctx.item.provider.as_deref() == Some(PROVIDER) || ctx.entry.is_some() {
             ctx.store.drop_entry_blob(ctx.item.id).await?;
         }
