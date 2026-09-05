@@ -4423,13 +4423,23 @@ services:
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | PR + push to `master` (`paths-ignore: **.md`) | `fmt` (`cargo fmt --check`) · `clippy` (`--all-targets --all-features -- -D warnings`) · `test` (`cargo test --workspace --locked`, `Swatinem/rust-cache`) · `arch` (`cargo test -p aulos-workspace-tests arch`) · `deny` (`cargo deny check advisories bans licenses sources`) · `python` (`ruff` + `py_compile` on `ytdlp_runner.py`, plus the shim contract test that pipes a canned job to it with a stubbed `yt_dlp`) · `coverage` (`cargo llvm-cov`; floors: workspace 70 %, `aulos-store::import` **90 %**, `aulos-api::v1` **90 %**) · `schema` (`print-schema` snapshot) · `gitleaks` |
-| `docker.yml` | push to `master`, tags `v*`, manual dispatch | Buildx, **`linux/amd64` only**, GHA build cache, `VERSION=$(date +%Y.%m.%d)`, tags `ghcr.io/<repo>:latest`, `:<date>`, `:sha-<short>` (+ `:<tag>` on tags). Then `e2e` with `AULOS_E2E=1` on the built image, then `trivy image` (CRITICAL/HIGH, non-blocking) and a `syft` SBOM attached to the release. Push only on `master`/tags or explicit dispatch. |
+| `ci.yml` | PR + push to `main` (`paths-ignore: **.md`) | `fmt` (`cargo fmt --check`) · `clippy` (`--all-targets --all-features -- -D warnings`) · `test` (`cargo test --workspace --locked`, `Swatinem/rust-cache`) · `arch` (`cargo test -p aulos-workspace-tests arch`) · `deny` (`cargo deny check advisories bans licenses sources`) · `python` (`ruff` + `py_compile` on `ytdlp_runner.py`, plus the shim contract test that pipes a canned job to it with a stubbed `yt_dlp`) · `coverage` (`cargo llvm-cov`; floors: workspace 70 %, `aulos-store::import` **90 %**, `aulos-api::v1` **90 %**) · `schema` (`print-schema` snapshot) · `gitleaks` |
+| `docker.yml` | push to `main`, tags `v*`, manual dispatch | Buildx, **`linux/amd64` only**, GHA build cache, `VERSION=$(date +%Y.%m.%d)`, tags `ghcr.io/<repo>:latest`, `:<date>`, `:sha-<short>` (+ `:<tag>` on tags). Then an **offline** smoke on the built image — `doctor`, `healthcheck` against no server (must exit non-zero), and a `URL_PREFIX=metube` container that must reach `healthy`. `trivy` and the `syft` SBOM are CUT. Push only on `main`/tags or explicit dispatch. |
 | `dev-build.yml` | PR labelled/synchronised/closed | if the PR carries `dev`: amd64 build, `VERSION=dev-pr<N>`, push `ghcr.io/<repo>:dev`, comment on the PR. On close: delete the `dev` package version and comment. Ported unchanged. |
 | `update-yt-dlp.yml` | cron `0 0 */3 * *` + manual | ported and hardened, §18.5 |
 | `update-sidecars.yml` | cron `0 2 * * 1` + manual | the same pattern for the two newly-pinned versions, `BGUTIL_TAG` and `NM3U8DL_VERSION`/`_BUILD`, in **separate PRs** so a POT-provider regression is bisectable on its own |
 | `upstream-sync-check.yml` / `upstream-sync-label.yml` | cron `0 3 * * 6` / issue closed | ported as-is; they track `alexta69/metube` releases and store the last-synced version in a `synced:<ver>` label |
 | `release.yml` | tag `v*` | build the amd64 binary, attach it plus the SBOM and image digests, generate the body from `git log <prev tag>..HEAD` |
+
+**CI does not run the network end-to-end suite.** `tests/e2e/run.sh` downloads a real video, and
+YouTube answers GitHub's datacenter ranges with "Sign in to confirm you're not a bot" — so running
+it on a runner measures the runner's IP reputation, not this repository, and it burns CI minutes on
+a 700 MB download. It is a **developer-machine** gate: `AULOS_E2E=1 tests/e2e/run.sh`, and
+`AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 tests/e2e/run.sh` to exercise the release architecture
+from an arm64 Mac (OrbStack runs amd64 under Rosetta). The **one** deliberate network check in CI
+is the `mode=extract` in `update-yt-dlp.yml` (§18.5), which runs every three days and is the entire
+reason that workflow exists: a nightly that still imports but can no longer extract is exactly what
+it must catch before auto-merge.
 
 Every bump workflow uses `concurrency: { group: bump-<name>, cancel-in-progress: false }` so two
 crons cannot race on the same branch.

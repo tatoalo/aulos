@@ -77,11 +77,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke the locally-loaded image
-        if: github.event_name == 'pull_request'
+      # An **offline** smoke: no network beyond the registry pull. The full end-to-end suite
+      # (`tests/e2e/run.sh`) downloads a real video and belongs on a developer machine — YouTube
+      # answers "Sign in to confirm you're not a bot" to GitHub's datacenter ranges, so running it
+      # here tests the runner's IP reputation rather than this repository. The one deliberate
+      # network check in CI is the three-daily `mode=extract` in `update-yt-dlp.yml`, which is the
+      # entire reason that workflow exists.
+      - name: Smoke the built image (offline)
         run: |
           set -eu
           img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
+          # `load` is set only on pull requests; on a push buildx sent the image straight to the
+          # registry, so pull it back before running it.
+          docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
           docker run --rm "$img" doctor
           # `healthcheck` probes a *running* server, so against this one-shot container it must
           # exit non-zero (DESIGN §3.1, PLAN WP-17) — that is the whole point of the subcommand,
@@ -101,20 +109,3 @@ jobs:
           docker logs "$cid" || true
           docker rm -f "$cid" >/dev/null
           test "$s" = healthy || { echo "::error::container never became healthy"; exit 1; }
-
-      - name: End-to-end against the built image
-        if: github.event_name == 'push' || inputs.push
-        env:
-          AULOS_E2E: '1'
-        run: |
-          set -eu
-          if [ ! -x tests/e2e/run.sh ]; then
-            echo "::notice::tests/e2e/run.sh does not exist yet; skipping"; exit 0
-          fi
-          img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
-          # `load` is only set on pull requests, so on this path buildx pushed straight to the
-          # registry and the image is **not** in this runner's local store. `tests/e2e/run.sh`
-          # guards on `docker image inspect`, which does not pull, so without this the whole
-          # suite dies on "no such image" after a successful build.
-          docker pull "$img"
-          AULOS_IMAGE="$img" tests/e2e/run.sh

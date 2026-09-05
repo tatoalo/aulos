@@ -69,6 +69,14 @@ Every work package (WP-00…WP-17) and the final integration pass are done, on `
   `END-TO-END: PASS` — 35 assertions, 0 failures, across both profiles, including a real 690 MB
   CC-BY download through the supervised POT sidecar, a restart mid-download that resumes rather
   than stranding the item, and a legacy `STATE_DIR` import with `errors: []`.
+- **The e2e is a developer-machine gate, by owner's decision (2026-09-05), and CI does not run
+  it.** GitHub's runners get "Sign in to confirm you're not a bot" from YouTube, so on a runner the
+  suite measures the runner's IP reputation rather than this repository — it failed there for
+  exactly that reason before being removed. `docker.yml` now builds the image and smokes it
+  **offline** (`doctor`, `healthcheck` against no server, and a `URL_PREFIX=metube` container that
+  must reach `healthy`). The one deliberate network check in CI is the three-daily `mode=extract`
+  in `update-yt-dlp.yml`. Run the suite locally with `AULOS_E2E=1 tests/e2e/run.sh`, or
+  `AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 tests/e2e/run.sh` for the release architecture.
 - **Carried-forward bullets**: every request `docs/INTEGRATION-NOTES.md` left addressed to the
   integrator is marked **APPLIED** at its own bullet. The one exception is marked **NOT APPLIED**
   and says why: discriminating an engine-task panic in the panic hook needs `tokio_unstable`.

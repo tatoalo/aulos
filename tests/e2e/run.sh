@@ -26,6 +26,12 @@
 #   AULOS_E2E_URL      the video to download  (default the Blender Foundation's CC-BY trailer)
 #   AULOS_E2E_KEEP     1 = keep the container and volume for inspection
 #   AULOS_E2E_PORT     host port              (default 18081)
+#   AULOS_E2E_PLATFORM docker platform        (default: the host's, i.e. no --platform)
+#
+# The release architecture is linux/amd64 (BRIEF §16). To exercise *that* image on an arm64
+# Mac, where OrbStack runs amd64 under Rosetta:
+#
+#   AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 AULOS_E2E_BUILD=1 tests/e2e/run.sh
 set -euo pipefail
 
 if [ "${AULOS_E2E:-0}" != "1" ]; then
@@ -41,6 +47,13 @@ BASE="http://127.0.0.1:${PORT}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 NAME="aulos-e2e-$$"
+# `--platform` is passed only when the caller asked for one, so the default stays the host's
+# native platform and nothing is emulated unless that was the point. The `+` expansion keeps
+# an empty array legal under `set -u` on every bash this script might meet.
+PLATFORM_ARGS=()
+if [ -n "${AULOS_E2E_PLATFORM:-}" ]; then
+  PLATFORM_ARGS=(--platform "${AULOS_E2E_PLATFORM}")
+fi
 VOLUME="aulos-e2e-vol-$$"
 FAILED=0
 
@@ -110,7 +123,8 @@ item_status() {
 
 log "image ${IMAGE}"
 if [ "${AULOS_E2E_BUILD:-0}" = "1" ]; then
-  docker build -f "${ROOT}/docker/Dockerfile" -t "$IMAGE" "$ROOT" \
+  docker build ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
+    -f "${ROOT}/docker/Dockerfile" -t "$IMAGE" "$ROOT" \
     || die "docker build failed"
 fi
 docker image inspect "$IMAGE" >/dev/null 2>&1 \
@@ -119,14 +133,15 @@ ok "image is present"
 
 # `doctor` must be green inside the image: the pinned yt-dlp, ffmpeg, deno and N_m3u8DL-RE are all
 # things the Dockerfile installs, and a missing one is a packaging bug rather than a runtime one.
-docker run --rm "$IMAGE" doctor || die "doctor failed inside the image"
+docker run --rm ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} "$IMAGE" doctor \
+  || die "doctor failed inside the image"
 ok "doctor: every required tool is present"
 
 # --- 1. profile A: a fresh volume -------------------------------------------------------------
 
 log "profile A: a fresh volume"
 docker volume create "$VOLUME" >/dev/null
-docker run -d --name "$NAME" \
+docker run -d --name "$NAME" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
   -p "127.0.0.1:${PORT}:8081" \
   -v "${VOLUME}:/downloads" \
   -e PUID=1000 -e PGID=1000 -e UMASK=022 \
@@ -390,7 +405,7 @@ FIXTURE="${ROOT}/crates/aulos-store/tests/fixtures/state/v2"
 cp "${FIXTURE}"/*.json "${SEED}/.metube/"
 ok "seeded $(ls "${SEED}/.metube" | tr '\n' ' ')"
 
-docker run -d --name "$NAME" \
+docker run -d --name "$NAME" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
   -p "127.0.0.1:${PORT}:8081" \
   -v "${SEED}:/downloads" \
   -e PUID="$(id -u)" -e PGID="$(id -g)" -e CHOWN_DIRS=false -e UMASK=077 \

@@ -158,11 +158,24 @@ docker build -f docker/Dockerfile -t aulos-server:dev .
 AULOS_E2E=1 tests/e2e/run.sh
 ```
 
-It asserts the things only a container can be asked: the `healthz` roll-up with the POT sidecar
+The release architecture is `linux/amd64`. To run the suite against *that* image from an arm64 Mac
+— OrbStack runs amd64 under Rosetta — set the platform:
+
+```sh
+AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 AULOS_E2E_BUILD=1 tests/e2e/run.sh
+```
+
+**This suite is a developer-machine gate and is deliberately not run in CI**: it downloads a real
+video, and YouTube answers GitHub's datacenter ranges with "Sign in to confirm you're not a bot".
+CI builds the image and smokes it offline instead; the one network check there is the three-daily
+`mode=extract` in `update-yt-dlp.yml`.
+
+The suite asserts the things only a container can be asked: the `healthz` roll-up with the POT sidecar
 supervised, `202`-before-extraction, the WebSocket sequence, `PUID`/`PGID`/`UMASK` on the produced
 file, `Range` requests on the file routes, the v1 shim, a restart mid-download resuming rather than
 stranding the item, a clean `docker logs` ERROR sweep, and a second profile that imports a real
-legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_URL`, `AULOS_E2E_PORT`, `AULOS_E2E_KEEP`.
+legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `AULOS_E2E_PORT`, `AULOS_E2E_PLATFORM`,
+`AULOS_E2E_KEEP`.
 
 ### Layout
 
