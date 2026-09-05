@@ -43,6 +43,26 @@ Do not guess the prefix. `GET <p>api/v2/capabilities` echoes it as `url_prefix`,
 `GET <p>version` and `GET <p>healthz`. Construct your paths by appending to the configured base
 URL, then verify once against `capabilities.url_prefix`.
 
+**`GET <p>` is content-negotiated, and it is the only route in the server that is.** When the
+request's `Accept` list contains `text/html` (or `text/*`) the server answers the embedded web UI's
+`index.html`; for every other `Accept` — `application/json`, the bare `*/*` that `curl` and most
+HTTP clients send by default, or no `Accept` header at all — it answers the same small JSON
+identity document it always has, unchanged:
+
+```json
+{ "name": "aulos-server", "version": "1.0.0", "url_prefix": "/", "protocol": "v2" }
+```
+
+`*/*` alone does **not** count as a vote for HTML, precisely so that a client that never thought
+about the header keeps getting JSON. `HEAD` behaves the same. Both representations carry
+`Vary: Accept`. If your HTTP library sets `Accept: text/html` for you — some do — send
+`Accept: application/json` explicitly on this one route, or read `<p>version` instead, which is
+never negotiated. When the operator sets `AULOS_WEB_UI=false` the negotiation disappears and every
+`Accept` gets the identity document.
+
+Nothing else changes for an API client: no other route has an HTML representation, no response body
+or header on any `api/v2/*` route is affected, and the UI adds no endpoint you need to know about.
+
 ### 1.2 Content type and encoding
 
 - Every response body is `application/json; charset=utf-8`, including every error. The only
@@ -91,6 +111,26 @@ A `401` body is always:
 Treat `401` as "show the login sheet". Treat `403` the same way. Treat a non-2xx with an
 unparseable body as a server or proxy problem, not as an expired session — that heuristic is no
 longer needed.
+
+#### The web UI routes are unauthenticated
+
+Three routes are served **without** auth even when `AULOS_API_TOKEN` or the trusted-proxy header is
+configured, because they carry the embedded web UI and nothing else:
+
+| Route | What it is |
+|---|---|
+| `GET <p>` with `Accept: text/html` | `index.html` (the JSON branch of the same route, §1.1, is equally open — it always was) |
+| `GET <p>assets/*` | `app.css`, `app.js`, `icon.svg`, `icon-180.png` |
+| `GET <p>manifest.webmanifest` | the PWA manifest |
+
+They are identical bytes in every deployment and contain no queue data, no configuration and no
+secret; and a browser cannot attach `Authorization: Bearer …` to a document navigation, so gating
+them would answer the first request with a `401` the user has no way to act on — and this server
+never answers auth with a redirect to a login page (above). **Every other route keeps its auth
+exactly as documented here**, which is what the page itself relies on: it treats a `401` from any
+API call or from the WS upgrade as "ask for the token". An operator who wants the page itself gated
+puts the origin behind their proxy's auth, or sets `AULOS_WEB_UI=false`, in which case the assets
+and the manifest answer `404 not_found` like any other unknown route.
 
 ### 1.5 Error envelope
 
@@ -1053,7 +1093,9 @@ always correct because every option has a server-side default.
 | GET | `api/v2/debug/options` | `?item_id=` or an add body | `200` the merged yt-dlp option dict, each key annotated with the layer it came from | 404 |
 | GET | `<p>download/*`, `<p>audio_download/*` | — | the file, with `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `Content-Type`, `X-Content-Type-Options: nosniff` | 404 |
 | GET | `<p>robots.txt` | — | text | — |
-| GET | `<p>` | — | `200 {"name":"aulos-server","version":…,"url_prefix":…,"protocol":"v2"}` | — |
+| GET | `<p>` | — | `200 {"name":"aulos-server","version":…,"url_prefix":…,"protocol":"v2"}` — **unless** the `Accept` list contains `text/html`, which gets the web UI's `index.html` instead (§1.1). The only content-negotiated route; both branches carry `Vary: Accept` | — |
+| GET | `<p>assets/{app.css,app.js,icon.svg,icon-180.png}` | — | the web UI's assets, with `ETag`, `Cache-Control: no-cache`, `nosniff`, `no-referrer`; `304` on `If-None-Match` | 404 when `AULOS_WEB_UI=false` |
+| GET | `<p>manifest.webmanifest` | — | `200 application/manifest+json`, the PWA manifest | 404 when `AULOS_WEB_UI=false` |
 | GET | `<p>metrics` | — | Prometheus text, when enabled | 404 |
 
 `POST api/v2/downloads/cancel-resolve` is the v2 counterpart of the legacy `cancel-add`, and it is

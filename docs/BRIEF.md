@@ -124,10 +124,41 @@ Reference material (read these first):
 
 ## Out of scope (for now)
 
-- A web UI. (A minimal status page may be added later.)
+- ~~A web UI. (A minimal status page may be added later.)~~ — **amended 2026-09-05, see below.**
 - Socket.IO compatibility.
 - Pickle/shelve legacy state import (only schema_version 2 JSON).
 - APNs push (design should leave a hook: a `notifier` trait with Telegram as the first impl).
+
+### Amendment (owner, 2026-09-05): a web UI is IN scope
+
+The first line above is superseded, and so is DESIGN's resolved decision **#27** ("No HTML"). The
+historical text is kept struck through rather than deleted, because the whole shape of the v1.0
+build — the identity document at `GET <p>`, the absence of a static root, the "no HTML anywhere"
+posture of the API — was decided under it, and a reader of the git history needs to see what the
+rules were when those decisions were made.
+
+What is now in scope, and the boundaries it must respect:
+
+- **One page, embedded in the binary.** The UI is `include_str!`/`include_bytes!`d from
+  `crates/aulos-api/web/` and served by `aulos-api`; there is still no static root to mount and
+  still exactly one artifact to ship. Vanilla HTML/CSS/ES2022 modules — no framework, no bundler,
+  no npm dependency, no external origin, no icon font. The two shipped text assets stay under a
+  **70 KB unminified budget**, enforced in CI and by a unit test.
+- **It may not change what the API does.** `GET <p>` is content-negotiated (`Accept: text/html` →
+  the page; everything else, including the bare `*/*` `curl` sends, → the same JSON identity
+  document as before), and that is the **only** content-negotiated route in the server. No other
+  route, no other body, no other header changes for an existing client.
+- **`AULOS_WEB_UI` (bool, default `true`)** turns it off, restoring the pre-UI surface exactly.
+- The page, its assets and its manifest are served **without** auth even when `AULOS_API_TOKEN` or
+  the trusted-proxy header is configured; every API route keeps its auth unchanged (rationale in
+  DESIGN §24.4).
+- Socket.IO is still not emulated, the Angular UI is still not a target, and the iOS client remains
+  the primary client: the page is a second consumer of the same v2 protocol, never a reason to
+  extend it.
+
+DESIGN **§24** is the specification. The design artboards it was built from are
+`docs/design/web-ui/*.dc.html` (`docs/design/web-ui/README.md` explains which are shipped and which
+are rejected alternates).
 
 ## Testing against the user's VPS
 

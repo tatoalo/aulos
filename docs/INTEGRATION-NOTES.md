@@ -2411,3 +2411,121 @@ Two things reached outside a single crate and are recorded here.
   `.info.json`/`.description` now live in it, so a cancelled job destroys them where it used to
   leave them orphaned in `DOWNLOAD_DIR`. README and DESIGN §9.2 both say so; nothing in
   `aulos-queue` needs to change for it.
+
+## Web UI (2026-09-05)
+
+The BRIEF amendment of 2026-09-05 put a web UI in scope and reversed DESIGN decision #27; DESIGN
+§24 is the specification of what shipped. Three agents built it against a written contract — the
+server half (`crates/aulos-api/src/web.rs`), the page (`crates/aulos-api/web/` + `tools/web/`) and
+an integration pass. What follows is where the shipped result differs from that contract, or from
+DESIGN/PROTOCOL, and why. Everything not listed here matches.
+
+### Deviations from the contract as written
+
+- **`Accept: */*` gets JSON, not HTML — and this is the load-bearing one.** The contract said the
+  page is served "when the request's `Accept` header contains `text/html`", with a parenthetical
+  about "`*/*` preceded by `text/html`". `web::wants_html` implements membership over the set of
+  media ranges: `text/html` or `text/*` wins, `*/*` alone does not. It has to be this way. `reqwest`
+  and `curl` put `Accept: */*` on every request and `reqwest` offers no way to omit the header, so
+  counting `*/*` flips `GET <p>` for every existing non-browser client — it broke the pre-existing
+  `rest_meta::the_small_top_level_routes_answer` the first time it was tried. Browsers always send a
+  literal `text/html` first, so the loss is nil. DESIGN §24.3 documents the rule and the reasoning.
+- **`{{THEME}}` appears twice in `index.html`, not once.** The contract specified one occurrence,
+  the `<meta name="aulos-theme">` tag. The shipped page also renders it into `<html data-mode>`,
+  because the stylesheet keys the palette off that attribute and a page that waits for the ES module
+  to run paints a light flash on a dark-themed install. Nothing else changed: still two placeholder
+  *tokens*, still nothing but configuration substituted, and the unit test that walks every `{{` and
+  fails on a third token is unchanged.
+- **`Vary: Accept` was added to `GET <p>`, on both branches.** Not in the contract's header list.
+  One URL with two representations and no `Vary` lets a shared cache serve the page to `curl` and
+  the JSON to a browser. It is omitted when `AULOS_WEB_UI=false`, where the route has one
+  representation again.
+- **`If-None-Match` also matches the weak form `W/"…"`.** The contract said "`If-None-Match` →
+  304". A gzipping reverse proxy weakens the validator on the way out and the browser replays what
+  it stored, so a strict-only comparison turns every revalidation into a full 200 — invisible, and
+  permanently double the page's bandwidth.
+- **The manifest is prefix-correct by being *relative*, not by substitution.** The contract asked
+  for `start_url` and `scope` equal to `<p>`. The shipped `manifest.webmanifest` uses `"./"` for
+  `id`/`start_url`/`scope` and bare `assets/…` for the icons, which resolve against
+  `<p>manifest.webmanifest` and therefore land on the prefix under every posture. The server
+  nonetheless runs the same substitution over it — deliberately, so the two renderers cannot
+  diverge — where it is a no-op, since the file contains no placeholder. The test accepts either
+  spelling by resolving each URL and comparing the resulting path, rather than pinning one
+  implementation.
+- **The WebSocket token rides in the subprotocol, not the query string.** Contract point 4 said
+  `?token=<token>` on the upgrade. The page sends
+  `Sec-WebSocket-Protocol: aulos.v2, bearer.<token>`, which PROTOCOL §1.4 sanctions equally and
+  which — unlike a query parameter — stays out of the reverse proxy's access log. No server change
+  was needed: `auth::presented_tokens` already reads the header and `ws.protocols([WS_SUBPROTOCOL])`
+  still selects `aulos.v2` out of the longer offered list. This is the one client change whose
+  correctness rests on server behaviour rather than on a test in this repository, and it was
+  verified against the real binary.
+
+### Deliberate omissions
+
+- **No client `ping` frame, and no `hello`/`ack`/`watch`/`unwatch`.** The latter four are CUT
+  server-side by the BRIEF's v1.0 scope trims; a collapsed group's children come over
+  `GET api/v2/items?group_id=…` instead, the other route PROTOCOL §2.3 sanctions. The `ping` is
+  omitted because §5.11 makes every client→server frame optional and §5.1 has the server pinging at
+  the WebSocket level every 20 s and closing a socket that stops answering. Three lines in
+  `connect()` if it is ever wanted.
+- **No subscriptions UI.** `subscription`, `subscription_removed` and `ytdl_options` frames are
+  accepted and advance `seq` — a client that skipped their sequence numbers would resume from the
+  wrong point — but nothing renders them. PROTOCOL §9 was outside the scope given.
+- **No generic §4.6 `OptionSpec` renderer.** The add form covers `url`, `download_type`, `format`,
+  `quality`, `codec`, `folder`, `auto_start` and `custom_name_prefix`. `ytdl_options_presets`,
+  `playlist_item_limit`, `split_by_chapters` and the rest of the mechanism are not rendered as
+  controls; a generic renderer driven by the catalog's `OptionSpec` list is the natural next
+  increment, and the 70 KB budget is the constraint it has to fit in.
+
+### Known limitations, recorded rather than fixed
+
+- **"Show older" cannot page *backwards* past the render window.** The completed list is capped at
+  200 rows in the DOM and evicts what falls out (DESIGN §24.9), and `Show older` pages history back
+  through `GET api/v2/items`. What it cannot do is ask for "the batch just before what is shown":
+  PROTOCOL §4.4 defines `order` with `ord` as its only value, items come back ord-ascending, and
+  `cursor` is an opaque server token that a client may not synthesise. So paging resumes from the
+  oldest record forward. Making "older" mean "the batch before the window" needs either `order=-ord`
+  or a boundary cursor in `snapshot.truncated` — a protocol change, not a page change, and not one
+  the current UI justifies.
+- **`crates/aulos-store/src/import/items.rs` still accepts a non-`http(s)` `items.url`.** It parses
+  with a bare `url::Url`, so a legacy `queue.json` carrying a `javascript:` URL imports cleanly. The
+  page closes its own half — `openExternal()` refuses to navigate to anything but `http`/`https` —
+  but the row can still be persisted. Rejecting it at import time with the existing "not usable"
+  record error is a one-condition change and is worth doing; it was outside the paths this work was
+  allowed to touch.
+- **Pre-existing, found while writing the UI's tests: a CORS preflight answers 405, not 204.**
+  `OPTIONS api/v2/items/{id}` with `Origin` + `Access-Control-Request-Method: PATCH` reaches
+  `method_not_allowed_fallback` rather than the `CorsLayer`, because axum 0.8's `Router::layer`
+  applies *after* routing and the method router wins. DESIGN §11.1's route-parity table still claims
+  `OPTIONS` on all of the above works for v2. This predates the web UI and is unaffected by it — the
+  page is same-origin and never preflights — but it is a real bug against the documented surface and
+  wants its own fix.
+- **`docs/STATUS.md` has no work-package row for the web UI.** The work was commissioned outside the
+  WP sequence and none of the three agents owned that file.
+
+### Notes for whoever touches this next
+
+- **The CSP is load-bearing on the implementation, not just a header.** `style-src 'self'` without
+  `'unsafe-inline'` forbids `style="…"`, so every measured value — a progress width, the overflow
+  menu's position — is written through the CSSOM. The smoke installs a `securitypolicyviolation`
+  listener before load and asserts it never fires, so an inline handler or an inline `<style>` fails
+  the browser test rather than quietly making the header a lie.
+- **`window.__aulos = { state, rows, add, applyFrame, PREFIX, flushNow }` is a deliberate test
+  seam.** `flushNow()` cancels the pending rAF and renders synchronously, which is how a render tick
+  is timed without waiting on the frame clock. It is read by the smoke and by nothing else.
+- **The 70 KB budget has ~65 bytes of headroom** (`app.js` + `app.css` = 71 615 B = 69.94 KiB). It is
+  enforced twice — CI's `web` job and `aulos-api`'s `the_page_stays_inside_its_size_budget` unit test
+  — so the next feature has to buy its room from somewhere. That is why the page's comments are
+  terse and why a couple of belt-and-braces variants were not taken.
+- **Two commit-hygiene incidents, both repaired, both worth not repeating.** (1) The front-end agent
+  used `git commit --amend` in this shared checkout while other agents were committing; one amend
+  rewrote another agent's commit message. It was restored with `git reset --soft` — `1223e96` is
+  byte-identical to what its author created — and the stray edits went into their own commit
+  (`f2dfce2`). **No agent should use `git commit --amend` in a shared checkout.** (2) The
+  `AULOS_WEB_UI` + `DEFAULT_THEME` changes to `crates/aulos-core/src/config.rs` were swept into
+  another agent's commit, `fd05830` ("aulos-core: add `AULOS_NFO_PROVIDERS` …"). The content is
+  correct in `HEAD`; only the attribution is wrong, and nobody's history was rewritten to fix it.
+- **`tools/web/screenshots/` is gitignored on purpose.** The five artboard-comparison screenshots
+  are regenerated on every smoke run and uploaded by CI's `web` job as the `web-screenshots`
+  artifact; binaries that change on every run do not belong in the repository.

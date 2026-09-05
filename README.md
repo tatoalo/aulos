@@ -92,6 +92,18 @@ the page, and everything else — `Accept: application/json`, the bare `*/*` tha
 - It installs as a PWA (`<prefix>manifest.webmanifest`), which is what makes it usable full-screen
   from an iPhone home screen.
 
+Under 640 px it becomes a phone layout — a bottom add sheet, 44 px targets, safe-area padding —
+from the same stylesheet, so there is no second URL and no app to install. The design source is
+`docs/design/web-ui/` (see [its README](docs/design/web-ui/README.md)); the full specification,
+including the routes, the CSP and the front-end architecture, is
+**[`docs/DESIGN.md` §24](docs/DESIGN.md)**.
+
+Screenshots are **not** checked in — they are generated, not authored. Every run of the browser
+smoke below regenerates five of them into `tools/web/screenshots/` (desktop light and dark, phone
+light and dark, the phone add sheet), and CI's `web` job uploads that directory as the
+`web-screenshots` artifact on every run, so the current look is always one download away from a
+build page.
+
 ## Talking to it
 
 - **[`docs/PROTOCOL.md`](docs/PROTOCOL.md)** is the wire contract: the v2 REST surface (§4), the
@@ -219,6 +231,31 @@ cargo test --workspace
 cargo test -p aulos-workspace-tests      # DESIGN §3 dependency rules + packaging gates
 ```
 
+The web UI has its own suite, in Node rather than Rust, and it is fully offline — it drives a mock
+server that speaks the same protocol, so it needs neither a built binary nor the network:
+
+```sh
+cd tools/web
+npm ci
+npx playwright install chromium
+
+npx playwright test        # the smoke: ~38 tests, chromium, a few seconds
+npm run serve              # a mock on http://127.0.0.1:8099/ to hand-drive the page
+```
+
+This is what CI's `web` job runs, along with the 70 KB budget check on `app.js` + `app.css`. To
+point the *serving* half of the same suite at a real binary instead — the manual check that the two
+sides of the contract meet — start a server and set `AULOS_WEB_BASE` to its base URL **including
+`URL_PREFIX`**; everything that needs the mock's scripted queue skips itself:
+
+```sh
+cargo build -p aulos-server
+DOWNLOAD_DIR=/tmp/dl STATE_DIR=/tmp/state PORT=8091 HOST=127.0.0.1 ./target/debug/aulos-server &
+cd tools/web && AULOS_WEB_BASE=http://127.0.0.1:8091/ npx playwright test
+```
+
+[`tools/web/README.md`](tools/web/README.md) has the mock's flags and what each mode covers.
+
 The end-to-end suite runs the **real image** against a real Creative-Commons video, so it is gated
 behind an env var and never runs under `cargo test`:
 
@@ -256,13 +293,15 @@ legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `A
 | `crates/aulos-provider-ytdlp` | yt-dlp provider and its Python shim |
 | `crates/aulos-provider-sc` | StreamingCommunity provider |
 | `crates/aulos-queue` | Scheduler, slots, resolution pool, cancellation, realtime aggregator |
-| `crates/aulos-api` | axum: v2 REST + WebSocket, v1 shim, health, file serving |
+| `crates/aulos-api` | axum: v2 REST + WebSocket, v1 shim, health, file serving, the embedded web UI |
+| `crates/aulos-api/web` | The shipped page itself — HTML, CSS, one ES module, two icons, the manifest |
 | `crates/aulos-telegram` | teloxide bot |
 | `crates/aulos-subscriptions` | Subscription manager and scheduler |
 | `crates/aulos-hooks` | Jellyfin, NFO, audio-sync and community hooks |
 | `crates/aulos-server` | The binary: wiring, POT sidecar supervisor, config watcher, signals |
 | `docker/` | `Dockerfile`, `entrypoint.sh`, `compose.example.yml` |
 | `plugins/examples/` | Worked example plugins |
+| `tools/web/` | Dev-only: the protocol mock and the Playwright smoke for the page (nothing here ships) |
 | `tests/e2e/` | The container end-to-end suite |
 
 ### CLI
@@ -282,5 +321,7 @@ that is not running — which is the point.
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the v2 wire contract for clients.
 - [`docs/BRIEF.md`](docs/BRIEF.md) — binding decisions and the v1.0 scope trims.
 - [`docs/PLAN.md`](docs/PLAN.md) / [`docs/STATUS.md`](docs/STATUS.md) — work packages and state.
+- [`docs/design/web-ui/`](docs/design/web-ui/README.md) — the web UI's design artboards, and how
+  their tokens map onto the shipped CSS.
 - [`docs/INTEGRATION-NOTES.md`](docs/INTEGRATION-NOTES.md) — where the implementation deviates
   from DESIGN, and why.

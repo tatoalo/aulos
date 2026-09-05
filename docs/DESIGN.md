@@ -236,7 +236,7 @@ Workspace `resolver = "3"`, edition 2024, `rust-version = "1.95"`.
 | `aulos-provider-ytdlp` | aulos-core, aulos-provider, tokio, tokio-util, nix, command-fds, url | `lib`, `formats`, `opts`, `runner`, `progress`, `outtmpl`, `errmap`, `python/ytdlp_runner.py` (shipped asset) |
 | `aulos-provider-sc` | aulos-core, aulos-provider, tokio, tokio-util, wreq + wreq-util \| reqwest, scraper, regex, strip-ansi-escapes, url, futures-util | `lib`, `http` (`ScHttp` trait), `inertia`, `watch`, `season`, `embed`, `jit`, `nm3u8dl`, `ffmpeg`, `mux`, `progress` |
 | `aulos-queue` | aulos-core, aulos-store, aulos-provider, tokio, tokio-util, arc-swap, bytes, smallvec, indexmap, rand, url | `engine`, `cmd`, `slots`, `priority`, `resolve`, `run`, `cancel`, `recovery`, `groups`, `clear`, `aggregator`, `hub`, `publish`, `ring`, `hookstore` (`EngineHookStore`, §13.3) |
-| `aulos-api` | aulos-core, aulos-store, aulos-queue, aulos-provider, axum, axum-server, tower, tower-http, tokio, tokio-util, arc-swap, bytes, mime_guess, percent-encoding, sha2, url, rustls, rustls-pemfile, metrics, metrics-exporter-prometheus | `lib`, `v2/*`, `ws`, `v1`, `files`, `health`, `metrics`, `error`, `cors`, `trace`, `auth` |
+| `aulos-api` | aulos-core, aulos-store, aulos-queue, aulos-provider, axum, axum-server, tower, tower-http, tokio, tokio-util, arc-swap, bytes, mime_guess, percent-encoding, sha2, url, rustls, rustls-pemfile, metrics, metrics-exporter-prometheus | `lib`, `v2/*`, `ws`, `v1`, `files`, `health`, `metrics`, `error`, `cors`, `trace`, `auth`, `web` (the embedded UI, §24) — plus the non-Rust asset directory **`crates/aulos-api/web/`** (`index.html`, `app.css`, `app.js`, `icon.svg`, `icon-180.png`, `manifest.webmanifest`), which `web.rs` pulls in with `include_str!`/`include_bytes!` and which is therefore part of this crate's source, not a static root |
 | `aulos-telegram` | aulos-core, aulos-store, aulos-queue, teloxide, governor, indexmap, rand, tokio, tokio-util, url | `bot`, `commands`, `config_ui`, `urls`, `watch`, `render`, `limiter` |
 | `aulos-subscriptions` | aulos-core, aulos-store, aulos-provider, aulos-queue, tokio, tokio-util, rand, url | `manager`, `scheduler`, `check`, `detect`, `model`, `public` |
 | `aulos-hooks` | aulos-core, aulos-provider, reqwest, quick-xml, time, tokio, tokio-util, url | `dispatcher`, `jellyfin`, `nfo`, `audio_sync`, `ffprobe`, `manifest_hook` (community `[[hook]]`) — reaches item state **only** through `aulos_core::ports::HookStore` (§13), never through `aulos-store` or `aulos-queue` |
@@ -5128,7 +5128,7 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 24 | Persist a frame/event log in SQLite? | **No.** The replay ring is in memory and bounded. Persisting delta frames would be ~345 k rows/day of pure progress churn on a DB inside the media volume, and would throw away the one genuinely good legacy property. |
 | 25 | Stack `teloxide::Throttle` on top of `governor`? | **No.** One limiter, the one that knows about `last_rendered` and the per-chat interval (§12.4). |
 | 26 | `AULOS_TELEGRAM_WATCH_ALL` default? | **`true`.** On a single-user box, web and subscription downloads being invisible to the bot is a legacy bug, not a feature. `false` restores it exactly (§12.6). |
-| 27 | Serve a status page and a directory index? | **No HTML.** `GET <p>` returns a small JSON identity document; `DOWNLOAD_DIRS_INDEXABLE=true` serves a JSON listing. BRIEF parked the status page, and a web UI is out of scope. |
+| 27 | Serve a status page and a directory index? | **Reversed 2026-09-05 — a web UI ships (§24).** The original decision was **No HTML**: `GET <p>` returned a small JSON identity document and nothing rendered. It stands for the *directory index* — `DOWNLOAD_DIRS_INDEXABLE=true` still serves a JSON listing, never HTML — and it stands for every API route, none of which gained an HTML representation. What changed is the BRIEF: the owner put a first-party page in scope (BRIEF, *Amendment 2026-09-05*), so `GET <p>` is now content-negotiated and answers the embedded page to an `Accept` list containing `text/html` and the **unchanged** identity document to everything else. `AULOS_WEB_UI=false` restores the original posture exactly. |
 | 28 | CI performance gates? | **No latency gates.** `criterion` benchmarks are tracked in release notes; CI gates only runner-speed-independent assertions: frame counts, transaction counts, byte sizes, zero leaked processes, zero `Lagged` (§20). |
 | 29 | CI target architectures? | **`linux/amd64` only** (BRIEF §16). The Dockerfile stays `TARGETARCH`-parametrised so arm64 is a one-line change later (§18.1). |
 | 30 | `natord` for the gapless mux sort? | **No.** A ~30-line numeric-aware comparator with a `proptest` — the crate has been effectively unmaintained since ~2015 and would trip `cargo deny` (§10.5). |
@@ -5156,6 +5156,354 @@ public APIs or different observable behaviour.*
 | B3 | §15: "New vars are prefixed `AULOS_`" | `PLUGINS_DIR` (introduced by BRIEF §9 itself) stays **un-prefixed**, with `AULOS_PLUGINS_DIR` defaulting to `${PLUGINS_DIR:-/config/plugins}` (§17.3) | BRIEF §9 names `PLUGINS_DIR` as the discovery variable and the community plugin format is described in terms of it, so honouring both names costs nothing and honouring only the prefixed one would break the BRIEF's own text. It is *not* a legacy variable — it exists nowhere in the Python source — so its §17.3 legend is **N\*** ("new, behaviour note"), not **L\***. | BRIEF §15: note `PLUGINS_DIR` as the one grandfathered un-prefixed new name. |
 | B4 | §9: the `Provider` trait is `id()`, `matches(&Url) -> Match`, **`resolve(url, opts) -> Vec<MediaEntry>`**, **`download(entry, request, ProgressSink, CancellationToken) -> Result<Outcome>`** | the two parameter lists are bundled into **`ResolveCtx`/`DownloadCtx`** (which also carry `ytdl_options`, `paths`, `out_dir`, `tmp_dir`, `outtmpl`, `deadline`, `flat`, `playlist_end`), and the trait gains **`catalog()`**, **`own_slots()`** and **`probe()`** (§6.1) | Five positional parameters that must grow every time a provider needs one more piece of context is the signature that forces a breaking change on every plugin author; a borrowed context struct is additive. The three extra methods are load-bearing elsewhere in this document: `catalog()` is what makes validation catalog-driven and the per-URL picker possible (§6.6), `own_slots()` is how `SC_MAX_CONCURRENT_DOWNLOADS` bypasses the global semaphore exactly as legacy did (§8.7), and `probe()` is what `healthz` and the `Degraded` gate read (§6.4). Functionally a superset, but the public API differs, which is exactly the B2 test. | BRIEF §9: `resolve(url, opts)` / `download(entry, request, sink, token)` → `resolve(&Url, ResolveCtx)` / `download(DownloadCtx, ProgressSink)`, plus `catalog()`, `own_slots()`, `probe()`. |
 | B5 | §16: "`PUID/PGID/UMASK` entrypoint semantics **preserved** (`CHOWN_DIRS` honoured)" | `CHOWN_DIRS=true` chowns **only the directories themselves plus the state dir**, not the volume recursively; `CHOWN_DIRS=recursive` is the new value that restores the legacy walk (§18.2, Appendix B C34) | Legacy `chown -R`'d `/app` and the entire downloads volume on *every* container start, which on a multi-TB library takes minutes and is why the user already sets `CHOWN_DIRS=false`. Keeping the name and the truthy token set while changing what `true` *does* is an observable behaviour change, so "preserved" is not accurate as written; C34 records the change but Appendix B is not where a BRIEF conflict is declared. `PUID`/`PGID`/`UID`/`GID` precedence and `UMASK` are untouched. | BRIEF §16: note that `CHOWN_DIRS=true` is non-recursive and `CHOWN_DIRS=recursive` reproduces the legacy behaviour. |
+
+---
+
+## 24. The web UI (`aulos-api::web`)
+
+Added 2026-09-05 by the BRIEF amendment that reverses resolved decision **#27**. Everything below
+is the specification of what shipped; `crates/aulos-api/src/web.rs` is the server half and
+`crates/aulos-api/web/` is the page itself.
+
+### 24.1 What it is, and the constraints it ships under
+
+One page: the queue, the add form, per-item progress, the completed history. It is a **second
+consumer of the v2 protocol** (§15, PROTOCOL §4–§7), not a privileged one — it reads
+`capabilities`, opens `<p>ws`, applies snapshot + deltas and posts to `api/v2/items/actions`
+exactly as the iOS client does, over routes that existed before it did. It added no endpoint, no
+field and no frame type.
+
+| Constraint | Why it is a constraint and not a preference |
+|---|---|
+| Embedded in the binary (`include_str!`/`include_bytes!` from `../web/`) | T1: the compose file must not need a new volume or a `--static-root`. One artifact keeps `docker pull` the whole upgrade, and makes "the page and the server are the same version" true by construction rather than by deployment discipline. |
+| Vanilla HTML/CSS/ES2022 modules — no framework, no bundler, no npm dependency in the shipped bytes, no external origin, no web font, no icon font (icons are inline SVG on a 24 grid) | A build step in the release path is a second toolchain to pin, patch and reproduce, for a page whose whole job is a list that changes. It is also what makes §24.5's CSP achievable: with nothing to load from anywhere else, `default-src 'none'` is not a compromise. |
+| `app.js` + `app.css` under **70 KB unminified** | The budget is the design constraint that keeps the page a page. It is enforced twice, in the CI `web` job and by `aulos-api`'s `the_page_stays_inside_its_size_budget` unit test, so it fails at the earliest of `cargo test` and CI rather than in review. Current: 71 615 bytes, 69.94 KiB. |
+| No user data in the HTML | §24.7. The only two values substituted into the template are server configuration, which is what makes string replacement — rather than an escaping template engine — a defensible way to render it. |
+
+The visual specification is `docs/design/web-ui/{Main,Mobile,MobileAdd}.dc.html`; `app.css` lifts
+their tokens verbatim (see `docs/design/web-ui/README.md`). Two artboards in that directory are
+rejected alternates and are not implemented.
+
+### 24.2 The routes and the asset table
+
+| Route | Body | `Content-Type` |
+|---|---|---|
+| `GET <p>` with `Accept: text/html` | the rendered `index.html` | `text/html; charset=utf-8` |
+| `GET <p>` otherwise | the identity document, **unchanged** | `application/json; charset=utf-8` |
+| `GET <p>assets/app.css` | the stylesheet | `text/css; charset=utf-8` |
+| `GET <p>assets/app.js` | the ES module | `text/javascript; charset=utf-8` |
+| `GET <p>assets/icon.svg` | the app mark | `image/svg+xml` |
+| `GET <p>assets/icon-180.png` | the Apple touch icon | `image/png` |
+| `GET <p>manifest.webmanifest` | the PWA manifest (§24.11) | `application/manifest+json` |
+
+`HEAD` behaves as `GET` without a body on all of them — axum's `get()` router runs the handler and
+drops the body, so there is no second code path to keep in step. Every one of them carries
+`Cache-Control: no-cache`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a
+strong `ETag` (§24.6). Nothing else in the server serves a non-JSON body except the file routes and
+`robots.txt`, and those are unchanged.
+
+The four non-templated assets live in one `LazyLock` table — bytes as `Bytes::from_static` (so a
+response body is a refcount bump, not a copy), media type, and the `ETag` hashed once at first use.
+The route suffix is stored *in* the table next to the bytes, so the router's path list and the
+table cannot drift apart unnoticed.
+
+`icon-180.png` is generated from the same 24-grid mark as `icon.svg` by
+`tools/web/make-icon.py`, a pure-Python rasteriser and PNG encoder with no third-party module, so
+regenerating the icon needs nothing installed. It is deliberately full-bleed: iOS masks an
+`apple-touch-icon` itself, and a pre-rounded source would be rounded twice.
+
+### 24.3 Content negotiation at `<p>`, and the one judgement call
+
+`GET <p>` is the **only** content-negotiated route in the server, and it is negotiated because the
+alternative — a `<p>ui` or `<p>app` path — makes the bookmark, the home-screen shortcut and the
+reverse-proxy config all name something other than the service's own address.
+
+The rule is deliberately **not** RFC 9110 §12.5.1 negotiation. `q` values are parsed off and
+discarded and the comma-separated list is treated as a **set of media ranges**; the page is served
+when that set contains `text/html` or `text/*`, and the identity document otherwise.
+
+The judgement call is `*/*`, which does **not** count as a vote for HTML. Every browser puts a
+literal `text/html` first on a document navigation
+(`text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8`), so nothing is lost — while
+`*/*` is exactly what `curl` and `reqwest` send by default, and what a client that never thought
+about the header sends. Counting it would have changed the answer this route has always given
+those callers, which is the one thing this route may not do: the identity document is what `curl`,
+the iOS app, the container's own tooling and every existing script read, and it must come back from
+them byte for byte. (It is also load-bearing in the test suite: counting `*/*` broke the
+pre-existing `rest_meta::the_small_top_level_routes_answer` the first time it was tried.)
+
+Both branches carry **`Vary: Accept`** whenever the UI is enabled. One URL with two representations
+and no `Vary` is an invitation for a shared cache to replay the page to `curl` and the JSON to a
+browser; the header goes on both branches or it protects neither. With `AULOS_WEB_UI=false` the
+route has one representation again and the header is omitted, because an unnecessary `Vary` only
+fragments a cache.
+
+### 24.4 Why the UI routes are outside the auth middleware
+
+`auth::require` is layered on the **guarded** subtree (v2, `ws`, the file routes). The UI is
+mounted on the **open** subtree alongside `healthz` and the identity document, so it is reachable
+even when `AULOS_API_TOKEN` or `AULOS_TRUSTED_PROXY_AUTH_HEADER` is set. This is a decision, not an
+oversight:
+
+- **The bytes are not secret.** `index.html`, `app.css`, `app.js` and the two icons are identical in
+  every deployment. They contain no queue data, no configuration, no hostname, no token — the only
+  two per-deployment values are `URL_PREFIX`, which the caller already knows because they just used
+  it, and `DEFAULT_THEME`.
+- **Gating them cannot work anyway.** A browser cannot attach `Authorization: Bearer …` to a
+  document navigation. An authenticated `index.html` answers the very first request with a `401`
+  the user has no way to act on — no login form, because the login form *is* the page — and the
+  only escape is a redirect to an HTML login page, which PROTOCOL §1.4 forbids the server from
+  ever doing.
+- **The security boundary is where it always was.** Every API route keeps its auth exactly as it
+  was. The page treats a `401`/`403` from any API call or from the WS upgrade as "ask for the
+  token", stores what it is given under `aulos.token` in `localStorage`, and sends it as
+  `Authorization: Bearer <token>` on REST and as `Sec-WebSocket-Protocol: aulos.v2, bearer.<token>`
+  on the upgrade. An unauthenticated visitor gets an inert page and a token sheet, which is exactly
+  as much as they could learn from the binary itself.
+- **An operator who wants the page gated has the right tool already**: the reverse proxy in front
+  of it (Authelia, in the deployment this server was written for) gates the whole origin, page
+  included, with a real login flow. `AULOS_WEB_UI=false` is the other answer.
+
+This is asserted, not asserted-in-prose: `the_ui_is_open_while_every_api_route_stays_guarded`
+configures a token, presents none, and requires `200` on all six UI routes while
+`api/v2/capabilities`, `api/v2/state`, `api/v2/items`, `api/v2/subscriptions`, `download/*` and `ws`
+all answer `401 unauthorized` with no `Location` header. The trusted-proxy header has the same test.
+
+The v2 `CorsLayer` is unaffected: it still wraps `open.merge(guarded)`, so the API keeps reflecting
+only the configured origin and its expose-header set, and the UI routes inherit the same layer —
+harmless, since they hold nothing secret, and asserted so that a future re-layering is visible.
+
+### 24.5 Content-Security-Policy
+
+`index.html`, and nothing else, carries exactly:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+connect-src 'self'; manifest-src 'self'; font-src 'self'; base-uri 'none';
+form-action 'none'; frame-ancestors 'none'
+```
+
+(one line on the wire; the value is pinned byte-for-byte by a unit test). `default-src 'none'` plus
+one explicit allowance per directive the page actually uses. There is no `'unsafe-inline'` in
+either `script-src` or `style-src`, which makes the policy **load-bearing on the implementation**
+rather than a header someone can quietly outgrow:
+
+- no inline `<script>` and no event-handler attribute — the page's only script is
+  `<script type="module" src="{{PREFIX}}assets/app.js">`;
+- no inline `<style>` and, more surprisingly, **no `style="…"` attribute anywhere**. Every measured
+  value — a progress bar's width, the overflow menu's position — is written through the CSSOM
+  (`el.style.width = …`), which `style-src 'self'` permits and which a `setAttribute('style', …)`
+  would not be.
+
+The smoke installs a `securitypolicyviolation` listener before load and asserts it never fires, so
+the day someone adds an inline handler the browser test fails rather than the header quietly
+becoming a lie.
+
+The policy is **not** applied to the API's JSON responses, in either posture: a policy on
+`application/json` protects nothing and only muddies what the header means when a browser does
+render one.
+
+### 24.6 `ETag`, `no-cache`, and the render memo
+
+Every UI response carries a **strong** `ETag` — the quoted hex SHA-256 of the body actually served
+— and `Cache-Control: no-cache`. `no-cache` means *revalidate every time*, not *do not store*: the
+browser keeps the bytes, and a reload costs one conditional request per file, each answered with a
+bodyless `304`. That is the right trade for a page that is not content-addressed: a long
+`max-age` would strand a stale `app.js` against a freshly upgraded server, and a `Pragma`-style
+no-store would re-download 70 KB on every navigation.
+
+`If-None-Match` is matched against the **weak** form `W/"…"` as well as the strong one, and inside
+a comma-separated list. A gzipping reverse proxy weakens the validator on the way out; the browser
+then replays what it stored, and a strict comparison would turn every revalidation into a full
+200. Losing a `304` to a proxy is not a correctness bug, but it is exactly the kind that never gets
+noticed and permanently doubles the page's bandwidth.
+
+Hashing is done once, not per request:
+
+| Body | Hashed | Where |
+|---|---|---|
+| the four static assets | once per process, at first use | the `LazyLock` asset table (§24.2) |
+| `index.html`, `manifest.webmanifest` | once per `(prefix, theme)` pair | a small `RwLock<HashMap>` memo per template |
+
+A running process serves exactly one `(prefix, theme)` pair, so the memo is a one-entry map in
+production; the test process serves four. The point of keying on both is that the page's `ETag`
+genuinely moves when `URL_PREFIX` or `DEFAULT_THEME` changes, which is asserted three ways — the
+same server under `/` and `/metube/` produces different tags, and so do two `DEFAULT_THEME` values.
+
+### 24.7 The template: `{{PREFIX}}` and `{{THEME}}`
+
+`index.html` is a template with **two** substitutions and no others, both of them server
+configuration:
+
+| Token | Replaced with | Occurrences in `index.html` |
+|---|---|---|
+| `{{PREFIX}}` | `URL_PREFIX`, always `/`-delimited on both ends (`/`, `/metube/`) | 6 — `<meta name="aulos-prefix">`, the stylesheet, the module, the manifest, the icon and the apple-touch-icon |
+| `{{THEME}}` | `DEFAULT_THEME` (`auto` \| `light` \| `dark`) | 2 — `<html data-mode>`, which is what paints the right palette **before the module runs**, and `<meta name="aulos-theme">`, which is what the module reads |
+
+A unit test walks every `{{` in both templates and fails on a third token, and another asserts that
+a rendered body contains no `{{` at all. `app.js` deliberately contains the literal `{{` nowhere,
+so a future server that ran the substitution across every asset could not corrupt it.
+
+**No request data and no user data ever reaches the HTML.** That is the property that makes
+rendering by `str::replace` acceptable here and would not make it acceptable anywhere else; it is
+also why the page needs no escaping layer and why the CSP has no `nonce`.
+
+The manifest is rendered through the same code path, deliberately, so the two renderers cannot
+diverge — but it contains no placeholder: it uses relative URLs (`"./"`, `"assets/icon.svg"`) which
+resolve against `<p>manifest.webmanifest` and therefore land on the prefix under every posture. The
+substitution over it is a no-op. Both spellings satisfy the contract and the test accepts either,
+by resolving each URL and comparing the resulting path rather than pinning one implementation.
+
+### 24.8 `AULOS_WEB_UI`
+
+Boolean, default `true` (§17.3). `false` restores the pre-UI surface **exactly**, and does it by
+*unmounting* the routes rather than by branching inside the handlers:
+
+- `GET <p>` answers the identity document for every `Accept`, with no `Vary` (§24.3);
+- `<p>assets/*` and `<p>manifest.webmanifest` fall through to the existing `no_such_route`
+  fallback, so they get the standard `404 not_found` envelope — the same code, the same message
+  shape, the same `request_id` stamping — rather than a lookalike written in a second place.
+
+`GET <p>` itself is owned by `crate::router`, not by `web::router`, so disabling the UI cannot
+accidentally unmount the identity document. `disabling_the_web_ui_restores_the_pre_ui_surface_exactly`
+is the test.
+
+### 24.9 Front-end architecture
+
+One ES module, no dependencies, ~1 250 lines. The interesting parts:
+
+- **Prefix discovery.** `PREFIX` is read once from `<meta name="aulos-prefix">`; every URL is
+  `PREFIX + 'api/v2/…'` or `PREFIX + 'ws'`. Nothing is hardcoded to `/`, which is what makes the
+  nested-prefix posture work with no second build. `download_url` follows PROTOCOL §2.3: absolute
+  (has a scheme) → used as-is, otherwise resolved against origin + prefix, and either way opened
+  only when the scheme is `http(s)`.
+- **State is one `Map`.** `state.items: Map<id, ItemView>`, plus `seq`, `boot_id`, `caps`,
+  `done_total` and the history cursor. There is no second index and no derived copy: `flush()`
+  re-derives the three sections (`in progress` / `waiting for you` / `completed`) from that map by
+  filtering and sorting on `(ord, id)`, which is cheap at this scale and cannot go stale.
+- **The apply algorithm is PROTOCOL §7, complete.** `snapshot` replaces the map; `added` and
+  `completed` upsert; `removed` deletes by id; `delta` patches **only keys present in the patch**
+  and never creates a row that is not already there (§5.4); `notice`, `health` and `error` become
+  toasts; `providers` refetches capabilities *and*, if a URL is typed, the catalog, so a
+  URL-refined picker is not silently replaced by the generic ladder mid-add. Frames the page has no
+  UI for (`subscription*`, `ytdl_options`, `pong`) are ignored but still advance `seq` — a client
+  that skipped their sequence numbers would ask for a resume from the wrong point.
+- **Rendering is rAF-coalesced.** Every applied frame calls `markDirty()`, which schedules one
+  `requestAnimationFrame`. A 250 ms delta batch carrying fifty changed items therefore costs one
+  render, and a burst of `added` + `delta` + `completed` in the same tick costs one render between
+  them all. There is no per-item timer and no interval.
+- **Rows are reconciled, never rebuilt.** `rows: Map<id, {el, refs, v}>` holds each row's element,
+  its cached child-node references and the last values written to it. `reconcile()` walks the
+  desired list against the container's existing children and `insertBefore`s only what is out of
+  place; `patchRow()` writes a field only when it differs from `r.v`. The consequence that matters:
+  a progress update does not replace the element, so text selection, focus, an open ⋯ menu and the
+  CSS transition on the progress bar all survive. The smoke asserts element **identity** (`el ===
+  el`) across a delta, which is the only way to test this that a re-render can't accidentally pass.
+- **A group is a row with children.** `kind: "group"` rows carry the §3.3 aggregates and render a
+  chevron; expanding one either reveals the children already in the map (`children_inline: true`)
+  or fetches them with `GET api/v2/items?group_id=…` (the §2.3-sanctioned route for a group the
+  snapshot truncated). Expanded state lives in a `Set` of ids that **survives a reconnect** —
+  collapsing the user's groups on every socket blip is its own bug — so a fresh `snapshot`
+  re-fetches the children of every open non-inline group instead, and drops ids that no longer
+  exist.
+- **The completed list is a render window.** Terminal rows are capped at 200 in the DOM; what falls
+  out of the window is evicted from `state.items` too (so the row map's own cleanup takes the
+  nodes), and `Show older` pages history back through `GET api/v2/items` with the server's opaque
+  cursor. Without the cap a tab left open for a month grows a DOM node per completed download
+  forever.
+- **Reconnect and resume.** The socket URL carries `?since=<seq>&boot=<boot_id>` whenever the page
+  has both, so a reconnect inside the server's replay ring is answered with `resume` + the folded
+  frames rather than a fresh snapshot (§6.2/§6.3); a `boot_id` change or a cursor out of the ring
+  falls back to `snapshot`, and the page handles that by construction because `snapshot` is a full
+  replace. Backoff is 500 ms doubling to a 10 s cap with ±30 % jitter, and it resets **on the first
+  frame of a session, not on `onopen`** — an accepted upgrade is not a working session, and a
+  server closing with `1013` would otherwise pin the page to a ~500 ms hot loop. An
+  upgrade rejected for auth closes with no frame and hides its status code, so the page probes
+  `GET api/v2/capabilities` once per *run* of failures (not once per close) to turn that into a
+  token sheet.
+- **Theme.** `DEFAULT_THEME` paints the first frame through `<html data-mode>`; after the module
+  runs, the viewer's own choice — cycling system → light → dark, stored under `aulos.theme` in
+  `localStorage` — wins and is mirrored into `<meta name="theme-color">`. The server still never
+  sets a cookie, which is the whole of what Appendix B C27 promised about `metube_theme`.
+
+`window.__aulos = { state, rows, add, applyFrame, PREFIX, flushNow }` is a deliberate test seam:
+`flushNow()` cancels the pending rAF and renders synchronously so a render tick can be timed
+without waiting on the frame clock. It is read by the smoke and by nothing else.
+
+### 24.10 The phone layout
+
+Below 640 px the page becomes the `Mobile`/`MobileAdd` artboards, in the same stylesheet — one
+media query, not a second page and not a user-agent sniff:
+
+- the add bar collapses to a 48 px field plus a square gradient button that opens a **bottom
+  sheet** for the full form (type segmented control, quality chips, format/codec, the 51×31
+  switch);
+- row actions collapse to the primary action plus `⋯`, which opens the same menu the desktop
+  reveals on hover;
+- every interactive target is **≥ 44 px** — including the switch, whose 51×31 track is drawn as a
+  `::before` inside a 44 px-tall button rather than by padding the track itself (padding it yields
+  43 px and breaks the absolutely-positioned knob);
+- `viewport-fit=cover` plus `env(safe-area-inset-*)` padding, so the sheet and the toasts clear the
+  home indicator;
+- toasts move to the bottom, where a thumb is.
+
+Both sheets are real modals: the background is `inert` and `aria-hidden`, Tab and Shift-Tab are
+trapped, focus is restored to whatever opened them, and Escape closes the topmost first. The focus
+ring is explicit (`:focus-visible`) rather than inherited, because the artboards' field styling
+resets `outline`.
+
+The smoke drives 390×844 and 320 px viewports and asserts no horizontal scroll, the sheet opening,
+and the ≥ 44 px rule over a pinned minimum number of elements — so a future change that hides the
+subtree cannot make the assertion vacuously true.
+
+### 24.11 The PWA manifest
+
+`<p>manifest.webmanifest`: `display: standalone`, `theme_color #E07850`, `background_color #F2F2F7`,
+`name`/`short_name` "Aulos", both icons, and relative `id`/`start_url`/`scope` (§24.7). With
+`apple-mobile-web-app-capable` in the head, "Add to Home Screen" on iOS gives a full-screen app with
+the right mark and the right status bar — which is the point: the phone layout exists so the
+operator can drive their own queue from the lock screen without the App Store build.
+
+### 24.12 The offline browser smoke (`tools/web`)
+
+`tools/web/` is dev tooling. **Nothing in it ships** — the shipped page is `crates/aulos-api/web/`
+— and it exists so the page can be developed and regression-tested without a running server.
+
+| File | What it is |
+|---|---|
+| `mock-server.mjs` | ~600 lines of Node. Serves `crates/aulos-api/web/*` with the contract's substitutions and headers (strong hex-SHA-256 `ETag`, `no-cache`, `nosniff`, `no-referrer`, the exact CSP on `index.html` only, `304` on `If-None-Match`, `HEAD` like `GET`, the identity document when `Accept` is not `text/html`) and implements enough of PROTOCOL v2 to drive every path: capabilities, a scripted snapshot, 250 ms deltas, adds, actions, paged items, `catalog?url=`, custom dirs, a 512-frame replay ring with `?since`/`boot` resume and the §6.3 fold, and the §5.5 in-place promotion of a `resolving` row into a group. Flags: `--port --prefix --theme --token --freeze --big-group --flap`. |
+| `smoke.spec.mjs` | The Playwright suite, chromium only. Each test spawns its own mock on an ephemeral port, so it is order-independent and parallel-safe. |
+| `make-icon.py` | Regenerates `icon-180.png` (§24.2). |
+| `package.json` / `package-lock.json` | `playwright` and `ws`, pinned to exact versions, installed with `npm ci`. |
+
+What the suite proves, beyond "it renders": that a delta patches a row **without replacing the
+element**; that the add flow posts the exact §4.1 body; that each action button posts the right
+§4.2 action, including `start` on a terminal item being the retry; that a collapsed group fetches
+its children over REST and does not leak them into the top-level list; that a dropped socket goes
+Live → Reconnecting… → Live on backoff and that a *flapping* one backs off instead of hot-looping;
+that a reconnect inside the replay window resumes and a `boot_id` change re-snapshots; that an
+unknown status renders inert rather than disappearing; that the `401` flow uses the token on both
+REST and the WS subprotocol and survives a reload; that `URL_PREFIX=/metube/` works for assets, API
+and WS; that the CSP is never violated; and that 50 active rows × 20 deltas produce no long task
+over 50 ms with row identity preserved throughout. Five screenshots (desktop light/dark, phone
+light/dark, the phone add sheet) are regenerated on every run against a frozen mock and uploaded as
+a CI artifact — the directory itself is gitignored, so the artboard comparison stays reviewable
+without checking binaries into the repository.
+
+**Why CI runs it offline, and only offline.** The `web` job (`.github/workflows/ci.yml`) is
+node-only: checkout, `npm ci`, `playwright install --with-deps chromium`, the 70 KB budget check,
+`npx playwright test`, upload the screenshots. It never builds Rust and never reaches the network
+beyond the npm and Playwright caches. Two reasons, and they are the same two that keep `tests/e2e`
+out of CI (§20): a browser test that needs a real `aulos-server` needs a Rust toolchain and a boot
+that can fail for reasons the page has nothing to do with (a missing `yt-dlp`, a missing `ffmpeg`),
+and a browser test that reaches a real site is a test of that site's mood. The mock is a **contract
+double**, not a convenience: it implements the same route/header/frame contract `web.rs` does, so
+the suite fails when the page stops honouring the protocol — and `crates/aulos-api/tests/web.rs`
+independently asserts that the *server* honours the same contract, on real HTTP, under both
+prefixes. The two halves meet in the third mode, `AULOS_WEB_BASE=<base URL including the prefix>`,
+which points the serving subset of the same suite at a real binary and skips everything that needs
+the scripted queue. That mode is the manual integration check; it is documented in
+`tools/web/README.md` and deliberately not wired into CI.
 
 ---
 
@@ -5194,9 +5542,9 @@ number is the row in Appendix B) · **✗** dropped, BRIEF out of scope.
 | Every route under `URL_PREFIX` | `api::router` + the `Prefix` newtype | K |
 | `text/plain` bodies for JSON | `api::error` and every handler | Δ C7 (`application/json` everywhere) |
 | Route table (`add`, `presets`, `cancel-add`, `subscribe`, `subscriptions*`, `delete`, `start`, cookies, `history`, `version`, `robots.txt`, static, OPTIONS) | `api::v1`, §11.1 | K |
-| `GET <p>` = Angular index + `metube_theme` cookie | a small JSON identity document | ✗ / Δ C27 |
+| `GET <p>` = Angular index + `metube_theme` cookie | content-negotiated: the embedded page for `Accept: text/html`, else the identity document (§24.3) | Δ C27 |
 | `GET /` → 302 `URL_PREFIX` | `api::v1` | K |
-| `<p>*` static frontend assets | dropped (no web UI) | ✗ |
+| `<p>*` static frontend assets | `api::web`: `<p>assets/*` and `<p>manifest.webmanifest`, embedded in the binary (§24.2). The Angular bundle itself is gone | Δ C27 |
 | `<p>download/*`, `<p>audio_download/*` static with `show_index` | `api::files`, component-wise containment, `Range`/`If-Range`/`ETag`/`Last-Modified`, JSON index | K\* / Δ C16, C27 |
 | CORS `on_response_prepare` reflection | `api::cors`, §11.6 | K (+ methods on v2) |
 | `parse_download_options` validation matrix and messages | `core::request::validate` + the catalog; every string quoted in §11.7 | K |
@@ -5415,7 +5763,7 @@ yt-dlp bump automation hardened (§18.5).
 | C24 | The custom-dirs listing is a bounded, background-refreshed cache computed off the event loop. | A multi-TB library no longer stalls the server on every client connect. |
 | C25 | `subscriptions/update` returns 400 instead of leaking a 500. | Actionable errors. |
 | C26 | Subscriptions run through the provider registry. | You can subscribe to a StreamingCommunity series or a plugin feed, not only a yt-dlp source. |
-| C27 | Socket.IO, the Angular UI, the `metube_theme` cookie, the HTML directory index and pickle/shelve import are dropped. | BRIEF scope. The one real consequence — no live updates for the *currently installed* iOS build — is handled by shipping the v2 client in the same cutover session. |
+| C27 | Socket.IO, the Angular UI, the `metube_theme` cookie, the HTML directory index and pickle/shelve import are dropped. **Since 2026-09-05 a first-party page replaces the Angular UI** (§24); the other four stay dropped, and the theme is still never a cookie. | BRIEF scope. The one real consequence — no live updates for the *currently installed* iOS build — is handled by shipping the v2 client in the same cutover session. The replacement UI is one embedded page on the v2 protocol, not a restored Angular app: it adds no route an API client sees and `AULOS_WEB_UI=false` removes it. |
 | C28 | `cancel-add` aborts in-flight resolution, not just the gap between entries. | Cancelling a 500-item add stops it now, instead of after the next entry finishes extracting. |
 | C29 | SC season resolution does 2 requests instead of ~60, caches the Inertia version with a TTL and retries once on version drift, and drops the debug-only m3u8 fetch. | Adding a 20-episode season takes seconds instead of a minute and is far less likely to be rate-limited or to break on a site deploy. |
 | C30 | `SC_THREAD_COUNT` and `SC_USE_FFMPEG` come from the config, not from a child re-reading the environment. | One source of truth; `check-config` shows what will actually be used. |
