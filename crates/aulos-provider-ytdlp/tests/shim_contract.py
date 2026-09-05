@@ -72,6 +72,14 @@ def run_job(job, scenario=None, env=None):
     os.close(write_fd)
     proc.stdin.write((json.dumps(job) + "\n").encode())
     proc.stdin.close()
+    # `communicate()` below flushes `self.stdin` before closing it, and flushing an
+    # already-closed buffer raises `ValueError: flush of closed file` on CPython <= 3.12 (3.13
+    # guards it, which is why this only ever failed on the runner's system python3 and not on a
+    # dev machine or in the `python` CI job). The job *has* to be written and the pipe closed
+    # here, before the fd-3 read below: that read blocks until the child closes the channel, and
+    # the child does not write the channel until it has read its job. So drop our reference
+    # instead of moving the write, which is what tells `communicate()` there is no stdin left.
+    proc.stdin = None
 
     with os.fdopen(read_fd, "r", encoding="utf-8") as channel:
         lines = [line for line in channel.read().splitlines() if line.strip()]

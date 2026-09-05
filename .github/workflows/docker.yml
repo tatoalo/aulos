@@ -112,4 +112,9 @@ jobs:
             echo "::notice::tests/e2e/run.sh does not exist yet; skipping"; exit 0
           fi
           img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
+          # `load` is only set on pull requests, so on this path buildx pushed straight to the
+          # registry and the image is **not** in this runner's local store. `tests/e2e/run.sh`
+          # guards on `docker image inspect`, which does not pull, so without this the whole
+          # suite dies on "no such image" after a successful build.
+          docker pull "$img"
           AULOS_IMAGE="$img" tests/e2e/run.sh
