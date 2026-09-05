@@ -24,7 +24,7 @@
 //! **after** the user options, so a preset cannot break resolution. The shim applies them, so
 //! there is one place that decides.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ use url::Url;
 
 use crate::catalog::ytdlp_catalog;
 use crate::formats::get_format;
-use crate::job::{ExtractOpts, Job, Policy};
+use crate::job::{ExtractOpts, Job, Policy, debug_logging};
 use crate::opts::get_opts;
 use crate::outtmpl::OutTmplJob;
 use crate::runner::{
@@ -184,8 +184,22 @@ impl YtdlpProvider {
 
     /// Whether `LOGLEVEL` asks for yt-dlp's verbose output.
     fn debug_logging(&self) -> bool {
-        self.cfg.loglevel.eq_ignore_ascii_case("DEBUG")
-            || self.cfg.loglevel.eq_ignore_ascii_case("TRACE")
+        debug_logging(&self.cfg)
+    }
+
+    /// The shim policy for one extraction.
+    ///
+    /// `debug` is the DESIGN §9.2 switch: the shim derives the extraction's `quiet`/`verbose`
+    /// from it *and* gates `FrameLogger`'s `debug`/`info` forwarding on it. Since the shim always
+    /// installs that logger, leaving the flag false would swallow every yt-dlp diagnostic even
+    /// with `LOGLEVEL=DEBUG` — legacy passed `verbose=True` in the same situation.
+    fn extract_policy(&self, download: &Path, temp: &Path) -> Policy {
+        Policy {
+            download_dir: download.to_path_buf(),
+            temp_dir: temp.to_path_buf(),
+            debug: self.debug_logging(),
+            ..Policy::default()
+        }
     }
 
     /// A sink for an operation the engine did not give one for (`resolve` and `probe`).
@@ -221,13 +235,11 @@ impl Provider for YtdlpProvider {
         url: &Url,
         ctx: ResolveCtx<'_>,
     ) -> Result<Vec<MediaEntry>, ProviderError> {
-        let mut options = self.user_options(&ctx.ytdl_options, ctx.request);
-        options.insert(
-            "paths".to_owned(),
-            json!({ "home": ctx.paths.download, "temp": ctx.paths.temp }),
+        let options = extract_options(
+            self.user_options(&ctx.ytdl_options, ctx.request),
+            &ctx.paths.download,
+            &ctx.paths.temp,
         );
-        options.insert("no_color".to_owned(), Value::Bool(true));
-        options.insert("socket_timeout".to_owned(), json!(SOCKET_TIMEOUT));
 
         let job = Job::extract(ctx.item_id.to_string(), url.clone())
             .with_options(options)
@@ -240,11 +252,7 @@ impl Provider for YtdlpProvider {
                 playlist_end: ctx.playlist_end,
                 ..ExtractOpts::default()
             })
-            .with_policy(Policy {
-                download_dir: ctx.paths.download.clone(),
-                temp_dir: ctx.paths.temp.clone(),
-                ..Policy::default()
-            });
+            .with_policy(self.extract_policy(&ctx.paths.download, &ctx.paths.temp));
 
         let remaining = ctx
             .deadline
@@ -376,6 +384,29 @@ pub const fn uses_audio_root(download_type: DownloadType) -> bool {
     matches!(download_type, DownloadType::Audio)
 }
 
+/// The extraction option dict: the layered user options plus legacy's `__extract_info` keys.
+///
+/// Legacy built `{**user_opts, 'quiet':…, 'no_color':…, 'extract_flat':…,
+/// 'ignore_no_formats_error':…, 'noplaylist':…, 'paths':…}` — the MeTube keys last, so a preset
+/// cannot break resolution. `socket_timeout` was **not** among them, so it is only a default
+/// here: an operator who raises it in `YTDL_OPTIONS` for a slow upstream keeps it for extraction
+/// too, exactly as they already do for the download (where the user dict is merged last).
+fn extract_options(
+    mut options: Map<String, Value>,
+    download: &Path,
+    temp: &Path,
+) -> Map<String, Value> {
+    options.insert(
+        "paths".to_owned(),
+        json!({ "home": download, "temp": temp }),
+    );
+    options.insert("no_color".to_owned(), Value::Bool(true));
+    options
+        .entry("socket_timeout".to_owned())
+        .or_insert_with(|| json!(SOCKET_TIMEOUT));
+    options
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -437,6 +468,57 @@ mod tests {
         for dt in DownloadType::ALL {
             let expected = cfg.paths.root_for(dt) == cfg.paths.audio_download.as_path();
             assert_eq!(uses_audio_root(dt), expected, "{dt:?}");
+        }
+    }
+
+    #[test]
+    fn extraction_keeps_a_user_socket_timeout_but_still_pins_paths_and_no_color() {
+        let mut user = Map::new();
+        user.insert("socket_timeout".to_owned(), json!(120));
+        user.insert("no_color".to_owned(), json!(false));
+        user.insert("paths".to_owned(), json!({ "home": "/wrong" }));
+
+        let options = extract_options(user, Path::new("/downloads"), Path::new("/tmp/aulos"));
+        // Legacy set no `socket_timeout` for extraction, so the user's value survives.
+        assert_eq!(options["socket_timeout"], json!(120));
+        // These two legacy *did* apply after the user options.
+        assert_eq!(options["no_color"], json!(true));
+        assert_eq!(options["paths"]["home"], json!("/downloads"));
+        assert_eq!(options["paths"]["temp"], json!("/tmp/aulos"));
+
+        let defaults = extract_options(Map::new(), Path::new("/downloads"), Path::new("/tmp"));
+        assert_eq!(defaults["socket_timeout"], json!(SOCKET_TIMEOUT));
+    }
+
+    #[test]
+    fn loglevel_debug_reaches_the_shim_policy_for_extraction_and_download() {
+        let quiet = provider();
+        assert!(
+            !quiet
+                .extract_policy(Path::new("/downloads"), Path::new("/tmp"))
+                .debug
+        );
+
+        for level in ["DEBUG", "debug", "TRACE"] {
+            let cfg = Arc::new(
+                aulos_core::config::load(&RawEnv::from_pairs([
+                    ("DOWNLOAD_DIR", "/downloads"),
+                    ("TEMP_DIR", "/tmp/aulos"),
+                    ("LOGLEVEL", level),
+                ]))
+                .expect("config"),
+            );
+            let p = YtdlpProvider::with_defaults(Arc::clone(&cfg));
+            let policy = p.extract_policy(Path::new("/downloads"), Path::new("/tmp/aulos"));
+            assert!(policy.debug, "extract policy at LOGLEVEL={level}");
+            // The shim reads `policy.debug` for the download's log forwarding too.
+            let download = Policy::for_download(
+                &cfg,
+                DownloadType::Video,
+                "any",
+                PathBuf::from("/downloads"),
+            );
+            assert!(download.debug, "download policy at LOGLEVEL={level}");
         }
     }
 

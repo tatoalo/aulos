@@ -122,6 +122,18 @@ impl Default for Policy {
     }
 }
 
+/// Whether `LOGLEVEL` asks for yt-dlp's own diagnostics.
+///
+/// This is the single switch behind `policy.debug` (DESIGN §9.2): the shim uses it both to set
+/// `quiet`/`verbose` on an `extract` job and to decide whether `FrameLogger` forwards yt-dlp's
+/// `debug`/`info` lines as `log` frames. Because the shim always installs that logger, an
+/// operator who raises `LOGLEVEL` sees nothing from yt-dlp unless the flag travels with the job —
+/// legacy read `logging.getLogger().isEnabledFor(DEBUG)` for the same purpose.
+#[must_use]
+pub fn debug_logging(cfg: &Config) -> bool {
+    cfg.loglevel.eq_ignore_ascii_case("DEBUG") || cfg.loglevel.eq_ignore_ascii_case("TRACE")
+}
+
 /// The shim's own watchdog, derived from `AULOS_JOB_TIMEOUT_SECS`.
 ///
 /// Deliberately **half a second shorter** than the parent's hard timer. Both exist, and they must
@@ -157,6 +169,7 @@ impl Policy {
             temp_dir: cfg.paths.temp.clone(),
             convert_srt_to_txt: captions && format.eq_ignore_ascii_case("txt"),
             thumbnail_ext_rewrite: download_type == DownloadType::Thumbnail,
+            debug: debug_logging(cfg),
             hard_timeout_ms: shim_watchdog_ms(cfg.job_timeout_secs),
             pot_url: (!cfg.pot_url.is_empty()).then(|| cfg.pot_url.to_string()),
             ..Self::default()
@@ -559,6 +572,46 @@ mod tests {
                 "the shim must never outlast the parent at {secs} s"
             );
         }
+    }
+
+    fn cfg_with(pairs: &[(&str, &str)]) -> Config {
+        let mut env: Vec<(&str, &str)> =
+            vec![("DOWNLOAD_DIR", "/downloads"), ("TEMP_DIR", "/tmp/x")];
+        env.extend_from_slice(pairs);
+        aulos_core::config::load(&aulos_core::config::RawEnv::from_pairs(env)).expect("config")
+    }
+
+    #[test]
+    fn loglevel_debug_travels_to_the_shim_as_policy_debug() {
+        assert!(!debug_logging(&cfg_with(&[])));
+        assert!(!debug_logging(&cfg_with(&[("LOGLEVEL", "INFO")])));
+        for level in ["DEBUG", "debug", "TRACE", "trace"] {
+            assert!(debug_logging(&cfg_with(&[("LOGLEVEL", level)])), "{level}");
+        }
+
+        let cfg = cfg_with(&[("LOGLEVEL", "DEBUG")]);
+        let policy = Policy::for_download(
+            &cfg,
+            DownloadType::Video,
+            "any",
+            PathBuf::from("/downloads"),
+        );
+        assert!(policy.debug);
+        // The shim only ever sees the serialised form: `LOGLEVEL=DEBUG` must survive into it,
+        // otherwise `FrameLogger` drops every yt-dlp `debug`/`info` line.
+        let job = Job::download("j", url()).with_policy(policy);
+        assert_eq!(job.to_json()["policy"]["debug"], true);
+
+        let quiet = Policy::for_download(
+            &cfg_with(&[]),
+            DownloadType::Video,
+            "any",
+            PathBuf::from("/downloads"),
+        );
+        assert_eq!(
+            Job::download("j", url()).with_policy(quiet).to_json()["policy"]["debug"],
+            false
+        );
     }
 
     #[test]
