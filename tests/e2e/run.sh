@@ -459,12 +459,28 @@ db_mode="$(docker exec "$NAME" stat -c '%a' /downloads/.metube/aulos.db 2>/dev/n
 # A root the entrypoint had to create itself must be handed to PUID:PGID even under
 # CHOWN_DIRS=false -- otherwise a split AUDIO_DOWNLOAD_DIR (which the shipped compose uses) boots
 # green and then fails every audio download with EACCES while video downloads work.
-for root in /downloads /downloads/audio /downloads/.metube /downloads/.tmp; do
-  owner="$(docker exec "$NAME" stat -c '%u:%g' "$root" 2>/dev/null || echo '')"
-  [ "$owner" = "$(id -u):$(id -g)" ] \
-    && ok "${root} is owned by PUID:PGID (${owner})" \
-    || fail "${root} should be $(id -u):$(id -g), got ${owner:-<unreadable>}"
-done
+#
+# Two caveats make this assertion narrower than "every root": (1) roots that already existed on the
+# volume (/downloads itself, the seeded STATE_DIR) are deliberately NOT chowned under
+# CHOWN_DIRS=false, so only the roots the entrypoint logged as created are checked; (2) macOS bind
+# mounts under OrbStack/Docker Desktop do not preserve chown at all (stat reports 0:0 regardless),
+# so the check is skipped when a probe chown inside the volume does not stick.
+probe_dir="/downloads/.aulos-e2e-chown-probe"
+docker exec "$NAME" sh -c "mkdir -p '$probe_dir' && chown $(id -u):$(id -g) '$probe_dir'" >/dev/null 2>&1 || true
+probe_owner="$(docker exec "$NAME" stat -c '%u:%g' "$probe_dir" 2>/dev/null || echo '')"
+docker exec "$NAME" rm -rf "$probe_dir" >/dev/null 2>&1 || true
+if [ "$probe_owner" != "$(id -u):$(id -g)" ]; then
+  ok "ownership checks skipped: this bind mount does not preserve chown (probe shows ${probe_owner:-<unreadable>})"
+else
+  created_roots="$(docker logs "$NAME" 2>&1 | sed -n 's/^Created \(.*\); giving it to .*/\1/p')"
+  [ -n "$created_roots" ] || fail "the entrypoint created no roots under profile B; expected at least /downloads/audio"
+  for root in $created_roots; do
+    owner="$(docker exec "$NAME" stat -c '%u:%g' "$root" 2>/dev/null || echo '')"
+    [ "$owner" = "$(id -u):$(id -g)" ] \
+      && ok "${root} (created by the entrypoint) is owned by PUID:PGID (${owner})" \
+      || fail "${root} should be $(id -u):$(id -g), got ${owner:-<unreadable>}"
+  done
+fi
 
 # A second start must not import again: that is what stops it resurrecting deleted rows.
 docker restart -t 25 "$NAME" >/dev/null || die "profile B restart failed"
