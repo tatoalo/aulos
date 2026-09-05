@@ -2806,7 +2806,9 @@ uses. v2 is honest about being windowed (`done_total`, `truncated.done`, paged `
 v1 has no vocabulary for any of that — no paging, no `truncated`, and `HistoryResponse` declares
 all three arrays non-optional — so the only faithful answer is the whole set. This is the one place
 where v1 is *more* expensive than v2: a 4 000-row `/history` is roughly 3 MB of JSON and ~15 ms of
-query on the read pool, on every connect and every pull-to-refresh of the shipped client. Three
+query on the read pool, on every call. (Against Aulos the shipped iOS build never makes that call —
+it only ever reaches `/history` from its Socket.IO `.connect` handler, §11.6 — so in practice the
+v1 callers are the bookmarklet, the Shortcut and `curl`.) Three
 mitigations, none of which change the payload: the query never touches the writer, the projection
 omits `entry` (the single biggest contributor, C22), and an operator with a huge history can set
 `AULOS_V1_HISTORY_MAX` to cap it — at which point the **oldest** rows are dropped, keeping the most
@@ -2862,13 +2864,32 @@ Per-item field projection:
 
 The shim does not provide Socket.IO (`all`, `updated`, `added`, `completed`, `canceled`,
 `cleared`, `formats`, `configuration`, `custom_dirs`, `ytdl_options_changed`, `subscriptions_all`,
-`subscription_*`). The shipped iOS build degrades to: **no live updates, but `GET /history` on
-connect and on pull-to-refresh still works** — which is what it already does, because it distrusts
-the socket and fetches `/history` on every connect. This is the single user-visible regression
-during the overlap window, and it is why the runbook ships the v2 iOS build **first**, in the same
-session (§19.3). A `socketioxide` shim (~400 lines, one more dependency, reproducing the
-double-encoded payloads) was considered and **rejected**: BRIEF §8 says Socket.IO is not provided,
-and the mitigation is scheduling, not code.
+`subscription_*`). For the **currently installed iOS build this is worse than "no live updates"**,
+and the runbook depends on that being stated accurately rather than optimistically:
+
+- `SocketService.fetchInitialState()` is the only live caller of `GET /history` in that build, and
+  it runs *inside* `socket.on(clientEvent: .connect)`.
+- `QueueViewModel.refresh()` — pull-to-refresh — is `socketService.disconnect()` → 100 ms →
+  `socketService.connect(...)`, so it also reaches `/history` only through a successful handshake.
+- `AulosCore`'s `QueueService.fetchHistory()`, the one HTTP-only path, has **no callers** on the
+  shipped branch.
+
+With `<p>socket.io/*` answering 501 the handshake never completes, `.connect` never fires, and
+`fetchInitialState()` is never called. The installed build therefore shows an **empty queue for as
+long as it points at Aulos**, cycles `connectionStatus` `.testing` → `.error`/`.disconnected`
+("Connection timed out"), burns its three auto-retries and parks on the "Retry Connection" row in
+Settings — i.e. it is indistinguishable from "the server is down". `SettingsViewModel` fetches the
+version only on `connectionStatus == .connected`, so the version row goes stale as well. This is
+recorded independently in `docs/reference/ios-client-reference.md` (the `.connect` handler
+"then **`await fetchInitialState()`** (HTTP `GET /history`)").
+
+So the mitigation is **purely a scheduling one, and the ordering is load-bearing**: the v2 iOS
+build must be installed on the device **before** the image is swapped (§19.3 step 0) — "in the same
+session" is not sufficient if the swap goes first. A `socketioxide` shim (~400 lines, one more
+dependency, reproducing the double-encoded payloads) was considered and **rejected**: BRIEF §8 says
+Socket.IO is not provided, and with the ordering of 19.3 step 0 honoured no client ever meets the
+501. The 501 (rather than a hanging handshake) exists so that a *stale* build's failure is legible
+in the access log instead of presenting as a timeout.
 
 CORS: for v1 routes, exactly legacy behaviour — if `Origin` is present and (`*` is in
 `CORS_ALLOWED_ORIGINS` or the origin is listed), set `Access-Control-Allow-Origin: <Origin>` and
@@ -4269,7 +4290,7 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `AULOS_TRUSTED_PROXY_AUTH_HEADER` | `''` | str | when set, its absence on a v2 route is a 401 | N |
 | `AULOS_ALLOW_PRIVATE_TARGETS` | `true` | bool | SSRF guard for API adds (Telegram is always guarded) | N |
 | `AULOS_METRICS_ENABLED` | `false` | bool | serve `<p>metrics` in Prometheus text format | N |
-| `AULOS_SHUTDOWN_GRACE_SECS` | `20` | int | let in-flight downloads finish before killing them; the container **stop timeout** (compose `stop_grace_period`, `docker stop -t`) must exceed it + `AULOS_KILL_GRACE_MS`/1000 + `WS_CLOSE_GRACE` + `TRACKER_CEILING` — 37 s at the defaults, hence the shipped `stop_grace_period: 40s`. Docker's 10 s default would `SIGKILL` mid-shutdown, before the interrupted rows and the WAL checkpoint | N |
+| `AULOS_SHUTDOWN_GRACE_SECS` | `20` | int | let in-flight downloads finish before killing them; the container **stop timeout** (compose `stop_grace_period`, `docker stop -t`) must exceed the whole serial chain — it + `ENGINE_SHUTDOWN_CEILING` (5) + `WS_CLOSE_GRACE` (2) + `ENGINE_DRAIN_CEILING` (2) + `CONSUMER_DRAIN_CEILING` (2) + `TRACKER_CEILING` (10) = 41 s at the defaults, all of it *before* `store.close()` checkpoints the WAL — hence the shipped `stop_grace_period: 60s`. Docker's 10 s default would `SIGKILL` mid-shutdown, before the interrupted rows and the WAL checkpoint | N |
 | `AULOS_VERSION` | `dev` | str | alias of `METUBE_VERSION`; the Dockerfile sets both | N |
 | `AULOS_IMPORT_ON_ERROR` | `fail` | `fail\|skip` | what a legacy **file** error does: `fail` = rollback + exit non-zero (default); `skip` = omit that file, downgrade to a warning, commit, and mark the importer component degraded for the life of the process. `aulos-server import --skip-corrupt` sets `skip`. This is the documented escape from a restart loop caused by one corrupt legacy JSON file (§7.6.1) | N |
 | `AULOS_V1_ADD_RESOLVE_WAIT_MS` | `10000` | int (0 = off) | how long v1 `POST <p>add` waits for resolution before answering, so a resolution failure is still reported as `{"status":"error","msg":…}` (§11.2). `0` makes the v1 route fully async and knowingly gives up body-level error reporting; the v2 add route is never affected | N |
@@ -4464,7 +4485,7 @@ services:
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]
-    stop_grace_period: 40s   # > 20 (grace) + 5 (kill ladder) + 2 (WS close) + 10 (tracker)
+    stop_grace_period: 60s   # > 20 (grace) + 5 (engine) + 2 (WS) + 2 + 2 (drains) + 10 (tracker)
     environment:
       PUID: "1000"
       PGID: "1000"
@@ -4608,6 +4629,7 @@ volume `/srv/media:/downloads`, state in `/srv/media/.metube`.
 | 4 | Record the current compose and image digest: `docker compose config > /root/compose.pre-aulos.yml; docker inspect --format '{{index .RepoDigests 0}}' metube-pot > /root/image.pre-aulos`. |
 | 5 | Confirm the reverse proxy forwards `Upgrade`/`Connection` for `<prefix>ws` (§16.6). If it does not, plan on `AULOS_API_TOKEN`. |
 | 6 | `docker pull ghcr.io/tatoalo/aulos:<tag>`. |
+| 7 | **Get the v2 iOS build into distribution now**, not on the day: 19.3 step 0 is a hard gate because the shipped v1 build goes blank the moment `socket.io/*` answers 501 (§11.6, R2), and TestFlight processing is not something to discover at T−0. Point the v2 build at the 19.2 shadow port to confirm it talks to `api/v2` before the swap. |
 
 ### 19.2 Rehearsal (T−1 day, zero downtime, read-only)
 
@@ -4644,8 +4666,11 @@ double-scan the library. That is the whole reason the shadow is safe to run agai
 ### 19.3 Cutover (T−0, ~2 minutes of downtime)
 
 ```bash
-# 0. Announce in the Telegram chat. Ship the v2 iOS build to the device FIRST (TestFlight/Xcode),
-#    because losing Socket.IO is a real regression for the currently installed build (§11.6).
+# 0. Announce in the Telegram chat. GATE, not a note: install the v2 iOS build on every device
+#    BEFORE step 2, and open it against the OLD server to confirm it runs. The v1 build reaches
+#    `GET /history` only from its Socket.IO `.connect` handler, so once `socket.io/*` answers 501
+#    it shows an empty queue and "Connection timed out" forever, not a manually refreshable one
+#    (§11.6, R2). Any device still on the old build is dark for the whole overlap window.
 # 1. Note in-flight work (it will be re-queued, not lost).
 curl -s localhost:8081/history | jq '[.queue[]|select(.status=="downloading")]|length'
 # 2. Stop the old service. The state files are left untouched.
@@ -4829,7 +4854,7 @@ docker stop → tini forwards SIGTERM → aulos-server
 
 This whole ladder only runs if the container is *given* the time: Docker's default stop
 timeout is 10 s, which lands in the middle of the grace poll, so the shipped compose sets
-`stop_grace_period: 40s` (§18.3) and any deployment that raises `AULOS_SHUTDOWN_GRACE_SECS`
+`stop_grace_period: 60s` (§18.3) and any deployment that raises `AULOS_SHUTDOWN_GRACE_SECS`
 must raise it too.
 
 Legacy re-`add`ed **every** queued item at once, each re-running metadata extraction on the shared
@@ -4884,7 +4909,7 @@ Likelihood / Impact: L / M / H, ordered by product.
 | # | Risk | L | I | Mitigation | Detection |
 |---|---|---|---|---|---|
 | R1 | **The v1 shim is subtly wrong and the shipped iOS build silently shows a broken queue during cutover.** | M | H | `tests/v1_golden/` replays captured legacy responses field-by-field; a JSON-Schema check generated from `print-schema` runs in CI; the shadow run exercises `/history` and `/add` against real state before any downtime. | `/history` counts compared against the pre-cutover numbers (19.3 step 5). |
-| R2 | **Losing Socket.IO leaves the currently installed client without live updates.** | H | M | Accepted and scheduled: the v2 iOS build ships in the same session (19.3 step 0). The old client already fetches `/history` on connect and on pull-to-refresh, so it degrades to manual refresh, not a blank screen. `<p>socket.io` returns 501 with a pointer instead of hanging a handshake. | The 501 in access logs; the app's `.error` handler. |
+| R2 | **Losing Socket.IO leaves the currently installed client with an empty queue and a "server is down" UI** — not merely without live updates. It fetches `GET /history` only from its Socket.IO `.connect` handler, and pull-to-refresh is just a reconnect (§11.6). | H | M | Scheduling only, and the ordering is load-bearing: the v2 iOS build must be **installed on the device before** the image swap, and 19.3 step 0 makes that a gate rather than a note. There is no in-app fallback to rely on: with the handshake refused the old build never calls `/history`, never leaves `.testing`/`.error`, exhausts its three auto-retries and parks on "Retry Connection". `<p>socket.io` returns 501 with a pointer so a stale build's failure is legible instead of a hung handshake. | The 501 in access logs; the app's `.error` handler. **If the ordering slips, a burst of "the server is unreachable" reports from the old build IS this risk — do not triage it as a separate incident.** |
 | R3 | **yt-dlp option-dict drift** — a user's `YTDL_OPTIONS` holds something JSON cannot express. | L | H | Both `YTDL_OPTIONS` and `YTDL_OPTIONS_FILE` were already JSON in legacy, so anything a user has is expressible. `coerce` handles the one known object type; an unknown coercion is a loud `contract` error naming the key, never a silent behaviour change. | `healthz.components.ytdl_options`; the item's `error`. |
 | R4 | **A nightly yt-dlp bump breaks extraction on the VPS.** | H | M | The bump PR builds the image and runs a real extract before auto-merging (§18.5). The pin is a build arg, so rolling back is `--build-arg YTDLP_VERSION=<old>` or the previous image tag, and because Python lives only in the runtime stage that image builds in ~2 min. | The bump PR's smoke job; `healthz.components.ytdlp_runner`; a mass of items failing with the same code. |
 | R5 | **`wreq`/BoringSSL fails to build or churns.** | M | M | `ScHttp` trait with a compiled-in plain-`reqwest` implementation and the runtime switch `AULOS_SC_HTTP`; the feature is per-target; CI builds both feature combinations. Only StreamingCommunity degrades, and only if the site fingerprint-checks. | A CI build failure (blocking); at runtime a boot WARN naming the degradation, plus SC items failing with a 403. |
@@ -4905,7 +4930,7 @@ Likelihood / Impact: L / M / H, ordered by product.
 | R20 | **A plugin is malicious** ("install this codec pack"). | L | H | No shell, fixed argv templates, sanitised placeholders, cleared env with an explicit `env.pass` allow-list, refusal to execute world-writable or setuid files, and `GET api/v2/providers` exposing every argv for audit. Documented in bold: a plugin runs with the server's privileges and is **not** sandboxed. | Operator audit; the argv in `healthz`/`providers`. |
 | R21 | **The `Normalizer` port diverges**, making bars jump backwards. | M | L | Golden vectors ported 1:1 from the Python unit tests plus a `proptest` monotonicity invariant. | The golden test; visually obvious in the app. |
 | R22 | **Secrets leak** (the legacy tree already contains live ones). | H | H | Runbook step 1 is rotation; a `chmod 600` `.env`; `gitleaks` in CI; the `Redact` newtype in every log path; `check-config` prints `«redacted»`. | `gitleaks`; a manual grep of the new repo before the first push. |
-| R24 | **Async add silently swallows a bad URL for the shipped client during the overlap window.** `AddResultClassifier` decides success by parsing the `POST <p>add` body, so a 200 emitted before extraction turns "unsupported URL" into "queued" and the "Couldn't add to Aulos" notification never fires. | M | H | The bounded pre-resolve of §11.2 (`AULOS_V1_ADD_RESOLVE_WAIT_MS`, default 10 s) keeps the legacy body contract on the v1 route only, with the legacy `", "` joiner for multi-URL adds; `aulos_v1_add_resolve_total{outcome}` shows how often the window expires; the v2 route stays async, so the property disappears with the v1 shim. Scheduled like R2: the v2 iOS build ships in the same session (19.3 step 0). | The metric's `timeout` share; a share-sheet add of a deliberately bad URL in the cutover smoke list (19.3 step 6b). |
+| R24 | **Async add silently swallows a bad URL for the shipped client during the overlap window.** `AddResultClassifier` decides success by parsing the `POST <p>add` body, so a 200 emitted before extraction turns "unsupported URL" into "queued" and the "Couldn't add to Aulos" notification never fires. | M | H | The bounded pre-resolve of §11.2 (`AULOS_V1_ADD_RESOLVE_WAIT_MS`, default 10 s) keeps the legacy body contract on the v1 route only, with the legacy `", "` joiner for multi-URL adds; `aulos_v1_add_resolve_total{outcome}` shows how often the window expires; the v2 route stays async, so the property disappears with the v1 shim. Scheduled like R2: the v2 iOS build is installed before the image swap (19.3 step 0). | The metric's `timeout` share; a share-sheet add of a deliberately bad URL in the cutover smoke list (19.3 step 6b). |
 | R25 | **A StreamingCommunity URL legacy could still handle now fails.** Legacy detected by host but dispatched by path and fell through to yt-dlp for anything else. | M | M | `matches()` is host-**and**-path (§10.2), so a non-dispatchable path is `Match::No` and yt-dlp gets it exactly as before; the runner-up retry of §6.4 covers a scrape that resolves nothing. Both are recorded (Appendix A.9, B C46) and both have tests (PLAN WP-08, WP-12). | An SC-host URL failing with `unsupported_url` instead of being handled by yt-dlp; `aulos_resolve_fallthrough_total`. |
 | R23 | **The reverse proxy strips the WebSocket `Upgrade`** for `<prefix>ws`. | M | M | A pre-flight check in the runbook (19.1 step 5); `AULOS_API_TOKEN` accepted via `Sec-WebSocket-Protocol` or `?token=`; and `GET api/v2/state?since=` is a fully functional polling fallback that needs no upgrade at all. | The WS handshake failing in the shadow run. |
 
@@ -4920,7 +4945,7 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 38 | Add `pause`/`resume`, the half of iOS ask 11 that C35 did not cover? | **Yes — as a `pause` action, not a ninth status** (§8.7). `queued(auto_start=true) → auto_start=false` un-schedules; a running job is killed but keeps its `.part` so `start` resumes it, with `attempt` unchanged. The action set becomes `start \| pause \| cancel \| retry \| delete`. "Paused" and "never started" are the same thing to the scheduler, the v1 shim and the client, so the closed 8-value vocabulary of BRIEF §6 is untouched (Appendix B, C41). |
 | 39 | Where does the `DomainEvent` fan-out live, and what type is it? | **An explicit `EventRouter` task in `aulos-core::event`, owning the single receiver and issuing one bounded `EventInbox` per subscriber** (§2.2.1). Not a `broadcast` channel: it cannot express per-subscriber capacity or drop policy, and it drops the *oldest* message for a slow reader, which for a `Completed` event silently skips a hook. Not four consumers each taking "the" `mpsc::Receiver`, which does not compile. |
 | 40 | v1 `GET <p>history` `done[]`: the in-memory window or the whole store? | **The whole store**, `AULOS_V1_HISTORY_MAX=0` by default (§11.4). v1 has no `truncated`, no `done_total` and no paging, and `HistoryResponse` declares all three arrays non-optional, so a window would silently drop thousands of rows out of the shipped client at cutover. v2 stays windowed and honest. |
-| 1 | A Socket.IO shim for the overlap window? | **No.** BRIEF §8 says Socket.IO is not provided. `<p>socket.io` returns 501 with a pointer; the v2 iOS build ships in the same session (§11.6, R2). |
+| 1 | A Socket.IO shim for the overlap window? | **No.** BRIEF §8 says Socket.IO is not provided. `<p>socket.io` returns 501 with a pointer; the v2 iOS build is installed **before** the swap, which is what keeps the shipped build (blank queue without a handshake) from ever meeting it (§11.6, R2). |
 | 2 | Should the v1 shim synthesise a parent row for a group? | **No.** Groups are omitted from `/history`; only children appear. A parent row that never progresses is worse than nothing in the old client (§11.4). |
 | 3 | `canceled` in v1 `/history`? | **Omitted entirely.** The shipped `DownloadStatus` has no `canceled` case and maps unknown → `.pending`, so a cancelled row would be stuck in "In Progress" forever. Legacy made cancels vanish; this is faithful (§11.4). |
 | 4 | v1 `id`: the ULID or the legacy extractor id? | **`media_id` when present, else the ULID**, with the `<prefix>.<id>` prefixing reproduced. The shipped client keys deletes on `url ?? id`, and the resolution ladder (§11.3) accepts all three tokens, so both work (§11.4). |
