@@ -21,9 +21,10 @@ services:
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]
-    # Must exceed AULOS_SHUTDOWN_GRACE_SECS (20) + kill ladder (5s) + WS close (2s) + tracker (10s);
-    # Docker's 10 s default would SIGKILL mid-shutdown and skip the WAL checkpoint.
-    stop_grace_period: 40s
+    # Must exceed the serial shutdown chain -- AULOS_SHUTDOWN_GRACE_SECS (20) + engine shutdown (5s)
+    # + WS close (2s) + engine drain (2s) + consumer drain (2s) + tracker (10s) = 41s -- which runs
+    # *before* the WAL checkpoint. Docker's 10 s default would SIGKILL mid-shutdown.
+    stop_grace_period: 60s
     environment:
       PUID: "1000"
       PGID: "1000"

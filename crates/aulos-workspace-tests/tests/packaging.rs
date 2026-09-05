@@ -3,9 +3,13 @@
 //! expensive and a mistake is silent.
 //!
 //! `tests/arch.rs` (the DESIGN §3 dependency-direction rules A1–A5) is a separate file owned by
-//! WP-03; this one deliberately only reads packaging files.
+//! WP-03; this one reads packaging files — and, for the shutdown budget, the `pub const`
+//! declarations that packaging file has to outlive. Reading them as source keeps this crate
+//! dependency-free (its DESIGN §3 row budgets for nothing) and keeps a packaging gate from
+//! failing to compile because an unrelated crate is mid-edit.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The workspace root, derived from this crate's manifest directory.
 fn repo_root() -> PathBuf {
@@ -457,21 +461,69 @@ fn the_entrypoint_is_a_no_op_on_ownership_when_docker_set_the_user() {
     }
 }
 
+/// The `stop_grace_period:` a compose snippet declares, in whole seconds.
+fn stop_grace_period_secs(rel: &str) -> u64 {
+    let text = read(rel);
+    text.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("stop_grace_period:"))
+        .map(|v| {
+            v.split('#')
+                .next()
+                .unwrap_or(v)
+                .trim()
+                .trim_end_matches('s')
+                .to_owned()
+        })
+        .unwrap_or_else(|| panic!("{rel} must declare a stop_grace_period"))
+        .parse::<u64>()
+        .unwrap_or_else(|e| panic!("{rel}: stop_grace_period must be whole seconds: {e}"))
+}
+
+/// One `pub const NAME: Duration = Duration::from_{secs,millis}(N);` out of `aulos-server`'s
+/// wiring, as milliseconds.
+///
+/// Reading the declaration rather than copying its value is the point: a ceiling that is raised
+/// fails this gate, and one that is renamed or deleted panics here by name instead of silently
+/// leaving a term out of the sum.
+fn wiring_ceiling_ms(src: &str, name: &str) -> u64 {
+    let needle = format!("pub const {name}: Duration = Duration::from_");
+    let rest = src
+        .split_once(&needle)
+        .unwrap_or_else(|| {
+            panic!(
+                "crates/aulos-server/src/wiring.rs must declare `{name}` — if it was renamed, \
+                 update this gate's shutdown budget with it"
+            )
+        })
+        .1;
+    let (unit, rest) = rest
+        .split_once('(')
+        .unwrap_or_else(|| panic!("`{name}` must be a `Duration::from_*(…)` literal"));
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let n: u64 = digits
+        .parse()
+        .unwrap_or_else(|e| panic!("`{name}` must hold an integer literal: {e}"));
+    match unit {
+        "secs" => n * 1_000,
+        "millis" => n,
+        other => panic!("`{name}` uses `Duration::from_{other}`, which this gate cannot read"),
+    }
+}
+
 #[test]
 fn the_compose_example_outlives_the_shutdown_sequence() {
     // Regression test for ops-3: Docker's default stop timeout is 10 s, so without an explicit
     // `stop_grace_period` a plain `docker compose down` SIGKILLs the container in the middle of
     // the DESIGN §21.4 grace poll -- before in-flight jobs are cancelled, before the interrupted
     // rows get `msg="Interrupted by shutdown"`, and before wal_checkpoint(TRUNCATE).
-    let compose = read("docker/compose.example.yml");
-    let secs = compose
-        .lines()
-        .map(str::trim)
-        .find_map(|l| l.strip_prefix("stop_grace_period:"))
-        .map(|v| v.trim().trim_end_matches('s').to_owned())
-        .unwrap_or_else(|| panic!("docker/compose.example.yml must declare a stop_grace_period"))
-        .parse::<u64>()
-        .unwrap_or_else(|e| panic!("stop_grace_period must be a whole number of seconds: {e}"));
+    //
+    // The budget is read out of `wiring.rs` rather than copied into a comment. The first cut of
+    // this gate spelled the ceilings out, mislabelled one of them, and left three others out --
+    // so it certified a 40 s timeout for a 41.5 s shutdown, and the SIGKILL still landed on the
+    // WAL checkpoint the setting exists to protect.
+    let wiring = read("crates/aulos-server/src/wiring.rs");
+    let ms = |name: &str| wiring_ceiling_ms(&wiring, name);
 
     let default = |key: &str| -> u64 {
         aulos_core::config::DEFAULTS
@@ -480,20 +532,43 @@ fn the_compose_example_outlives_the_shutdown_sequence() {
             .and_then(|(_, v)| v.parse::<u64>().ok())
             .unwrap_or_else(|| panic!("{key} must have a numeric default"))
     };
-    // aulos-server's `WS_CLOSE_GRACE` (2) + `TRACKER_CEILING` (10); that crate is not a
-    // dependency of this one, so the two ceilings are spelled out here and in DESIGN §19.
-    const POST_KILL_CEILINGS: u64 = 12;
-    let needed = default("AULOS_SHUTDOWN_GRACE_SECS")
-        + default("AULOS_KILL_GRACE_MS") / 1000
-        + POST_KILL_CEILINGS;
-    assert!(
-        secs > needed,
-        "stop_grace_period is {secs}s but the shutdown sequence can take {needed}s"
+
+    // `run_with` awaits these one after another, so the worst case is their sum.
+    //
+    // `AULOS_KILL_GRACE_MS` is deliberately *not* a term: the per-job SIGTERM -> SIGKILL ladder
+    // runs inside the job tasks, which are bounded first by `ENGINE_SHUTDOWN_CEILING` and then by
+    // `TRACKER_CEILING`, so it overlaps this chain instead of extending it. `FLUSH_WINDOW` *is*
+    // budgeted even though `shutdown_tasks` currently folds it into `CONSUMER_DRAIN_CEILING`:
+    // DESIGN §16.4 step 7 places it in the chain, and half a second of slack is cheaper than a
+    // gate that goes stale the day it is wired back in.
+    let chain = Duration::from_millis(
+        default("AULOS_SHUTDOWN_GRACE_SECS") * 1_000
+            + ms("ENGINE_SHUTDOWN_CEILING")
+            + ms("WS_CLOSE_GRACE")
+            + ms("FLUSH_WINDOW")
+            + ms("ENGINE_DRAIN_CEILING")
+            + ms("CONSUMER_DRAIN_CEILING")
+            + ms("TRACKER_CEILING"),
     );
 
-    // The README quickstart is the snippet operators actually copy; it must carry it too.
+    // ...and only *then* does `store.close()` run: wal_checkpoint(TRUNCATE) plus `PRAGMA optimize`,
+    // unbounded, and the very thing this setting protects. It needs its own room on top of the sum.
+    const STORE_CLOSE_HEADROOM: Duration = Duration::from_secs(15);
+    let needed = chain + STORE_CLOSE_HEADROOM;
+
+    let secs = stop_grace_period_secs("docker/compose.example.yml");
     assert!(
-        read("README.md").contains("stop_grace_period:"),
-        "the README quickstart must set stop_grace_period as well"
+        Duration::from_secs(secs) >= needed,
+        "stop_grace_period is {secs}s but the shutdown chain alone is {chain:?} and the WAL \
+         checkpoint runs after it: at least {}s is needed",
+        needed.as_secs_f64().ceil()
+    );
+
+    // The README quickstart is the snippet operators actually copy; it must carry the same value.
+    let readme = stop_grace_period_secs("README.md");
+    assert_eq!(
+        readme, secs,
+        "the README quickstart's stop_grace_period ({readme}s) must match the compose example's \
+         ({secs}s)"
     );
 }

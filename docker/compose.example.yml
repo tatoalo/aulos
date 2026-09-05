@@ -14,10 +14,13 @@ services:
     # Docker's default stop timeout is 10 s, which SIGKILLs the container in the middle of the
     # DESIGN §21.4 shutdown: in-flight downloads are killed instead of being given their grace,
     # the interrupted rows never get `msg="Interrupted by shutdown"`, and the WAL is never
-    # checkpointed. The stop timeout must exceed AULOS_SHUTDOWN_GRACE_SECS (20) + the kill ladder
-    # (AULOS_KILL_GRACE_MS, 5 s) + the WS close grace (2 s) + the task-tracker ceiling (10 s) = 37 s
-    # at the defaults. Raise this with AULOS_SHUTDOWN_GRACE_SECS if you raise that.
-    stop_grace_period: 40s
+    # checkpointed. The steps run one after another, so the stop timeout must exceed their sum:
+    # AULOS_SHUTDOWN_GRACE_SECS (20) + ENGINE_SHUTDOWN_CEILING (5) + WS_CLOSE_GRACE (2) +
+    # ENGINE_DRAIN_CEILING (2) + CONSUMER_DRAIN_CEILING (2) + TRACKER_CEILING (10) = 41 s, and only
+    # *then* comes store.close() -- the wal_checkpoint(TRUNCATE) plus `PRAGMA optimize` this
+    # setting exists to protect. 60 s is that sum plus room for the checkpoint on a large WAL.
+    # Raise it further if you raise AULOS_SHUTDOWN_GRACE_SECS.
+    stop_grace_period: 60s
     environment:
       PUID: "1000"
       PGID: "1000"
