@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Comic Sans MS", "Chalkboard SE", "Segoe Print", cursive; }
+    a { color: #444444; } a:hover { color: #000000; }
+    .sk { border: 2px solid #333333; border-radius: 6px; }
+    .tile { border: 2px solid #333333; border-radius: 10px; background: #FFFFFF; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .thumb { height: 72px; border: 2px dashed #999999; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #999999; font-size: 12px; }
+    .bar { height: 8px; border: 2px solid #333333; border-radius: 4px; }
+    .fill { height: 100%; background: #333333; }
+  </style>
+</helmet>
+<div style="width: 720px; height: 460px; background: #FAFAFA; color: #222222; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px;">
+  <div style="font-size: 12px; color: #777777;">OPTION C · “Thumbnail wall” — big artwork tiles, the queue as a media shelf. Great for browsing what finished; heavier on the network.</div>
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <div class="sk" style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">A</div>
+    <div class="sk" style="flex-grow: 1; height: 40px; display: flex; align-items: center; padding: 0 12px; color: #999999;">paste link…</div>
+    <div class="sk" style="height: 40px; width: 40px; display: flex; align-items: center; justify-content: center; background: #333333; color: #FFFFFF;">+</div>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;">
+    <div class="tile"><div class="thumb">art</div><div style="font-size: 13px;">Le incredibili elezioni…</div><div class="bar"><div class="fill" style="width: 50%;"></div></div><div style="font-size: 11px; color: #777777;">2.1 MB/s · 1:08</div></div>
+    <div class="tile"><div class="thumb">season art</div><div style="font-size: 13px;">[Series] S2 · 4/12</div><div class="bar"><div class="fill" style="width: 37%;"></div></div><div style="font-size: 11px; color: #777777;">1 active</div></div>
+    <div class="tile"><div class="thumb">art</div><div style="font-size: 13px;">[Video title]</div><div class="bar"><div class="fill" style="width: 100%;"></div></div><div style="font-size: 11px; color: #777777;">merging…</div></div>
+    <div class="tile"><div class="thumb">art</div><div style="font-size: 13px;">[Video title]</div><div style="font-size: 11px; color: #777777;">✓ 285 MB · play ↗</div></div>
+    <div class="tile"><div class="thumb">art</div><div style="font-size: 13px; color: #AA2222;">[Video title] ✗</div><div style="font-size: 11px; color: #AA2222;">no formats · retry</div></div>
+    <div class="tile"><div class="thumb">art</div><div style="font-size: 13px;">[Audio title]</div><div style="font-size: 11px; color: #777777;">✓ 48 MB</div></div>
+    <div class="tile" style="border-style: dashed; color: #999999; align-items: center; justify-content: center;">…</div>
+    <div class="tile" style="border-style: dashed; color: #999999; align-items: center; justify-content: center;">…</div>
+  </div>
+  <div style="font-size: 12px; color: #777777;">Tradeoff: progress and actions get small; needs thumbnails from the server (not in the v2 Item today); slower first paint on a VPN.</div>
+</div>
+</x-dc>
+</body>
+</html>

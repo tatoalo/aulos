@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: #E07850; text-decoration: none; } a:hover { color: #8B3A4C; }
+    .app { --bg: #F2F2F7; --card: #FFFFFF; --field: #F2F2F7; --text: #000000; --text2: rgba(60,60,67,0.6); --text3: rgba(60,60,67,0.3);
+           --sep: rgba(60,60,67,0.16); --track: rgba(60,60,67,0.12); background: var(--bg); color: var(--text); }
+    .app.dark { --bg: #000000; --card: #1C1C1E; --field: #2C2C2E; --text: #FFFFFF; --text2: rgba(235,235,245,0.6); --text3: rgba(235,235,245,0.3);
+           --sep: rgba(84,84,88,0.5); --track: rgba(235,235,245,0.14); }
+    .seg { flex-grow: 1; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; color: var(--text); }
+    .seg.on { background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,0.12); font-weight: 600; }
+    .chip { height: 36px; padding: 0 14px; border-radius: 999px; background: var(--field); display: flex; align-items: center; font-size: 15px; font-weight: 500; color: var(--text); }
+    .chip.on { background: rgba(224,120,80,0.14); color: #E07850; font-weight: 600; }
+    .label { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--text2); text-transform: uppercase; letter-spacing: 0.4px; }
+  </style>
+</helmet>
+<div class="app {{theme}}" style="width: 390px; height: 844px; position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;">
+  <!-- dimmed queue behind the sheet -->
+  <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.35);"></div>
+
+  <!-- bottom sheet -->
+  <div style="position: relative; background: var(--card); border-radius: 20px 20px 0 0; padding: 8px 16px 34px; display: flex; flex-direction: column; gap: 20px;">
+    <div style="width: 36px; height: 5px; border-radius: 3px; background: var(--track); margin: 0 auto;"></div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between;">
+      <div style="font-size: 20px; line-height: 25px; font-weight: 700;">Add download</div>
+      <div style="font-size: 17px; line-height: 22px; color: #E07850; font-weight: 500;">Cancel</div>
+    </div>
+
+    <!-- url -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="min-height: 48px; border-radius: 12px; background: var(--field); padding: 12px 14px; box-sizing: border-box; font-size: 15px; line-height: 20px; word-break: break-all;">https://m.youtube.com/watch?v=8Xrcn5B04u4</div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 0 4px; font-size: 13px; line-height: 18px; color: var(--text2);">
+        <div style="width: 16px; height: 16px; border-radius: 50%; background: rgba(51,199,89,0.14); display: flex; align-items: center; justify-content: center; color: #33C759;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg></div>
+        <span>Handled by <span style="color: var(--text); font-weight: 500;">yt-dlp</span> · options below come from its catalog</span>
+      </div>
+    </div>
+
+    <!-- type: segmented -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="label">Type</div>
+      <div style="display: flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--field);">
+        <div class="seg on">Video</div>
+        <div class="seg">Audio</div>
+        <div class="seg">Captions</div>
+        <div class="seg">Thumbnail</div>
+      </div>
+    </div>
+
+    <!-- quality: chips -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="label">Quality</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+        <div class="chip on">Best</div>
+        <div class="chip">2160p</div>
+        <div class="chip">1440p</div>
+        <div class="chip">1080p</div>
+        <div class="chip">720p</div>
+        <div class="chip">480p</div>
+        <div class="chip">Audio only</div>
+      </div>
+    </div>
+
+    <!-- format + codec in one row -->
+    <div style="display: flex; gap: 12px;">
+      <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px;">
+        <div class="label">Format</div>
+        <div style="height: 44px; border-radius: 12px; background: var(--field); padding: 0 14px; display: flex; align-items: center; justify-content: space-between; font-size: 15px; font-weight: 500;"><span>mp4</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M6 9l6 6 6-6"></path></svg></div>
+      </div>
+      <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px;">
+        <div class="label">Codec</div>
+        <div style="height: 44px; border-radius: 12px; background: var(--field); padding: 0 14px; display: flex; align-items: center; justify-content: space-between; font-size: 15px; font-weight: 500;"><span>Auto</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M6 9l6 6 6-6"></path></svg></div>
+      </div>
+    </div>
+
+    <!-- toggles -->
+    <div style="display: flex; flex-direction: column; border-radius: 12px; background: var(--field);">
+      <div style="height: 48px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--sep);">
+        <span style="font-size: 15px;">Start automatically</span>
+        <div style="width: 51px; height: 31px; border-radius: 16px; background: #33C759; position: relative;"><div style="position: absolute; top: 2px; left: 22px; width: 27px; height: 27px; border-radius: 50%; background: #FFFFFF; box-shadow: 0 3px 8px rgba(0,0,0,0.15);"></div></div>
+      </div>
+      <div style="height: 48px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between;">
+        <span style="font-size: 15px;">Folder</span>
+        <span style="font-size: 15px; color: var(--text2); display: flex; align-items: center; gap: 6px;">Base <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></span>
+      </div>
+    </div>
+
+    <div style="height: 50px; border-radius: 12px; background: linear-gradient(135deg, #E07850, #8B3A4C); color: #FFFFFF; display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 600;">Add to queue</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.dark ? 'dark' : 'light' };
+  }
+}
+</script>
+</body>
+</html>

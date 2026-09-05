@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: #444444; } a:hover { color: #000000; }
+    .row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 90px 80px 70px 60px; gap: 12px; align-items: center; padding: 6px 12px; border-bottom: 1px dashed #BBBBBB; font-size: 12px; line-height: 16px; }
+    .hd { color: #777777; font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+    .bar { height: 6px; background: #E5E5E5; border: 1px solid #999999; }
+    .fill { height: 100%; background: #333333; }
+    .sk { border: 1.5px solid #333333; border-radius: 2px; }
+  </style>
+</helmet>
+<div style="width: 720px; height: 460px; background: #FAFAFA; color: #222222; padding: 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px;">
+  <div style="font-size: 11px; color: #777777;">OPTION B · “Dense data-first” — one table, no cards, monospace, zero chrome. Fits 3× more rows; reads like a terminal.</div>
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <div class="sk" style="flex-grow: 1; height: 28px; display: flex; align-items: center; padding: 0 8px; color: #999999; font-size: 12px;">url ▍</div>
+    <div class="sk" style="height: 28px; padding: 0 8px; display: flex; align-items: center; font-size: 12px;">video ▾</div>
+    <div class="sk" style="height: 28px; padding: 0 8px; display: flex; align-items: center; font-size: 12px;">best ▾</div>
+    <div class="sk" style="height: 28px; padding: 0 10px; display: flex; align-items: center; font-size: 12px; background: #333333; color: #FFFFFF;">add</div>
+  </div>
+  <div style="border: 1.5px solid #333333; border-radius: 2px; background: #FFFFFF;">
+    <div class="row hd"><span></span><span>title</span><span>progress</span><span>speed</span><span>eta</span><span></span></div>
+    <div class="row"><span>↓</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Le incredibili elezioni del 2000</span><div class="bar"><div class="fill" style="width: 50%;"></div></div><span>2.1 MB/s</span><span>1:08</span><span>⏸ ■ …</span></div>
+    <div class="row"><span>▸</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Series] — Season 2 (4/12)</span><div class="bar"><div class="fill" style="width: 37%;"></div></div><span>—</span><span>—</span><span>■ …</span></div>
+    <div class="row"><span>⚙</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Video title] · merging</span><div class="bar"><div class="fill" style="width: 100%;"></div></div><span>—</span><span>—</span><span>…</span></div>
+    <div class="row"><span>◦</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #777777;">[Video title] · paused</span><div class="bar"><div class="fill" style="width: 0%;"></div></div><span>—</span><span>—</span><span>▶ ✕</span></div>
+    <div class="row"><span>✓</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Video title]</span><span style="color: #777777;">285 MB</span><span style="color: #777777;">12m ago</span><span></span><span>▶ ↗ ✕</span></div>
+    <div class="row"><span style="color: #AA2222;">✗</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #AA2222;">[Video title] · no formats</span><span></span><span></span><span></span><span>↻ ✕</span></div>
+    <div class="row" style="border-bottom: none;"><span>✓</span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Audio title]</span><span style="color: #777777;">48 MB</span><span style="color: #777777;">1d ago</span><span></span><span>▶ ↗ ✕</span></div>
+  </div>
+  <div style="font-size: 11px; color: #777777;">Tradeoff: tiny hit targets on phones (needs a separate mobile layout); loses the app's warmth and brand.</div>
+</div>
+</x-dc>
+</body>
+</html>

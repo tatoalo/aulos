@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: #E07850; text-decoration: none; } a:hover { color: #8B3A4C; }
+    .app { --accent: #E07850; --ok: #33C759; --err: #D94040; --warn: #C9A030;
+           --bg: #F2F2F7; --card: #FFFFFF; --field: #F2F2F7; --text: #000000; --text2: rgba(60,60,67,0.6); --text3: rgba(60,60,67,0.3);
+           --sep: rgba(60,60,67,0.16); --track: rgba(60,60,67,0.12); --shadow: 0 2px 8px rgba(0,0,0,0.08);
+           background: var(--bg); color: var(--text); }
+    .app.dark { --bg: #000000; --card: #1C1C1E; --field: #2C2C2E; --text: #FFFFFF; --text2: rgba(235,235,245,0.6); --text3: rgba(235,235,245,0.3);
+           --sep: rgba(84,84,88,0.5); --track: rgba(235,235,245,0.14); --shadow: 0 2px 8px rgba(0,0,0,0.3); }
+    .card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); }
+    .iconbtn { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--text2); }
+    .iconbtn.primary { color: #E07850; background: rgba(224,120,80,0.12); }
+    .bar { height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }
+    .fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, #E07850, #8B3A4C); }
+    .fill.phase { background: #C9A030; }
+  </style>
+</helmet>
+<div class="app {{theme}}" style="width: 390px; height: 844px; display: flex; flex-direction: column; overflow: hidden; position: relative;">
+  <!-- brand bar + compact header, leaves the real status bar area (top 54px) empty -->
+  <div style="height: 3px; background: linear-gradient(135deg, #E07850, #8B3A4C);"></div>
+  <div style="background: var(--card); padding: 54px 16px 10px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--sep);">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <div style="width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #E07850, #8B3A4C); display: flex; align-items: center; justify-content: center;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v18"></path><path d="M15 3v18"></path><path d="M9 3l6 0"></path><circle cx="9" cy="9" r="0.6" fill="#FFFFFF"></circle><circle cx="9" cy="13" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="9" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="13" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="17" r="0.6" fill="#FFFFFF"></circle></svg>
+      </div>
+      <div style="display: flex; flex-direction: column;">
+        <div style="font-size: 20px; line-height: 25px; font-weight: 700;">Aulos</div>
+        <div style="font-size: 13px; line-height: 18px; color: var(--text2);">2 active · 14 done</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 6px; padding: 9px 14px; border-radius: 999px; background: rgba(51,199,89,0.1);">
+      <div style="width: 8px; height: 8px; border-radius: 50%; background: #33C759;"></div>
+      <span style="font-size: 15px; line-height: 20px; font-weight: 600; color: var(--text2);">Live</span>
+    </div>
+  </div>
+
+  <!-- scroll area -->
+  <div style="flex-grow: 1; overflow: hidden; padding: 12px 16px 0; display: flex; flex-direction: column; gap: 16px;">
+
+    <!-- add field -->
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <div style="flex-grow: 1; height: 48px; border-radius: 14px; background: var(--card); box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; padding: 0 14px; box-sizing: border-box;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M10 13a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"></path><path d="M14 11a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"></path></svg>
+        <span style="font-size: 15px; line-height: 20px; color: var(--text3);">Paste a link</span>
+      </div>
+      <div style="width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, #E07850, #8B3A4C); display: flex; align-items: center; justify-content: center; color: #FFFFFF;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"></path></svg>
+      </div>
+    </div>
+
+    <!-- in progress -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="padding: 0 8px; font-size: 15px; line-height: 20px; font-weight: 500; color: var(--text2);">In progress</div>
+
+      <div class="card" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(224,120,80,0.14); display: flex; align-items: center; justify-content: center; color: #E07850; flex-shrink: 0;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"></path><path d="M6 10l6 6 6-6"></path><path d="M5 20h14"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Le incredibili elezioni del 2000</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);"><span style="color: #E07850; font-weight: 500;">2.1 MB/s</span> · 142 of 285 MB · 1:08 left</div>
+          </div>
+          <div class="iconbtn" style="width: 36px; height: 36px; margin-right: -8px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg></div>
+        </div>
+        <div class="bar"><div class="fill" style="width: 50%;"></div></div>
+      </div>
+
+      <div class="card" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(224,120,80,0.14); display: flex; align-items: center; justify-content: center; color: #E07850; flex-shrink: 0;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Series title] — Season 2</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);">4 of 12 done · 1 active</div>
+          </div>
+          <div style="width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: var(--text2);"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+        </div>
+        <div class="bar"><div class="fill" style="width: 37%;"></div></div>
+      </div>
+
+      <div class="card" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(201,160,48,0.16); display: flex; align-items: center; justify-content: center; color: #C9A030; flex-shrink: 0;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);"><span style="color: #C9A030; font-weight: 500;">Merging formats</span> · audio_sync 48%</div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <div class="bar"><div class="fill" style="width: 100%;"></div></div>
+          <div class="bar" style="height: 3px;"><div class="fill phase" style="width: 48%;"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- completed -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 8px;">
+        <div style="font-size: 15px; line-height: 20px; font-weight: 500; color: var(--text2);">Completed</div>
+        <div style="display: flex; align-items: center; gap: 4px; color: #D94040; font-size: 12px; line-height: 16px; font-weight: 500;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg>
+          <span>Clear</span>
+        </div>
+      </div>
+      <div class="card" style="display: flex; flex-direction: column;">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 8px 12px 16px; border-bottom: 1px solid var(--sep);">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(51,199,89,0.14); display: flex; align-items: center; justify-content: center; color: #33C759; flex-shrink: 0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg></div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);">285 MB · 12 min ago</div>
+          </div>
+          <div class="iconbtn primary" style="width: 40px; height: 40px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M10 9l5 3-5 3z" fill="currentColor"></path></svg></div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 8px 12px 16px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(217,64,64,0.14); display: flex; align-items: center; justify-content: center; color: #D94040; flex-shrink: 0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: #D94040; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">No video formats found</div>
+          </div>
+          <div class="iconbtn primary" style="width: 40px; height: 40px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.7"></path><path d="M20 4v5h-5"></path></svg></div>
+        </div>
+      </div>
+      <div style="padding: 4px 8px; font-size: 12px; line-height: 16px; color: var(--text2);">Swipe a row left to delete · long-press for more</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.dark ? 'dark' : 'light' };
+  }
+}
+</script>
+</body>
+</html>

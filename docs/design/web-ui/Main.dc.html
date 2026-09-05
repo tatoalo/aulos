@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: #E07850; text-decoration: none; } a:hover { color: #8B3A4C; }
+    .app { --accent: #E07850; --accent-deep: #8B3A4C; --wine: #5C2030; --gold: #C9A030;
+           --ok: #33C759; --err: #D94040; --warn: #C9A030;
+           --bg: #F2F2F7; --card: #FFFFFF; --field: #F2F2F7; --text: #000000; --text2: rgba(60,60,67,0.6); --text3: rgba(60,60,67,0.3);
+           --sep: rgba(60,60,67,0.16); --track: rgba(60,60,67,0.12); --shadow: 0 2px 8px rgba(0,0,0,0.08);
+           background: var(--bg); color: var(--text); }
+    .app.dark { --bg: #000000; --card: #1C1C1E; --field: #2C2C2E; --text: #FFFFFF; --text2: rgba(235,235,245,0.6); --text3: rgba(235,235,245,0.3);
+           --sep: rgba(84,84,88,0.5); --track: rgba(235,235,245,0.14); --shadow: 0 2px 8px rgba(0,0,0,0.3); }
+    .card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); }
+    .iconbtn { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text2); background: transparent; }
+    .iconbtn.primary { color: var(--accent); background: rgba(224,120,80,0.12); }
+    .iconbtn.danger { color: var(--err); }
+    .bar { height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }
+    .fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, #E07850, #8B3A4C); }
+    .fill.ok { background: #33C759; }
+    .fill.phase { background: #C9A030; }
+    .kbd { font: 500 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border-radius: 4px; background: var(--field); color: var(--text2); border: 1px solid var(--sep); }
+    input, select { font: inherit; color: inherit; }
+    input::placeholder { color: var(--text3); }
+  </style>
+</helmet>
+<div class="app {{theme}}" style="width: 1440px; min-height: 900px; display: flex; flex-direction: column; align-items: stretch;">
+
+  <!-- Header: 3px brand bar + 64px row, card background, full width -->
+  <div style="height: 3px; background: linear-gradient(135deg, #E07850, #8B3A4C);"></div>
+  <div style="background: var(--card); border-bottom: 1px solid var(--sep);">
+    <div style="max-width: 960px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #E07850, #8B3A4C); display: flex; align-items: center; justify-content: center;">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v18"></path><path d="M15 3v18"></path><path d="M9 3l6 0"></path><circle cx="9" cy="9" r="0.6" fill="#FFFFFF"></circle><circle cx="9" cy="13" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="9" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="13" r="0.6" fill="#FFFFFF"></circle><circle cx="15" cy="17" r="0.6" fill="#FFFFFF"></circle></svg>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 0px;">
+          <div style="font-size: 20px; line-height: 25px; font-weight: 700;">Aulos</div>
+          <div style="font-size: 13px; line-height: 18px; color: var(--text2);">2 active · 1 waiting · 14 done</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 999px; background: rgba(51,199,89,0.12); color: var(--text2); font-size: 15px; line-height: 20px; font-weight: 600;">
+          <div style="width: 8px; height: 8px; border-radius: 50%; background: #33C759;"></div>
+          <span>Live</span>
+        </div>
+        <div class="iconbtn" style="width: 36px; height: 36px; border-radius: 10px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width: 960px; width: 100%; margin: 0 auto; padding: 24px 24px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px;">
+
+    <!-- Add bar -->
+    <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="flex-grow: 1; height: 44px; border-radius: 12px; background: var(--field); display: flex; align-items: center; gap: 10px; padding: 0 14px; box-sizing: border-box;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M10 13a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"></path><path d="M14 11a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"></path></svg>
+          <span style="font-size: 15px; line-height: 20px; color: var(--text3);">Paste a link, or press <span class="kbd">⌘V</span> anywhere</span>
+        </div>
+        <div style="height: 44px; padding: 0 12px; border-radius: 12px; background: var(--field); display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 500; color: var(--text);">
+          <span>Video</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="height: 44px; padding: 0 12px; border-radius: 12px; background: var(--field); display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 500; color: var(--text);">
+          <span>Best</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text2);"><path d="M6 9l6 6 6-6"></path></svg>
+        </div>
+        <div style="height: 44px; padding: 0 20px; border-radius: 12px; background: linear-gradient(135deg, #E07850, #8B3A4C); color: #FFFFFF; display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 600;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"></path></svg>
+          <span>Add</span>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px; padding: 0 4px; font-size: 12px; line-height: 16px; color: var(--text2);">
+        <span>Start automatically</span>
+        <span>·</span>
+        <span>Folder: <span style="color: var(--text); font-weight: 500;">Base</span></span>
+        <span>·</span>
+        <a href="#" style="font-weight: 500;">More options</a>
+      </div>
+    </div>
+
+    <!-- In progress -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 8px;">
+        <div style="font-size: 15px; line-height: 20px; font-weight: 500; color: var(--text2);">In progress</div>
+        <div style="font-size: 12px; line-height: 16px; color: var(--text2);">3 items · 2.1 MB/s</div>
+      </div>
+
+      <!-- Downloading row -->
+      <div class="card" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(224,120,80,0.14); display: flex; align-items: center; justify-content: center; color: #E07850;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"></path><path d="M6 10l6 6 6-6"></path><path d="M5 20h14"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">Le incredibili elezioni del 2000</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2); display: flex; gap: 8px;"><span style="color: #E07850; font-weight: 500;">Downloading</span><span>·</span><span>1080p · mp4</span><span>·</span><span>2.1 MB/s</span><span>·</span><span>142 MB of 285 MB</span><span>·</span><span>1:08 left</span></div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg></div>
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg></div>
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></div>
+          </div>
+        </div>
+        <div class="bar"><div class="fill" style="width: 50%;"></div></div>
+      </div>
+
+      <!-- Group row (playlist) -->
+      <div class="card" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: var(--text2);">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(90deg);"><path d="M9 6l6 6-6 6"></path></svg>
+          </div>
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(224,120,80,0.14); display: flex; align-items: center; justify-content: center; color: #E07850;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Series title] — Season 2</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2); display: flex; gap: 8px;"><span style="color: #E07850; font-weight: 500;">Downloading</span><span>·</span><span>4 of 12 done</span><span>·</span><span>1 active</span><span>·</span><span>streamingcommunity</span></div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg></div>
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></div>
+          </div>
+        </div>
+        <div class="bar"><div class="fill" style="width: 37%;"></div></div>
+        <!-- expanded children -->
+        <div style="display: flex; flex-direction: column; gap: 0px; border-top: 1px solid var(--sep); padding-top: 8px; margin-top: -4px;">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 8px 0 8px 32px;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; background: rgba(51,199,89,0.14); display: flex; align-items: center; justify-content: center; color: #33C759;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg></div>
+            <div style="flex-grow: 1; font-size: 13px; line-height: 18px;">S02E04 · [Episode title]</div>
+            <div style="font-size: 12px; line-height: 16px; color: var(--text2);">1.2 GB</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; padding: 8px 0 8px 32px;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; border: 2px solid rgba(224,120,80,0.25); border-top-color: #E07850; box-sizing: border-box;"></div>
+            <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 4px;">
+              <div style="font-size: 13px; line-height: 18px;">S02E05 · [Episode title]</div>
+              <div class="bar" style="height: 3px;"><div class="fill" style="width: 62%;"></div></div>
+            </div>
+            <div style="font-size: 12px; line-height: 16px; color: var(--text2);">62% · 0:40 left</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; padding: 8px 0 8px 32px;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; background: var(--track); display: flex; align-items: center; justify-content: center; color: var(--text2);"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v4l3 2"></path></svg></div>
+            <div style="flex-grow: 1; font-size: 13px; line-height: 18px; color: var(--text2);">S02E06 · [Episode title]</div>
+            <div style="font-size: 12px; line-height: 16px; color: var(--text2);">Queued</div>
+          </div>
+          <div style="padding: 6px 0 0 64px; font-size: 12px; line-height: 16px;"><a href="#" style="font-weight: 500;">Show 6 more</a></div>
+        </div>
+      </div>
+
+      <!-- Postprocessing row: primary bar at 100 + gold phase bar -->
+      <div class="card" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(201,160,48,0.16); display: flex; align-items: center; justify-content: center; color: #C9A030;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
+          </div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2); display: flex; gap: 8px;"><span style="color: #C9A030; font-weight: 500;">Post-processing</span><span>·</span><span>Merging formats</span><span>·</span><span>audio_sync 48%</span></div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <div class="bar"><div class="fill" style="width: 100%;"></div></div>
+          <div class="bar" style="height: 3px;"><div class="fill phase" style="width: 48%;"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Waiting (auto_start=false) -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 8px;">
+        <div style="font-size: 15px; line-height: 20px; font-weight: 500; color: var(--text2);">Waiting for you</div>
+        <a href="#" style="font-size: 12px; line-height: 16px; font-weight: 500;">Start all</a>
+      </div>
+      <div class="card" style="padding: 16px; display: flex; align-items: center; gap: 12px;">
+        <div style="width: 32px; height: 32px; border-radius: 50%; background: var(--track); display: flex; align-items: center; justify-content: center; color: var(--text2);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v4l3 2"></path></svg>
+        </div>
+        <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+          <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Video title]</div>
+          <div style="font-size: 13px; line-height: 18px; color: var(--text2); display: flex; gap: 8px;"><span style="font-weight: 500;">Paused</span><span>·</span><span>Audio · m4a · best</span></div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 4px;">
+          <div class="iconbtn primary"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"></path></svg></div>
+          <div class="iconbtn danger"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Completed -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 8px;">
+        <div style="font-size: 15px; line-height: 20px; font-weight: 500; color: var(--text2);">Completed</div>
+        <div style="display: flex; align-items: center; gap: 4px; color: #D94040; font-size: 12px; line-height: 16px; font-weight: 500;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg>
+          <span>Clear</span>
+        </div>
+      </div>
+      <div class="card" style="display: flex; flex-direction: column;">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--sep);">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(51,199,89,0.14); display: flex; align-items: center; justify-content: center; color: #33C759;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg></div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);">285 MB · mp4 · 12 min ago</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn primary"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M10 9l5 3-5 3z" fill="currentColor"></path></svg></div>
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"></path></svg></div>
+            <div class="iconbtn danger"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg></div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--sep);">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(217,64,64,0.14); display: flex; align-items: center; justify-content: center; color: #D94040;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Video title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: #D94040;">No video formats found</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn primary"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.7"></path><path d="M20 4v5h-5"></path></svg></div>
+            <div class="iconbtn danger"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg></div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(51,199,89,0.14); display: flex; align-items: center; justify-content: center; color: #33C759;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg></div>
+          <div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-size: 15px; line-height: 20px; font-weight: 500;">[Audio title]</div>
+            <div style="font-size: 13px; line-height: 18px; color: var(--text2);">48 MB · m4a · yesterday</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <div class="iconbtn primary"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M10 9l5 3-5 3z" fill="currentColor"></path></svg></div>
+            <div class="iconbtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"></path></svg></div>
+            <div class="iconbtn danger"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg></div>
+          </div>
+        </div>
+      </div>
+      <div style="text-align: center; padding: 8px; font-size: 12px; line-height: 16px;"><a href="#" style="font-weight: 500;">Show older</a></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.dark ? 'dark' : 'light' };
+  }
+}
+</script>
+</body>
+</html>
