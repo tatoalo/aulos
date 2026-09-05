@@ -6,6 +6,7 @@ mod support;
 use std::sync::Arc;
 
 use aulos_core::{DownloadRequest, GroupId, Item, ItemId, Kind, SourceKind, SourceRef, Status};
+use aulos_queue::Action;
 use support::{Harness, histogram, selection};
 
 /// A row in whatever state the test needs.
@@ -313,6 +314,77 @@ async fn a_recovered_row_still_dedupes_the_url_it_was_added_under() {
         "the URL is already queued, so nothing new is minted"
     );
     assert_eq!(outcome.duplicates.len(), 1, "{outcome:?}");
+}
+
+/// A row interrupted while it was still `resolving` has `provider = NULL` by construction —
+/// `handle_add` mints it that way and only the *end* of resolution fills it in — so re-queuing it
+/// without re-entering resolution stranded it: `schedule()` drops a provider-less row from its
+/// deque, `retry` refuses it (the status is `queued`, not `error`), `start` acked `applied` and
+/// changed nothing, and every later boot reproduced the same state. Only `delete` cleared it.
+///
+/// `tests::row` seeds `provider: Some(…)`, which no real interrupted resolve ever has, which is
+/// why the rest of this suite never saw it.
+#[tokio::test]
+async fn a_row_interrupted_mid_resolution_resolves_again_on_the_next_boot() {
+    let mut seed = row(1, Status::Resolving, true);
+    seed.provider = None;
+    seed.media_id = None;
+    seed.canonical_key = "fake\u{1f}https://fake.test/watch/1".into();
+    let id = seed.id;
+
+    let h = Harness::builder().seed(vec![seed]).build().await;
+    let done = h.until_status(id, Status::Finished).await;
+    assert!(
+        done.provider.is_some(),
+        "the re-entered resolution named a provider"
+    );
+    assert!(done.filename.is_some(), "and the download actually ran");
+}
+
+/// The parked half of the same row: `AULOS_RESTART_POLICY=pause`, or an add that asked not to
+/// start, leaves it `queued(auto_start = false)` with no provider. It stays parked — the §8.9
+/// table says so — but `start` has to be able to get it moving, which means resolving it first.
+#[tokio::test]
+async fn start_resolves_a_parked_row_that_never_got_a_provider() {
+    let mut seed = row(1, Status::Resolving, true);
+    seed.provider = None;
+    seed.media_id = None;
+    seed.canonical_key = "fake\u{1f}https://fake.test/watch/1".into();
+    let id = seed.id;
+
+    let h = Harness::builder()
+        .env("AULOS_RESTART_POLICY", "pause")
+        .seed(vec![seed])
+        .build()
+        .await;
+    h.settle().await;
+    let parked = h.item(id).await.unwrap();
+    assert_eq!((parked.status, parked.auto_start), (Status::Queued, false));
+    assert!(parked.provider.is_none(), "nothing resolved it behind us");
+
+    let started = h.handle.actions(Action::Start, vec![id], None).await;
+    assert_eq!(started.applied, vec![id], "{started:?}");
+    let done = h.until_status(id, Status::Finished).await;
+    assert!(done.provider.is_some());
+}
+
+/// `done_total` is the aggregator's count of *item* history: PROTOCOL §5.3 keeps a group row in
+/// `items` and the aggregator never puts one in its done bucket, so seeding from a count that
+/// included terminal groups left `truncated.done` true — "there is more history, page for it" —
+/// with nothing behind it.
+#[tokio::test]
+async fn the_done_total_seed_counts_terminal_items_but_not_terminal_groups() {
+    let mut seed = group_with(1, &[Status::Finished, Status::Finished]);
+    seed[0].status = Status::Finished;
+    seed[0].finished_at = Some(1_700_000_000_500);
+
+    let (_h, report) = Harness::builder().seed(seed).build_reporting().await;
+    let report = report.expect("recovery ran");
+    assert_eq!(report.terminal, 3, "three terminal rows are in the window");
+    assert_eq!(
+        report.terminal_total, 2,
+        "but only the two children are history a client can page"
+    );
 }
 
 #[tokio::test]

@@ -72,7 +72,7 @@ impl Engine {
                 RestartPolicy::Resume => "resume",
                 RestartPolicy::Pause => "pause",
             },
-            terminal_total: boot.done_total,
+            terminal_total: self.terminal_item_count().await?,
             ..RecoveryReport::default()
         };
         let now = self.clock.now_ms();
@@ -204,6 +204,43 @@ impl Engine {
         self.publish_added(payload, aulos_core::AddReason::Created)
             .await;
 
+        // 8. Re-enter resolution for what the §8.9 table re-queued out of `resolving`.
+        //
+        //    Such a row has `provider = NULL` by construction — `handle_add` mints it that way and
+        //    only `WriteOp::SetResolved` fills it in, at the *end* of resolution — and nothing
+        //    outside `add` and `retry` ever spawns a resolve. Left as `queued`, it is invisible to
+        //    the scheduler for the life of the installation: `schedule()` drops a provider-less
+        //    row from its deque, `retry` refuses it (`not_retryable`, the status is `queued`), and
+        //    every later boot reproduces the same state. Only `delete` cleared it.
+        //
+        //    Parked rows (`auto_start = false`, which is every row under
+        //    `AULOS_RESTART_POLICY=pause`) stay parked, exactly as the table says; `handle_start`
+        //    resolves one of those when the user asks for it.
+        let unresolved: Vec<ItemId> = {
+            let mut ids: Vec<(i64, ItemId)> = self
+                .items
+                .values()
+                .filter(|i| {
+                    i.kind == Kind::Item
+                        && i.status == Status::Queued
+                        && i.auto_start
+                        && i.provider.is_none()
+                })
+                .map(|i| (i.ord, i.id))
+                .collect();
+            ids.sort_unstable();
+            ids.into_iter().map(|(_, id)| id).collect()
+        };
+        if !unresolved.is_empty() {
+            tracing::info!(
+                count = unresolved.len(),
+                "re-resolving adds that were interrupted mid-resolution"
+            );
+        }
+        for id in unresolved {
+            self.restart_resolution(id).await;
+        }
+
         self.schedule().await;
         tracing::info!(
             resolving = report.requeued_resolving,
@@ -216,6 +253,21 @@ impl Engine {
             "boot recovery complete"
         );
         Ok(report)
+    }
+
+    /// How many terminal **item** rows the database holds — the aggregator's `done_total` seed.
+    ///
+    /// `BootState::done_total` counts every terminal row, groups included, but PROTOCOL §5.3 keeps
+    /// a group in `items` and the aggregator never puts one in its done bucket: it neither counts
+    /// a terminal group in nor counts one out. Seeding from the unfiltered total therefore left
+    /// `done_total` permanently one-per-finished-playlist too high, so `truncated.done` stayed
+    /// true — "page the rest with `GET api/v2/items?status=finished`" — even after a `clear`
+    /// removed literally everything.
+    async fn terminal_item_count(&self) -> Result<u64, EngineError> {
+        let mut filter = aulos_store::ItemFilter::terminal().with_kind(Kind::Item);
+        // Only the `COUNT(*)` is wanted; the rows come from `boot_state`'s own window.
+        filter.limit = Some(1);
+        Ok(self.store.items(filter).await?.total)
     }
 
     /// Puts a recovered row into the cache and its indexes without re-publishing anything.

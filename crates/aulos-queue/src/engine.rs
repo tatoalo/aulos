@@ -79,9 +79,19 @@ pub(crate) struct RunSlot {
     pub(crate) watchdog: Option<JoinHandle<()>>,
     /// The permit, dropped as soon as the provider is done — not when the hooks are (DESIGN §13).
     pub(crate) slot: Option<Slot>,
-    /// Set once the engine has written this job's outcome itself (a cancel or a pause), so the
-    /// task's own `Finished`/`Failed` is ignored instead of overwriting it.
-    pub(crate) settled: bool,
+    /// Set once the engine has written this job's outcome itself, so the task's own
+    /// `Finished`/`Failed` is ignored instead of overwriting it. Which of the two it was decides
+    /// what happens to the partials when the process finally dies — see [`Engine::release_job`].
+    pub(crate) settled: Option<Settled>,
+}
+
+/// Why the engine settled a running job ahead of its own task (DESIGN §8.7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Settled {
+    /// `cancel`: the partials go.
+    Canceled,
+    /// `pause`: the partials are kept, so `start` resumes from the `.part`.
+    Paused,
 }
 
 /// One playlist expansion, mid-flight (DESIGN §8.4).
@@ -751,12 +761,13 @@ impl Engine {
             }
             view.speed = acc.speed();
             view.eta = acc.eta();
-            // PROTOCOL §3.3: on a group these are the child sums, and `total_bytes` is always
-            // null — an exact total for a whole playlist is not knowable until it finishes. The
-            // sum is `finished_bytes + downloaded`, which is the numerator §3.3's percent formula
-            // pairs against `total_est`.
-            view.downloaded_bytes = Some(acc.finished_bytes.saturating_add(acc.downloaded));
-            view.total_bytes_estimate = (acc.total_est > 0).then_some(acc.total_est);
+            // PROTOCOL §3.3: on a group these are the sums that go with the byte-weighted percent
+            // branch, and `total_bytes` is always null — an exact total for a whole playlist is
+            // not knowable until it finishes. `GroupAcc::bytes` carries the `byte_weighted` guard,
+            // so a group is never published with more bytes downloaded than estimated.
+            let (downloaded, estimate) = acc.bytes();
+            view.downloaded_bytes = downloaded;
+            view.total_bytes_estimate = estimate;
             view.total_bytes = None;
         }
         Arc::new(view)
@@ -1510,5 +1521,49 @@ mod tests {
             engine.dedupe.is_empty(),
             "and its dedupe entry went with it"
         );
+    }
+
+    /// DESIGN §8.7 orders a cancel "kill → the run task returns `Canceled` → partials removed".
+    /// `cancel_one` removes them the moment the token is cancelled, which is up to
+    /// `AULOS_KILL_GRACE_MS` *before* the process dies — long enough for a fragmented download to
+    /// open its next `.part-FragN` through a directory it recreates on the way. Those bytes were
+    /// then unreferenced forever: the boot orphan scan skips a directory whose row still exists,
+    /// and `files_of` only runs on delete. `release_job` is where the process is known to be gone,
+    /// so it cleans up again.
+    #[tokio::test]
+    async fn a_settled_cancel_cleans_the_scratch_directory_when_the_task_reports_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        let (mut engine, _router) =
+            engine(dir.path(), &[("TEMP_DIR", &temp.display().to_string())]);
+        let id = cache(&mut engine, row(Status::Canceled, 1));
+
+        for (settled, gone) in [(Settled::Canceled, true), (Settled::Paused, false)] {
+            engine.running.insert(
+                id,
+                RunSlot {
+                    cancel: CancellationToken::new(),
+                    watchdog: None,
+                    slot: None,
+                    settled: Some(settled),
+                },
+            );
+            // What the still-live process wrote during the kill grace, after `cancel_one` had
+            // already removed the directory once.
+            let tmp = engine.tmp_dir_for(id);
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(tmp.join("Clip.mp4.part-Frag7"), b"late").unwrap();
+
+            assert!(
+                !engine.release_job(id),
+                "the engine already wrote this outcome"
+            );
+            assert_eq!(
+                !tmp.exists(),
+                gone,
+                "{settled:?}: a cancel takes the partials, a pause keeps them so `start` resumes"
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 }

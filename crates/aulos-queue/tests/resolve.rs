@@ -548,18 +548,25 @@ async fn cancel_resolve_all_stops_an_expansion_mid_flight() {
     h.settle().await;
 
     let rows = h.rows().await;
-    let children = rows.iter().filter(|i| i.group_id == Some(id)).count();
+    let children: Vec<_> = rows.iter().filter(|i| i.group_id == Some(id)).collect();
     assert!(
-        children < 500,
-        "the not-yet-created children were never created: {children}"
+        children.len() < 500,
+        "the not-yet-created children were never created: {}",
+        children.len()
+    );
+    // PROTOCOL §4.7: "items already created keep their state, so follow it with a `delete` if you
+    // want them gone". Cancelling them here would kill running downloads and delete their partial
+    // bytes — and leave the client's documented follow-up with nothing to delete.
+    assert!(
+        children.iter().all(|i| i.status != Status::Canceled),
+        "the children that did exist keep their state: {:?}",
+        children.iter().map(|i| i.status).collect::<Vec<_>>()
     );
     let group = h.item(id).await.unwrap();
-    assert_eq!(group.status, Status::Canceled, "and the group is cancelled");
-    assert!(
-        rows.iter()
-            .filter(|i| i.group_id == Some(id))
-            .all(|i| i.status == Status::Canceled),
-        "as is every child that did exist"
+    assert_ne!(
+        group.status,
+        Status::Canceled,
+        "the header follows its surviving children"
     );
 }
 

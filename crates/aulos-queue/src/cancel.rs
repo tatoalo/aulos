@@ -15,13 +15,19 @@ use aulos_core::{FieldUpdate, GroupId, ItemId, Kind, RemoveReason, Status, WireE
 use aulos_store::{Durability, WriteOp, retry_ops};
 
 use crate::cmd::{ActionsResult, CancelScope, SkipReason};
-use crate::engine::Engine;
+use crate::engine::{Engine, Settled};
 
 /// The message a paused job carries (DESIGN §8.7).
 pub const PAUSED_MSG: &str = "Paused";
 
 impl Engine {
-    /// [`crate::EngineCmd::Start`]: `queued(!auto_start)` → `queued(auto_start)`.
+    /// [`crate::EngineCmd::Start`]: `queued(!auto_start)` → `queued(auto_start)`, and **a retry on
+    /// a failed or cancelled item** (PROTOCOL §4.2: "on a terminal item it is a `retry`").
+    ///
+    /// A `finished` item is the one terminal status that is not re-run: it has its file, and
+    /// re-downloading it is `retry`'s job to be asked for explicitly. Everything else — the
+    /// `network` failure the shipped client offers a Start button on — requeues, which is what
+    /// the v1 shim was compensating for in the API layer.
     pub(crate) async fn handle_start(&mut self, ids: Vec<ItemId>) -> ActionsResult {
         let mut result = ActionsResult::default();
         for id in self.expand_targets(ids, &mut result) {
@@ -30,36 +36,53 @@ impl Engine {
                 continue;
             };
             match item.status {
-                Status::Queued if !item.auto_start => {
-                    let at = self.clock.now_ms();
-                    if !self
-                        .apply(
-                            vec![WriteOp::SetAutoStart {
-                                id,
-                                auto_start: true,
-                                at,
-                            }],
-                            Durability::Batched,
-                        )
-                        .await
-                    {
-                        result.skip(id, SkipReason::NotStartable);
-                        continue;
+                Status::Queued => {
+                    if !item.auto_start {
+                        let at = self.clock.now_ms();
+                        if !self
+                            .apply(
+                                vec![WriteOp::SetAutoStart {
+                                    id,
+                                    auto_start: true,
+                                    at,
+                                }],
+                                Durability::Batched,
+                            )
+                            .await
+                        {
+                            result.skip(id, SkipReason::NotStartable);
+                            continue;
+                        }
+                        self.patch(id, |i| i.auto_start = true);
                     }
-                    self.patch(id, |i| i.auto_start = true);
-                    self.enqueue(id);
-                    self.publish_changed(id, Status::Queued, Status::Queued)
-                        .await;
-                    self.sync_group_of(id).await;
+                    // A row that never got as far as a provider cannot be scheduled — the
+                    // scheduler drops a provider-less row from its deque — so starting it means
+                    // resolving it first. That is the state a restart leaves an interrupted add
+                    // in (DESIGN §8.9), and acking `applied` without this would be a lie.
+                    if item.provider.is_none() && item.kind == Kind::Item {
+                        self.restart_resolution(id).await;
+                    } else {
+                        // Already on its way: `start` is idempotent. It still re-enqueues, because
+                        // "queued with `auto_start`" and "on a ready deque" are two different facts
+                        // — a start pressed while a paused job was still being killed leaves the
+                        // first without the second until its slot is released
+                        // (`Engine::release_job`).
+                        self.enqueue(id);
+                    }
+                    if !item.auto_start {
+                        self.publish_changed(id, Status::Queued, Status::Queued)
+                            .await;
+                        self.sync_group_of(id).await;
+                    }
                     result.applied.push(id);
                 }
-                // Already on its way: `start` is idempotent. It still re-enqueues, because
-                // "queued with `auto_start`" and "on a ready deque" are two different facts —
-                // a start pressed while a paused job was still being killed leaves the first
-                // without the second until its slot is released (`Engine::release_job`).
-                Status::Queued => {
-                    self.enqueue(id);
-                    result.applied.push(id);
+                // PROTOCOL §4.2: on a terminal item `start` *is* `retry`.
+                Status::Error | Status::Canceled => {
+                    if self.retry_one(id, &item).await {
+                        result.applied.push(id);
+                    } else {
+                        result.skip(id, SkipReason::NotRetryable);
+                    }
                 }
                 s if s.is_terminal() => result.skip(id, SkipReason::AlreadyTerminal),
                 _ => result.skip(id, SkipReason::NotStartable),
@@ -124,7 +147,7 @@ impl Engine {
     /// unchanged, so `start` re-runs the job and yt-dlp resumes from the `.part`.
     async fn park_running(&mut self, id: ItemId) {
         if let Some(slot) = self.running.get_mut(&id) {
-            slot.settled = true;
+            slot.settled = Some(Settled::Paused);
             slot.cancel.cancel();
             drop(slot.slot.take());
             if let Some(w) = slot.watchdog.take() {
@@ -173,7 +196,7 @@ impl Engine {
             slot.handle.abort();
         }
         if let Some(slot) = self.running.get_mut(&id) {
-            slot.settled = true;
+            slot.settled = Some(Settled::Canceled);
             slot.cancel.cancel();
             drop(slot.slot.take());
             if let Some(w) = slot.watchdog.take() {
@@ -188,6 +211,10 @@ impl Engine {
         let error = WireError::new(aulos_core::ErrorCode::Canceled, "canceled");
         self.terminate(id, Status::Canceled, FieldUpdate::Set(error))
             .await;
+        // Eager, so a cancel of a row with no live process cleans up now. A row that *does* have
+        // one is cleaned again in `Engine::release_job` when the task reports back, because until
+        // then the process still has the rest of the `killpg` grace to recreate this directory and
+        // write another fragment into it (DESIGN §8.7 orders the removal after the kill).
         self.cleanup_partials(id, true);
         self.notify_resolved(id);
     }
@@ -204,52 +231,82 @@ impl Engine {
                 result.skip(id, SkipReason::NotRetryable);
                 continue;
             }
-            let at = self.clock.now_ms();
-            let source = aulos_core::SourceRef::bare(aulos_core::SourceKind::Retry);
-            if !self
-                .apply(retry_ops(id, at, source.clone()), Durability::Batched)
-                .await
-            {
-                result.skip(id, SkipReason::NotRetryable);
-                continue;
-            }
-            let from = item.status;
-            self.patch(id, |i| {
-                i.status = Status::Queued;
-                i.auto_start = true;
-                i.msg = None;
-                i.error = None;
-                i.attempt = i.attempt.saturating_add(1);
-                i.source = source.clone();
-                i.finished_at = None;
-            });
-            // The row leaves the done window; the published terminal total is the aggregator's
-            // and follows the `terminal → queued` view it is about to see.
-            self.done_order.retain(|d| *d != id);
-            self.on_child_status(id, from, Status::Queued).await;
-            self.publish_changed(id, from, Status::Queued).await;
-            // A retried item that was never resolved has to resolve again before it can run.
-            if item.provider.is_none() {
-                self.write_status(
-                    id,
-                    Status::Resolving,
-                    FieldUpdate::Keep,
-                    FieldUpdate::Clear,
-                    None,
-                )
-                .await;
-                // A retry belongs to no add, so it gets a generation of its own rather than
-                // borrowing the last add's — only `CancelScope::All` can condemn it.
-                self.add_generation += 1;
-                let generation = self.add_generation;
-                self.spawn_resolve(id, generation, None).await;
+            if self.retry_one(id, &item).await {
+                result.applied.push(id);
             } else {
-                self.enqueue(id);
+                result.skip(id, SkipReason::NotRetryable);
             }
-            result.applied.push(id);
         }
         self.schedule().await;
         result
+    }
+
+    /// Requeues one `error`/`canceled` row: the DESIGN §8.8 retry, shared with [`Self::handle_start`]
+    /// because PROTOCOL §4.2 defines `start` on a terminal item as a retry.
+    ///
+    /// Returns whether the row moved — `false` only when the persisted write failed.
+    async fn retry_one(&mut self, id: ItemId, item: &std::sync::Arc<aulos_core::Item>) -> bool {
+        let at = self.clock.now_ms();
+        let source = aulos_core::SourceRef::bare(aulos_core::SourceKind::Retry);
+        if !self
+            .apply(retry_ops(id, at, source.clone()), Durability::Batched)
+            .await
+        {
+            return false;
+        }
+        let from = item.status;
+        self.patch(id, |i| {
+            i.status = Status::Queued;
+            i.auto_start = true;
+            i.msg = None;
+            i.error = None;
+            i.attempt = i.attempt.saturating_add(1);
+            i.source = source.clone();
+            i.finished_at = None;
+        });
+        // The row leaves the done window; the published terminal total is the aggregator's
+        // and follows the `terminal → queued` view it is about to see.
+        self.done_order.retain(|d| *d != id);
+        self.on_child_status(id, from, Status::Queued).await;
+        self.publish_changed(id, from, Status::Queued).await;
+        // A retried item that was never resolved has to resolve again before it can run.
+        if item.provider.is_none() && item.kind == Kind::Item {
+            self.restart_resolution(id).await;
+        } else {
+            self.enqueue(id);
+        }
+        true
+    }
+
+    /// Puts a row that has no provider yet back into resolution (DESIGN §8.1, §8.9).
+    ///
+    /// A row is provider-less until `WriteOp::SetResolved` names one at the *end* of resolution,
+    /// so this is the state a retry of an unresolved add is in — and the state boot recovery
+    /// leaves an interrupted `resolving` row in. Without it the row is invisible to the scheduler
+    /// forever: `schedule()` drops a provider-less row from its deque, `retry` refuses a `queued`
+    /// status, and only `delete` clears it.
+    pub(crate) async fn restart_resolution(&mut self, id: ItemId) {
+        if self.resolving.contains_key(&id) {
+            return;
+        }
+        self.unqueue(id);
+        if !self
+            .write_status(
+                id,
+                Status::Resolving,
+                FieldUpdate::Keep,
+                FieldUpdate::Clear,
+                None,
+            )
+            .await
+        {
+            return;
+        }
+        // Resolution restarted this way belongs to no add, so it gets a generation of its own
+        // rather than borrowing the last add's — only `CancelScope::All` can condemn it.
+        self.add_generation += 1;
+        let generation = self.add_generation;
+        self.spawn_resolve(id, generation, None).await;
     }
 
     /// [`crate::EngineCmd::Delete`] (DESIGN §8.10).
@@ -426,21 +483,24 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
 
-        // The not-yet-created children of an in-flight expansion are cancelled by never being
-        // created; the group and the children that do exist are cancelled outright.
+        // PROTOCOL §4.7 and DESIGN §8.1: this stops the *expansion*, nothing else. The
+        // not-yet-created children are cancelled by never being created; "items already created
+        // keep their state, so follow it with a `delete` if you want them gone" — which is only
+        // true if there is something left to delete, so a child that is already downloading is
+        // not killed and its partial bytes are not removed. `applied` therefore counts the
+        // expansions and resolve tasks stopped, which is what the `canceled` number means.
         for group in expanding {
             self.expansions.remove(&group);
-            let children: Vec<ItemId> = self
-                .items
-                .values()
-                .filter(|i| i.group_id == Some(group) && !i.status.is_terminal())
-                .map(|i| i.id)
-                .collect();
-            for child in children {
-                self.cancel_one(child).await;
-                result.applied.push(child);
+            let created = self.items.values().any(|i| i.group_id == Some(group));
+            if created {
+                // Re-roll the header off the children that do exist.
+                self.sync_group_status(group).await;
+            } else {
+                // Nothing was ever created, so the aborted expansion *is* the whole group: left
+                // alone it would sit `queued` with no children and no expansion to make any,
+                // forever.
+                self.cancel_one(group).await;
             }
-            self.sync_group_status(group).await;
             if !result.applied.contains(&group) {
                 result.applied.push(group);
             }

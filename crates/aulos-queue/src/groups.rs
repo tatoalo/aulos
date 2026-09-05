@@ -222,6 +222,25 @@ impl GroupAcc {
         (self.speed > 0.0).then_some(self.speed)
     }
 
+    /// The PROTOCOL §3.3 `(downloaded_bytes, total_bytes_estimate)` pair for a group row.
+    ///
+    /// §3.3 calls them "the corresponding sums" of the byte-weighted percent branch, so they are
+    /// published **only while that branch is in force** — the same [`Self::byte_weighted`] guard
+    /// [`Self::eta`] uses. [`Self::downloaded`] accumulates every running child, while
+    /// [`Self::total_est`] only accumulates the children that reported a total, so publishing the
+    /// pair unconditionally lets a group whose second child has no known size read
+    /// "51 kB of 1 kB" next to a bar that says 50 %.
+    #[must_use]
+    pub fn bytes(&self) -> (Option<u64>, Option<u64>) {
+        if !self.byte_weighted() {
+            return (None, None);
+        }
+        (
+            Some(self.finished_bytes.saturating_add(self.downloaded)),
+            Some(self.total_est),
+        )
+    }
+
     /// `bytes_remaining / speed`, when both are known.
     #[must_use]
     pub fn eta(&self) -> Option<i64> {

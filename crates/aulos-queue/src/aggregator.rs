@@ -344,11 +344,12 @@ fn acc_apply(acc: &mut GroupAcc, old: Option<ChildFacts>, new: Option<ChildFacts
 
 /// Writes a group accumulator's progress roll-up onto the group's own row.
 ///
-/// PROTOCOL §3.3: on a group, `downloaded_bytes` and `total_bytes_estimate` are the child sums and
-/// `total_bytes` is always `null` — an exact total for a whole playlist is not knowable until it
-/// finishes. The sum is `finished_bytes + downloaded`, the numerator §3.3's percent formula pairs
-/// against `total_est`, so the three numbers a client renders as "123 MB of 5.1 GB" agree with the
-/// bar in the same frame. Mirrored by `Engine::view`, which projects the same three fields.
+/// PROTOCOL §3.3: on a group, `downloaded_bytes` and `total_bytes_estimate` are the sums that go
+/// with the byte-weighted percent branch and `total_bytes` is always `null` — an exact total for a
+/// whole playlist is not knowable until it finishes. [`GroupAcc::bytes`] carries the same
+/// `byte_weighted` guard `eta()` has, so the three numbers a client renders as "123 MB of 5.1 GB"
+/// agree with the bar in the same frame instead of reading "51 kB of 1 kB" whenever one child's
+/// total is unknown. Mirrored by `Engine::view`, which projects the same three fields.
 fn apply_group(acc: &GroupAcc, view: &mut ItemView) {
     view.percent = if view.status == Status::Finished {
         100.0
@@ -357,8 +358,9 @@ fn apply_group(acc: &GroupAcc, view: &mut ItemView) {
     };
     view.speed = acc.speed();
     view.eta = acc.eta();
-    view.downloaded_bytes = Some(acc.finished_bytes.saturating_add(acc.downloaded));
-    view.total_bytes_estimate = (acc.total_est > 0).then_some(acc.total_est);
+    let (downloaded, estimate) = acc.bytes();
+    view.downloaded_bytes = downloaded;
+    view.total_bytes_estimate = estimate;
     view.total_bytes = None;
 }
 
@@ -2059,10 +2061,26 @@ mod tests {
             done.status = Status::Finished;
             rig.completed(&Arc::new(done));
         }
+        // A finished playlist too: PROTOCOL §5.3 keeps a group row in `items`, so `bucket()` never
+        // puts one in the done bucket and `done_total` must not count it either way. A group that
+        // counted on the way in but not on the way out left `truncated.done` true forever, with an
+        // empty `done` array for the client to page against.
+        let g = group_view(Status::Finished, 100, 2);
+        let kids = [
+            child_view(g.id, 1, Status::Finished, 101),
+            child_view(g.id, 2, Status::Finished, 102),
+        ];
+        rig.added(&[Arc::clone(&g), Arc::clone(&kids[0]), Arc::clone(&kids[1])]);
+        ids.push(g.id);
+        ids.extend(kids.iter().map(|k| k.id));
+
         rig.agg.flush();
         let published = rig.state.load();
         assert_eq!(published.done.len(), 5, "the window");
-        assert_eq!(published.done_total, 20, "the history behind it");
+        assert_eq!(
+            published.done_total, 20,
+            "the history behind it — the group is not history, it is a header"
+        );
         assert!(published.truncated.done);
 
         rig.removed(&ids, RemoveReason::Cleared);
@@ -2136,10 +2154,15 @@ mod tests {
             group.percent
         );
         assert_eq!(group.speed, Some(1_024.0), "the sum over running children");
-        // PROTOCOL §3.3: the byte fields on a group are the child sums, so a client can render
-        // "500 B of 1 000 B" on the playlist header row.
-        assert_eq!(group.downloaded_bytes, Some(500), "the child sum");
-        assert_eq!(group.total_bytes_estimate, Some(1_000), "the child sum");
+        // PROTOCOL §3.3: the byte fields on a group are the sums the byte-weighted percent branch
+        // uses, so while that branch is not in force there is no honest pair to publish — the
+        // 500 downloaded bytes belong to a group whose second child has no known total, and
+        // "500 B of 1 000 B" next to a 25 % bar is the nonsense this guard exists to prevent.
+        assert_eq!(
+            group.downloaded_bytes, None,
+            "no sum while one child's total is unknown"
+        );
+        assert_eq!(group.total_bytes_estimate, None, "nor an estimate to pair");
         assert_eq!(
             group.total_bytes, None,
             "`total_bytes` on a group is always null"
@@ -2170,11 +2193,52 @@ mod tests {
         rig.added(std::slice::from_ref(&big));
         rig.progress(big.id, BIG / 2.0, BIG);
         rig.agg.flush();
-        let percent = rig.state.load().get(g.id).unwrap().percent;
+        let group = rig.state.load().get(g.id).cloned().unwrap();
         assert!(
-            (48.0..53.0).contains(&percent),
-            "byte-weighted, so about half: {percent}"
+            (48.0..53.0).contains(&group.percent),
+            "byte-weighted, so about half: {}",
+            group.percent
         );
+        // PROTOCOL §3.3: *now* the pair is published, and it is never larger on the left than on
+        // the right — the whole point of gating it on the same predicate as the percent.
+        let (downloaded, estimate) = (group.downloaded_bytes, group.total_bytes_estimate);
+        assert_eq!(downloaded, Some(49 * SMALL + 2_000_000_000));
+        assert_eq!(estimate, Some(49 * SMALL + 4_000_000_000));
+        assert!(downloaded <= estimate, "{downloaded:?} of {estimate:?}");
+    }
+
+    /// A group with one finished child of known size and one running child whose total nobody
+    /// knows used to publish `downloaded_bytes = 51 000` against `total_bytes_estimate = 1 000`,
+    /// because `downloaded` accumulates every running child while `total_est` only accumulates the
+    /// ones that reported a total. PROTOCOL §3.3 pairs both with the byte-weighted percent branch.
+    #[test]
+    fn a_group_never_reports_more_bytes_downloaded_than_estimated() {
+        let mut rig = Rig::new(&[]);
+        let g = group_view(Status::Downloading, 1, 2);
+        let mut done = (*child_view(g.id, 1, Status::Finished, 2)).clone();
+        done.size = Some(1_000);
+        let running = child_view(g.id, 2, Status::Downloading, 3);
+        rig.added(&[Arc::clone(&g), Arc::new(done), Arc::clone(&running)]);
+        // 50 kB in, and the provider has never said how big the file is.
+        rig.agg.feed_progress(
+            running.id,
+            &RawProgress {
+                downloaded_bytes: Some(50_000.0),
+                speed: Some(1_024.0),
+                ..RawProgress::default()
+            },
+        );
+        rig.agg.flush();
+
+        let group = rig.state.load().get(g.id).cloned().unwrap();
+        assert_eq!(group.downloaded_bytes, None, "not a comparable sum");
+        assert_eq!(group.total_bytes_estimate, None);
+        assert!(
+            (group.percent - 50.0).abs() < 0.001,
+            "count-weighted: one of two children is done: {}",
+            group.percent
+        );
+        assert_eq!(group.eta, None, "the guard `eta()` already had");
     }
 
     #[test]

@@ -473,6 +473,42 @@ async fn an_explicit_retry_clears_the_error_and_re_runs() {
     assert_eq!(refused.skipped[0].reason, SkipReason::NotRetryable);
 }
 
+/// PROTOCOL §4.2: "`start` … on a terminal item it is a `retry`". The shipped client offers a
+/// Start affordance on a failed row and reads its action set from `capabilities.actions`, so
+/// answering `skipped: [already_terminal]` left the row failed and the button dead. Only
+/// `finished` stays `already_terminal` — it has its file, and re-downloading it is what an
+/// explicit `retry` is for.
+#[tokio::test]
+async fn start_on_a_failed_or_cancelled_item_retries_it() {
+    let h = Harness::builder()
+        .provider(Arc::new(support::fake()))
+        .build()
+        .await;
+
+    let canceled = {
+        let mut req = request("https://fake.test/watch/stopped");
+        req.auto_start = false;
+        h.add_request(req).await.unwrap().ids[0]
+    };
+    h.until_status(canceled, Status::Queued).await;
+    h.handle.actions(Action::Cancel, vec![canceled], None).await;
+    h.until_status(canceled, Status::Canceled).await;
+
+    let started = h.handle.actions(Action::Start, vec![canceled], None).await;
+    assert_eq!(started.applied, vec![canceled], "{started:?}");
+    assert!(started.skipped.is_empty());
+    let row = h.until_status(canceled, Status::Finished).await;
+    assert_eq!(row.attempt, 1, "it went through the retry path");
+    assert_eq!(row.error, None);
+
+    // A finished item is the one that is still refused.
+    let done = h.add("https://fake.test/watch/have-it").await;
+    h.until_status(done, Status::Finished).await;
+    let refused = h.handle.actions(Action::Start, vec![done], None).await;
+    assert!(refused.applied.is_empty());
+    assert_eq!(refused.skipped[0].reason, SkipReason::AlreadyTerminal);
+}
+
 #[tokio::test]
 async fn delete_removes_the_row_the_files_and_the_siblings() {
     let h = Harness::new().await;

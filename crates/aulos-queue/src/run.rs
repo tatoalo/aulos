@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cmd::EngineCmd;
-use crate::engine::{Engine, PendingHooks, RunSlot};
+use crate::engine::{Engine, PendingHooks, RunSlot, Settled};
 use crate::entry::SC_PROVIDER;
 use crate::slots::Slot;
 use crate::watchdog::{self, Watchdog};
@@ -80,7 +80,7 @@ impl Engine {
                 cancel,
                 watchdog,
                 slot: Some(slot),
-                settled: false,
+                settled: None,
             },
         );
     }
@@ -126,7 +126,7 @@ impl Engine {
         let Some(item) = self.cached(id) else {
             return;
         };
-        if item.status.is_terminal() || self.running.get(&id).is_some_and(|r| r.settled) {
+        if item.status.is_terminal() || self.running.get(&id).is_some_and(|r| r.settled.is_some()) {
             return;
         }
         let patch = msg.map_or(FieldUpdate::Keep, FieldUpdate::Set);
@@ -357,6 +357,14 @@ impl Engine {
     /// the slot exists — so the row is re-enqueued here, the moment the blocker is gone. Both
     /// callers run `schedule()` on this path; without that the item would sit `queued` with
     /// `auto_start = true` in no deque, and nothing would ever start it again.
+    ///
+    /// It is also where the partials of a settled job are finally removed. DESIGN §8.7 orders the
+    /// removal *after* the kill — `cancel_one` and `park_running` run it eagerly, while the
+    /// process still has the rest of the grace window to open its next `.part-FragN` through a
+    /// directory it recreates on the way — so this second, idempotent pass is the one that runs
+    /// when the process is actually gone. Without it, cancelling a fragmented download left a
+    /// scratch directory no later pass ever unlinks: the boot orphan scan skips it because the
+    /// `canceled` row still exists, and `Engine::files_of` only runs on delete.
     pub(crate) fn release_job(&mut self, id: ItemId) -> bool {
         self.beats.disarm(id);
         let Some(mut slot) = self.running.remove(&id) else {
@@ -366,7 +374,8 @@ impl Engine {
         if let Some(w) = slot.watchdog.take() {
             w.abort();
         }
-        if slot.settled {
+        if let Some(settled) = slot.settled {
+            self.cleanup_partials(id, settled == Settled::Canceled);
             if self
                 .cached(id)
                 .is_some_and(|i| i.status == Status::Queued && i.auto_start)
