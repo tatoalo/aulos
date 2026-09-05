@@ -792,7 +792,7 @@ def _entry_error(code, message):
 
 
 # --------------------------------------------------------------------------------------------
-# Sidecars that must travel with the media (DESIGN §9.5)
+# Sidecars that must travel with the media (DESIGN §9.2)
 # --------------------------------------------------------------------------------------------
 
 HOME_SIDECAR_TYPES = ("description", "infojson")
@@ -807,30 +807,51 @@ at the destination. Every ``Exec`` postprocessor that resolves a sidecar relativ
 ``%(filepath)q`` breaks on that split, MeTube's ``jellyfin_nfo_generator.py`` included: user
 postprocessors default to ``when='post_process'``, which runs *before* the move.
 
-Rust points these types at ``paths.temp`` (``provider.rs::pin_sidecars_to_the_scratch_dir``)
-and ``RegisterSidecarsForTheMove`` registers whatever landed there, so at every stage of the job the
-whole file set lives in one directory. Link shortcut files (``writeurllink`` and friends) are
-deliberately **not** redirected: nothing resolves a ``.url`` from ``%(filepath)q``, and their
-names come from a private helper this shim would have to reimplement to register them.
+Rust points these types at ``paths.temp`` (``provider.rs::pin_sidecars_to_the_scratch_dir``) and
+``SidecarsTravelWithTheMedia`` carries the result out again. Link shortcut files
+(``writeurllink`` and friends) are deliberately **not** redirected: nothing resolves a ``.url``
+from ``%(filepath)q``, and their names come from a private helper this shim would have to
+reimplement to register them.
+"""
+
+TRANSIENT_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp", ".aria2", ".swp")
+"""Scratch-directory names that are yt-dlp's own bookkeeping and must never be moved.
+
+``.part``/``.part-Frag*`` are the in-flight download, ``.ytdl`` the resume state, and a file that
+still exists under one of these names when the postprocessors run is either a leftover of a
+failed leg or something the downloader is about to clean up itself.
 """
 
 
-class RegisterSidecarsForTheMove:
-    """A ``before_dl`` postprocessor that hands the temp-dir sidecars to the MoveFiles step.
+class SidecarsTravelWithTheMedia:
+    """The last ``post_process`` postprocessor: everything beside the media moves with it.
+
+    Registered with ``add_post_processor(..., when='post_process')`` *after*
+    ``YoutubeDL.__init__`` has registered the user's own postprocessors, and
+    ``add_post_processor`` appends — so this runs after every user postprocessor and immediately
+    before ``MoveFilesAfterDownloadPP`` (``YoutubeDL.post_process``: ``run_all_pps('post_process')``
+    → ``run_pp(MoveFilesAfterDownloadPP)`` → ``run_all_pps('after_move')``). That is the only
+    point in the run where the scratch directory holds its final contents, which is what makes a
+    sweep the right shape and a fixed list of sidecar types the wrong one:
+
+    * yt-dlp never registers the ``.info.json`` or the ``.description`` for the move (see
+      :data:`HOME_SIDECAR_TYPES`), so without this they would be left behind, and
+    * a user ``Exec`` postprocessor runs *here*, in the scratch directory, and whatever it writes
+      there — MeTube's ``jellyfin_nfo_generator.py`` writes ``<base>.nfo`` — is a file yt-dlp has
+      never heard of and would leave behind too. Sweeping picks it up; naming types cannot.
+
+    The sweep also **drops** registrations whose source has since disappeared. The same legacy
+    script deletes the ``.info.json`` once it has read it, and an entry MoveFiles cannot find is
+    an unexplained ``File "…" cannot be found`` warning on a download that went perfectly.
+
+    Only files sharing the media's stem are taken, and never :data:`TRANSIENT_SUFFIXES`: the
+    scratch directory is per job (DESIGN §8.7), but a fragment or a ``.part`` left by a failed leg
+    has no business in the library.
 
     Duck-typed on purpose: ``YoutubeDL.add_post_processor`` only calls ``set_downloader`` and
     ``YoutubeDL.run_pp`` only calls ``run``, so this needs neither an import of
     ``yt_dlp.postprocessor`` nor the metaclass that would make it emit ``started``/``finished``
     ``pp`` frames of its own and change the transcript.
-
-    ``before_dl`` is the one hook that runs *after* the sidecars are on disk and whose
-    ``__files_to_move`` yt-dlp threads back into the download (``process_info``:
-    ``new_info, files_to_move = self.pre_process(info_dict, 'before_dl', files_to_move)``, and
-    ``files_to_move`` is what ``post_process`` later hands ``MoveFilesAfterDownloadPP``). User
-    postprocessors keep their own ``when`` and their own order; nothing here touches them.
-
-    Only files that exist **under** ``get_output_path('temp')`` are registered, so an operator who
-    points ``paths.infojson`` somewhere of their own keeps their file exactly where they put it.
     """
 
     def __init__(self):
@@ -841,60 +862,110 @@ class RegisterSidecarsForTheMove:
         self._downloader = downloader
 
     def run(self, info):
-        """Registers each existing sidecar with an empty destination.
-
-        ``''`` is yt-dlp's own convention for "put it next to the media": ``MoveFilesAfterDownload``
-        turns a falsy destination into ``os.path.join(info['__finaldir'], basename)``, which is
-        where the sidecar would have been written without the scratch directory.
-        """
+        """Prunes the vanished registrations, then registers the scratch directory's leftovers."""
         try:
-            self._register(info)
+            files_to_move = info.setdefault("__files_to_move", {})
+            self._drop_vanished(files_to_move)
+            self._sweep(info, files_to_move)
         except Exception as exc:  # noqa: BLE001 - a sidecar must never fail a download
-            self._debug(f"could not register the sidecars for the move: {clean_message(exc)}")
+            # Loud on purpose: a failure here strands the sidecars in a directory the engine
+            # deletes, and `write_debug` is a no-op unless the operator set LOGLEVEL=DEBUG.
+            self._warn(f"could not keep the sidecars with the media: {clean_message(exc)}")
         return [], info
 
-    def _register(self, info):
+    # -- the two halves ----------------------------------------------------------------------
+
+    def _drop_vanished(self, files_to_move):
+        """Forgets every registration whose source a postprocessor has since removed."""
+        for source in [p for p in files_to_move if p and not os.path.exists(p)]:
+            del files_to_move[source]
+            self._debug(f"a postprocessor consumed {source}; it will not be moved")
+
+    def _sweep(self, info, files_to_move):
+        """Registers every companion file sitting in the scratch directory with the media."""
+        media = info.get("filepath")
+        if not media:
+            return
+        scratch = os.path.dirname(os.path.abspath(media))
+        if not self._is_scratch(scratch):
+            return
+        registered = {os.path.abspath(p) for p in files_to_move}
+        stem = os.path.splitext(os.path.basename(media))[0]
+        for name in sorted(os.listdir(scratch)):
+            path = os.path.join(scratch, name)
+            absolute = os.path.abspath(path)
+            if absolute == os.path.abspath(media) or absolute in registered:
+                continue
+            if not self._is_companion(name, stem) or not os.path.isfile(path):
+                continue
+            # `''` is yt-dlp's own "next to the media" destination: `MoveFilesAfterDownloadPP`
+            # turns a falsy value into `os.path.join(info['__finaldir'], basename)`.
+            files_to_move[path] = ""
+            self._debug(f"{name} moves with the media")
+
+    # -- predicates --------------------------------------------------------------------------
+
+    def _is_scratch(self, directory):
+        """Whether `directory` is this job's scratch directory rather than the destination.
+
+        With ``paths.temp == paths.home`` (MeTube's layout, and Aulos' when ``TEMP_DIR`` is the
+        download directory) there is no move to make and nothing to sweep: the files are already
+        where they belong, and registering them would only make MoveFiles compare a path to
+        itself.
+        """
         ydl = self._downloader
         if ydl is None:
-            return
-        temp_root = os.path.abspath(ydl.get_output_path("temp"))
-        files_to_move = info.setdefault("__files_to_move", {})
-        for kind, path in self._sidecars(info):
-            if not path or path in files_to_move:
-                continue
-            absolute = os.path.abspath(path)
-            if absolute != temp_root and not absolute.startswith(temp_root + os.sep):
-                continue
-            if not os.path.isfile(absolute):
-                continue
-            files_to_move[path] = ""
-            self._debug(f"the {kind} sidecar moves with the media: {path}")
+            return False
+        temp = os.path.abspath(ydl.get_output_path("temp"))
+        home = os.path.abspath(ydl.get_output_path("home"))
+        return temp != home and os.path.abspath(directory) == temp
 
-    def _sidecars(self, info):
-        """``(type, path)`` for every ``HOME_SIDECAR_TYPES`` sidecar this job may have written."""
-        ydl = self._downloader
-        for kind in HOME_SIDECAR_TYPES:
-            if kind == "infojson" and info.get("infojson_filename"):
-                yield kind, info["infojson_filename"]
-                continue
-            yield kind, ydl.prepare_filename(info, kind)
+    @staticmethod
+    def _is_companion(name, stem):
+        """Whether `name` is a sidecar of the media called `stem` rather than a work file.
+
+        ``<stem>.<something>`` only: a file named exactly the stem, with no extension at all, is
+        not a sidecar of anything, and an audio job whose media went ``clip.mp4`` → ``clip.mp3``
+        would otherwise sweep up the original that ``FFmpegExtractAudio`` is about to delete.
+        """
+        if not stem or not name.startswith(stem + "."):
+            return False
+        lowered = name.lower()
+        if ".part-frag" in lowered:
+            return False
+        return not lowered.endswith(TRANSIENT_SUFFIXES)
+
+    # -- diagnostics -------------------------------------------------------------------------
+
+    def _warn(self, message):
+        """``report_warning`` reaches the shim's ``FrameLogger`` at every ``LOGLEVEL``."""
+        report = getattr(self._downloader, "report_warning", None)
+        if report is None:
+            return
+        with contextlib.suppress(Exception):
+            report(message)
 
     def _debug(self, message):
-        """yt-dlp's own debug channel, which the shim's ``FrameLogger`` turns into a ``log`` frame."""
+        """The per-file chatter, which only an operator running with ``LOGLEVEL=DEBUG`` wants."""
         write_debug = getattr(self._downloader, "write_debug", None)
         if write_debug is not None:
             with contextlib.suppress(Exception):
                 write_debug(message)
 
 
-class RepointSidecarsAfterTheMove:
-    """An ``after_move`` postprocessor that rewrites the info dict's sidecar paths to the final ones.
+class SidecarPathsAreFinal:
+    """The first ``after_move`` postprocessor: the info dict's sidecar paths are the moved ones.
 
     ``MoveFilesAfterDownloadPP`` updates ``filepath`` but not ``infojson_filename``, because
     upstream never moves the info json: it was written at the destination in the first place. Now
     that it travels with the media, the recorded path would otherwise name a scratch directory
-    that the engine deletes moments later — a lie for any ``after_move`` postprocessor reading
-    ``%(infojson_filename)q``, and for anything downstream that trusts the finished info dict.
+    that no longer holds it — a lie for any user ``after_move`` postprocessor reading
+    ``%(infojson_filename)q``, which is exactly what an operator is told to use to get the final
+    path.
+
+    Ordering is the whole point, so this is inserted at the **head** of the ``after_move`` chain
+    rather than appended: ``add_post_processor`` appends, and the user's own ``after_move``
+    postprocessors are already in the list by the time the shim gets to register anything.
     """
 
     def __init__(self):
@@ -916,6 +987,29 @@ class RepointSidecarsAfterTheMove:
                 if os.path.isfile(moved):
                     info[key] = moved
         return [], info
+
+
+def install_sidecar_postprocessors(ydl):
+    """Registers the two sidecar postprocessors in the stages — and the order — they need.
+
+    ``SidecarsTravelWithTheMedia`` is appended to ``post_process`` so it runs after every user
+    postprocessor and immediately before the move; ``SidecarPathsAreFinal`` is spliced in at the
+    head of ``after_move`` so a user postprocessor there sees the corrected paths. yt-dlp's public
+    API can only append (``add_post_processor``), so the head insert reaches for ``_pps`` and
+    falls back to appending — which is still correct for everything but a user ``after_move``
+    postprocessor that reads ``%(infojson_filename)q``.
+
+    User postprocessors keep their own ``when`` and their own relative order either way.
+    """
+    ydl.add_post_processor(SidecarsTravelWithTheMedia(), when="post_process")
+
+    final = SidecarPathsAreFinal()
+    chain = getattr(ydl, "_pps", {}).get("after_move")
+    if isinstance(chain, list):
+        final.set_downloader(ydl)
+        chain.insert(0, final)
+    else:  # pragma: no cover - a yt-dlp that renamed `_pps`; appending still beats nothing.
+        ydl.add_post_processor(final, when="after_move")
 
 
 # --------------------------------------------------------------------------------------------
@@ -1106,11 +1200,10 @@ def run_download(channel, job, options, policy):
 
     try:
         with yt_dlp.YoutubeDL(params) as ydl:
-            # Appended, not spliced into `postprocessors`: user postprocessors keep their own
-            # `when` (the API default is `post_process`, i.e. before the move) and their own
-            # order, and these two run in stages of their own (DESIGN §9.5).
-            ydl.add_post_processor(RegisterSidecarsForTheMove(), when="before_dl")
-            ydl.add_post_processor(RepointSidecarsAfterTheMove(), when="after_move")
+            # Not spliced into `postprocessors`: user postprocessors keep their own `when` (the
+            # API default is `post_process`, i.e. before the move) and their own relative order
+            # (DESIGN §9.2).
+            install_sidecar_postprocessors(ydl)
             retcode = ydl.download([job["url"]])
     except Exception as exc:
         if run.live_status and not isinstance(exc, _EntryError):

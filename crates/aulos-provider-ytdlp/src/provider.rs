@@ -300,19 +300,6 @@ impl Provider for YtdlpProvider {
         // Legacy's `_resolve_outtmpl_fields`, which the engine structurally cannot do.
         let outtmpl = self.download_outtmpl(&ctx, &sink).await?;
 
-        // Legacy's base dict, then the user options merged over it (`**self.ytdl_opts` last).
-        let mut options: Map<String, Value> = serde_json::from_value(json!({
-            "quiet": !debug_logging,
-            "verbose": debug_logging,
-            "no_color": true,
-            "paths": { "home": ctx.out_dir, "temp": ctx.tmp_dir },
-            "outtmpl": { "default": outtmpl.default, "chapter": outtmpl.chapter },
-            "format": selector,
-            "socket_timeout": SOCKET_TIMEOUT,
-            "ignore_no_formats_error": true,
-        }))
-        .unwrap_or_default();
-
         let user = get_opts(
             download_type,
             format_id,
@@ -321,25 +308,15 @@ impl Provider for YtdlpProvider {
             &ctx.request.subtitle_language,
             ctx.request.subtitle_mode,
         );
-        for (key, value) in user {
-            options.insert(key, value);
-        }
-        // After the user merge, because a `paths` key in `YTDL_OPTIONS` replaces ours wholesale
-        // and its scratch directory needs the same treatment as ours.
-        pin_sidecars_to_the_scratch_dir(&mut options);
-
-        if ctx.request.split_by_chapters {
-            // Legacy appended this after everything else and pinned the chapter template.
-            if let Some(templates) = options.get_mut("outtmpl").and_then(Value::as_object_mut) {
-                templates.insert("chapter".to_owned(), Value::String(outtmpl.chapter.clone()));
-            }
-            let list = options
-                .entry("postprocessors".to_owned())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Some(array) = list.as_array_mut() {
-                array.push(json!({ "key": "FFmpegSplitChapters", "force_keyframes": false }));
-            }
-        }
+        let options = download_options(DownloadOptions {
+            out_dir: &ctx.out_dir,
+            tmp_dir: &ctx.tmp_dir,
+            outtmpl: &outtmpl,
+            selector: &selector,
+            debug_logging,
+            split_by_chapters: ctx.request.split_by_chapters,
+            user,
+        });
 
         let job = Job::download(ctx.item_id.to_string(), ctx.entry.url.clone())
             .with_options(options)
@@ -391,8 +368,73 @@ pub const fn uses_audio_root(download_type: DownloadType) -> bool {
     matches!(download_type, DownloadType::Audio)
 }
 
+/// Everything [`download_options`] needs, so the one function that assembles the download dict
+/// is also the one the tests drive.
+struct DownloadOptions<'a> {
+    out_dir: &'a Path,
+    tmp_dir: &'a Path,
+    outtmpl: &'a aulos_provider::provider::OutTmpl,
+    selector: &'a str,
+    debug_logging: bool,
+    split_by_chapters: bool,
+    user: Map<String, Value>,
+}
+
+/// The whole download option dict, in legacy order (DESIGN §9.2).
+///
+/// Legacy's base dict first, then **the user options merged over it** (legacy spread
+/// `**self.ytdl_opts` last), then [`pin_sidecars_to_the_scratch_dir`] — which has to run *after*
+/// the merge, because a `paths` key in `YTDL_OPTIONS` replaces the base dict's wholesale and its
+/// scratch directory needs the same treatment as ours. Chapter splitting is last, as it was.
+///
+/// This is a function rather than three statements inside
+/// [`YtdlpProvider::download`](Provider::download) so that the ordering the sidecar fix depends
+/// on is covered by a test that runs the real code, not a copy of it.
+fn download_options(job: DownloadOptions<'_>) -> Map<String, Value> {
+    let DownloadOptions {
+        out_dir,
+        tmp_dir,
+        outtmpl,
+        selector,
+        debug_logging,
+        split_by_chapters,
+        user,
+    } = job;
+
+    let mut options: Map<String, Value> = serde_json::from_value(json!({
+        "quiet": !debug_logging,
+        "verbose": debug_logging,
+        "no_color": true,
+        "paths": { "home": out_dir, "temp": tmp_dir },
+        "outtmpl": { "default": outtmpl.default, "chapter": outtmpl.chapter },
+        "format": selector,
+        "socket_timeout": SOCKET_TIMEOUT,
+        "ignore_no_formats_error": true,
+    }))
+    .unwrap_or_default();
+
+    for (key, value) in user {
+        options.insert(key, value);
+    }
+    pin_sidecars_to_the_scratch_dir(&mut options);
+
+    if split_by_chapters {
+        // Legacy appended this after everything else and pinned the chapter template.
+        if let Some(templates) = options.get_mut("outtmpl").and_then(Value::as_object_mut) {
+            templates.insert("chapter".to_owned(), Value::String(outtmpl.chapter.clone()));
+        }
+        let list = options
+            .entry("postprocessors".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(array) = list.as_array_mut() {
+            array.push(json!({ "key": "FFmpegSplitChapters", "force_keyframes": false }));
+        }
+    }
+    options
+}
+
 /// The sidecar output types yt-dlp resolves through `paths[<type>]` but writes straight to
-/// `paths.home` and then never moves (DESIGN §9.5).
+/// `paths.home` and then never moves (DESIGN §9.2).
 ///
 /// Subtitles and thumbnails are already written next to the *temp* file and handed to
 /// `MoveFilesAfterDownloadPP`; these two are not. Link shortcut files (`writeurllink` and
@@ -401,7 +443,7 @@ pub const fn uses_audio_root(download_type: DownloadType) -> bool {
 const HOME_SIDECAR_TYPES: [&str; 2] = ["description", "infojson"];
 
 /// Points the sidecars of [`HOME_SIDECAR_TYPES`] at the job's scratch directory, so the whole
-/// file set lives in one directory at every stage of the download (DESIGN §9.5).
+/// file set lives in one directory at every stage of the download (DESIGN §9.2).
 ///
 /// Legacy MeTube had `temp == home`, so nothing ever noticed that yt-dlp writes the
 /// `.info.json` and `.description` at the destination while the media is still in the scratch
@@ -410,8 +452,10 @@ const HOME_SIDECAR_TYPES: [&str; 2] = ["description", "infojson"];
 /// `jellyfin_nfo_generator.py` is the one nearly every migrating user carries — fails on it,
 /// because a postprocessor's default `when` is `post_process`, which runs *before* the move.
 ///
-/// The shim's `RegisterSidecarsForTheMove` is the other half: yt-dlp does not register these two
-/// for the move, so without it they would stay in the scratch directory the engine deletes.
+/// The shim's `SidecarsTravelWithTheMedia` is the other half: yt-dlp does not register these two
+/// for the move, so without it they would stay in the scratch directory — and neither does it
+/// register whatever a user `Exec` hook *writes* there, which is why that postprocessor sweeps
+/// the directory rather than just naming these two types.
 ///
 /// Nothing is done unless `paths` carries a `temp` that actually differs from `home`, and a
 /// per-type entry the operator set themselves is never overwritten.
@@ -571,16 +615,79 @@ mod tests {
         }
     }
 
-    /// The `paths` dict the download builds, with `user` merged over it exactly as `download`
-    /// does — the smallest thing that reproduces the option assembly without a shim process.
+    /// One run of the real assembly [`YtdlpProvider::download`] uses, with `user` standing in
+    /// for what [`get_opts`] returned.
+    ///
+    /// Nothing here re-implements `download`: the layering, the pin and the chapter step are all
+    /// inside [`download_options`], so a test that moved the pin ahead of the user merge would
+    /// fail here rather than pass on a copy.
+    fn built(out: &str, tmp: &str, user: &Value) -> Map<String, Value> {
+        download_options(DownloadOptions {
+            out_dir: Path::new(out),
+            tmp_dir: Path::new(tmp),
+            outtmpl: &aulos_provider::provider::OutTmpl {
+                default: "%(title)s.%(ext)s".to_owned(),
+                chapter: "%(title)s - %(section_number)03d.%(ext)s".to_owned(),
+            },
+            selector: "bv+ba/b",
+            debug_logging: false,
+            split_by_chapters: false,
+            user: user.as_object().cloned().unwrap_or_default(),
+        })
+    }
+
+    /// The `paths` dict that assembly produced.
     fn download_paths(out: &str, tmp: &str, user: &Value) -> Value {
-        let mut options: Map<String, Value> =
-            serde_json::from_value(json!({ "paths": { "home": out, "temp": tmp } })).unwrap();
-        for (key, value) in user.as_object().cloned().unwrap_or_default() {
-            options.insert(key, value);
-        }
-        pin_sidecars_to_the_scratch_dir(&mut options);
-        options["paths"].clone()
+        built(out, tmp, user)["paths"].clone()
+    }
+
+    #[test]
+    fn the_download_dict_is_the_base_then_the_user_options_then_the_pin() {
+        // The order is the fix: a `paths` key in `YTDL_OPTIONS` replaces the base dict's
+        // wholesale, so pinning before the merge would silently lose the sidecar entries. This
+        // is the assertion that fails if the pin ever moves ahead of the merge.
+        let options = built(
+            "/downloads",
+            "/downloads/01ABC",
+            &json!({ "paths": { "home": "/library", "temp": "/library/01ABC" }, "quiet": false }),
+        );
+        assert_eq!(options["paths"]["home"], json!("/library"));
+        assert_eq!(options["paths"]["infojson"], json!("/library/01ABC"));
+        assert_eq!(options["paths"]["description"], json!("/library/01ABC"));
+        // …and the rest of legacy's base dict is still underneath the user's.
+        assert_eq!(options["quiet"], json!(false));
+        assert_eq!(options["format"], json!("bv+ba/b"));
+        assert_eq!(options["ignore_no_formats_error"], json!(true));
+        assert_eq!(options["socket_timeout"], json!(SOCKET_TIMEOUT));
+        assert!(options.get("postprocessors").is_none());
+    }
+
+    #[test]
+    fn splitting_by_chapters_still_lands_after_everything_else() {
+        let options = download_options(DownloadOptions {
+            out_dir: Path::new("/downloads"),
+            tmp_dir: Path::new("/downloads/01ABC"),
+            outtmpl: &aulos_provider::provider::OutTmpl {
+                default: "%(title)s.%(ext)s".to_owned(),
+                chapter: "chapters/%(title)s.%(ext)s".to_owned(),
+            },
+            selector: "b",
+            debug_logging: false,
+            split_by_chapters: true,
+            user: serde_json::from_value(json!({ "outtmpl": { "default": "%(id)s.%(ext)s" } }))
+                .unwrap(),
+        });
+        assert_eq!(options["outtmpl"]["default"], json!("%(id)s.%(ext)s"));
+        assert_eq!(
+            options["outtmpl"]["chapter"],
+            json!("chapters/%(title)s.%(ext)s")
+        );
+        assert_eq!(
+            options["postprocessors"],
+            json!([{ "key": "FFmpegSplitChapters", "force_keyframes": false }])
+        );
+        // Even a request that splits keeps its sidecars with the media.
+        assert_eq!(options["paths"]["infojson"], json!("/downloads/01ABC"));
     }
 
     #[test]

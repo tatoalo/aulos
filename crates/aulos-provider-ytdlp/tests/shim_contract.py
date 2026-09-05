@@ -372,13 +372,15 @@ def test_outtmpl():
     check(result["templates"] == ["Mix", "3"], f"got {result.get('templates')}")
 
 
-def _sidecar_download(tmp, pinned, extra_paths=None):
+def _sidecar_download(tmp, pinned, extra_paths=None, user_pps=None, break_sweep=False):
     """Runs one download whose stub writes an ``.info.json`` and a ``.description``.
 
     ``pinned`` chooses between the two layouts: the yt-dlp default, where both sidecars are
     written to ``paths.home`` while the media is still in the scratch directory, and the one the
     Rust option builder now produces, where ``paths.infojson``/``paths.description`` name the
-    scratch directory. Returns the stub's dump of the option dict and the resulting layout.
+    scratch directory. ``user_pps`` installs postprocessors of the operator's own, registered
+    before the shim's, exactly as ``YoutubeDL.__init__`` does. Returns the stub's dump of the
+    option dict and the resulting layout.
     """
     home = os.path.join(tmp, "downloads")
     temp = os.path.join(home, "01JOBULID")
@@ -394,6 +396,8 @@ def _sidecar_download(tmp, pinned, extra_paths=None):
             "sidecars": {
                 "info": {"title": "Stub clip", "ext": "mp4"},
                 "write": ["infojson", "description"],
+                "user_pps": user_pps or [],
+                "break_sweep": break_sweep,
             }
         },
     )
@@ -414,7 +418,17 @@ def _sidecar_download(tmp, pinned, extra_paths=None):
     check(kinds(frames)[-1] == "bye", f"pinned={pinned}: bye is last")
     check(stdout == "", f"pinned={pinned}: stdout is empty")
     with open(dump, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        got = json.load(handle)
+    got["frames"] = frames
+    return got
+
+
+def _pp_view(got, name):
+    """What the stub's user postprocessor called ``name`` saw when it ran."""
+    for seen in got["layout"]["user"]:
+        if seen["pp"] == name:
+            return seen
+    return {}
 
 
 def test_sidecars_stay_next_to_the_media():
@@ -438,8 +452,9 @@ def test_sidecars_stay_next_to_the_media():
     with tempfile.TemporaryDirectory() as tmp:
         got = _sidecar_download(tmp, pinned=True)
     check(
-        got["postprocessors"] == {"before_dl": 1, "after_move": 1},
-        f"the shim registers one before_dl and one after_move pp, got {got['postprocessors']}",
+        got["postprocessors"]
+        == {"post_process": ["SidecarsTravelWithTheMedia"], "after_move": ["SidecarPathsAreFinal"]},
+        f"the shim registers its sweep last and its repoint first, got {got['postprocessors']}",
     )
     check(
         got["layout"]["at_post_process"]
@@ -447,9 +462,9 @@ def test_sidecars_stay_next_to_the_media():
         f"every file is together when postprocessors run, got {got['layout']['at_post_process']}",
     )
     check(
-        [os.path.basename(p) for p in got["layout"]["registered"]]
+        [os.path.basename(p) for p in got["layout"]["moving"]]
         == ["Stub clip.description", "Stub clip.info.json"],
-        f"both sidecars are registered for the move, got {got['layout']['registered']}",
+        f"both sidecars are registered for the move, got {got['layout']['moving']}",
     )
     check(
         got["layout"]["home"]
@@ -458,8 +473,160 @@ def test_sidecars_stay_next_to_the_media():
     )
     check(got["layout"]["temp"] == [], f"the scratch dir is empty, got {got['layout']['temp']}")
     check(
+        got["layout"]["warnings"] == [],
+        f"a clean download warns about nothing, got {got['layout']['warnings']}",
+    )
+    check(
         os.path.basename(os.path.dirname(got["layout"]["infojson_filename"] or "")) == "downloads",
         f"the reported info.json path is the final one, got {got['layout']['infojson_filename']}",
+    )
+
+
+def test_what_a_legacy_metube_exec_hook_writes_reaches_the_library():
+    """MeTube's `jellyfin_nfo_generator.py`, run verbatim, produces a `.nfo` in the library.
+
+    The whole user-visible symptom of bug 2b is "no `.nfo` next to my video". Pinning the
+    sidecars is only half of it: the legacy script *writes* `<base>.nfo` next to `%(filepath)q`
+    — i.e. into the scratch directory, which yt-dlp has never heard of and would leave behind —
+    and then *deletes* the `.info.json` it consumed, which is a file the shim had registered for
+    the move. Sweeping the directory at the end of `post_process` covers both.
+    """
+    print("a legacy MeTube Exec hook (bug 2b, the user-visible half)")
+    legacy = [{"kind": "legacy_nfo", "name": "LegacyNfo", "when": "post_process"}]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        split = _sidecar_download(tmp, pinned=False, user_pps=legacy)
+    seen = _pp_view(split, "LegacyNfo")
+    check(
+        seen.get("info_json_found") is False,
+        "unpinned: the legacy script finds no info.json and returns early",
+    )
+    check(
+        split["layout"]["home"] == ["01JOBULID", "Stub clip.description", "Stub clip.info.json",
+                                    "Stub clip.mp4"],
+        f"unpinned: no .nfo is ever produced, got {split['layout']['home']}",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        got = _sidecar_download(tmp, pinned=True, user_pps=legacy)
+    seen = _pp_view(got, "LegacyNfo")
+    check(
+        seen.get("info_json_found") is True,
+        "the legacy script finds the info.json beside %(filepath)q",
+    )
+    check(
+        sorted(seen.get("siblings") or []) == ["Stub clip.description", "Stub clip.info.json",
+                                               "Stub clip.mp4"],
+        f"…because the whole file set is in one directory, got {seen.get('siblings')}",
+    )
+    check(
+        got["layout"]["home"] == ["01JOBULID", "Stub clip.description", "Stub clip.mp4",
+                                  "Stub clip.nfo"],
+        f"the .nfo it wrote lands in the library, got {got['layout']['home']}",
+    )
+    check(got["layout"]["temp"] == [], f"and the scratch dir is empty, got {got['layout']['temp']}")
+    check(
+        got["layout"]["warnings"] == [],
+        "the info.json the script deleted is dropped from the move set rather than warned about, "
+        f"got {got['layout']['warnings']}",
+    )
+
+
+def test_an_after_move_postprocessor_sees_the_final_sidecar_path():
+    """`%(infojson_filename)q` at `after_move` is the moved path, not the scratch one.
+
+    The shim's repoint has to run *first* in the `after_move` chain: `add_post_processor` appends,
+    and the user's own `after_move` postprocessors are already registered by the time the shim
+    gets a chance, so appending would put the repoint behind the reader it exists for.
+    """
+    print("an after_move postprocessor reads the moved sidecar path")
+    with tempfile.TemporaryDirectory() as tmp:
+        got = _sidecar_download(
+            tmp,
+            pinned=True,
+            user_pps=[{"kind": "probe", "name": "AfterMoveProbe", "when": "after_move"}],
+        )
+    check(
+        got["postprocessors"]["after_move"] == ["SidecarPathsAreFinal", "AfterMoveProbe"],
+        f"the repoint is spliced in ahead of the user's own, got {got['postprocessors']}",
+    )
+    seen = _pp_view(got, "AfterMoveProbe")
+    recorded = seen.get("infojson_filename") or ""
+    check(
+        os.path.basename(os.path.dirname(recorded)) == "downloads",
+        f"it reads the final info.json path, got {recorded}",
+    )
+
+
+def test_a_failing_sweep_is_reported_at_every_loglevel():
+    """A postprocessor that explodes is still a warning frame, not silence.
+
+    `write_debug` is a no-op unless `verbose` is set, and the shim only sets it at
+    `LOGLEVEL=DEBUG`; a sweep that failed silently would strand both sidecars in a directory the
+    engine deletes, with nothing in the log to explain it.
+    """
+    print("a failure in the sidecar sweep is loud")
+    with tempfile.TemporaryDirectory() as tmp:
+        got = _sidecar_download(tmp, pinned=True, break_sweep=True)
+    warnings = [f for f in got["frames"] if f.get("t") == "log" and f.get("level") == "warning"]
+    check(bool(warnings), f"a warning log frame reached the parent, got {got['frames'][-3:]}")
+    check(
+        any("sidecars" in (f.get("message") or "") for f in warnings),
+        f"and it names the sidecars, got {[f.get('message') for f in warnings]}",
+    )
+
+
+def test_a_transient_file_never_leaves_the_scratch_directory():
+    """A `.part` left by a failed leg is not a sidecar and must not reach the library."""
+    print("transient files stay behind")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = os.path.join(tmp, "downloads")
+        temp = os.path.join(home, "01JOBULID")
+        os.makedirs(temp)
+        dump = os.path.join(tmp, "dump.json")
+        scenario = scenario_file(
+            tmp,
+            {
+                "sidecars": {
+                    "info": {"title": "Stub clip", "ext": "mp4"},
+                    "write": ["infojson"],
+                    "write_plain": [
+                        "Stub clip.mp4.part",
+                        "Stub clip.mp4.ytdl",
+                        "Stub clip.mp4.part-Frag3",
+                        "Other clip.info.json",
+                        "Stub clip",
+                    ],
+                }
+            },
+        )
+        code, _frames, _stdout, _ = run_job(
+            {
+                "v": 1,
+                "protocol": 1,
+                "job_id": "t",
+                "mode": "download",
+                "url": "https://stub.test/x",
+                "options": {
+                    "paths": {"home": home, "temp": temp, "infojson": temp},
+                    "writeinfojson": True,
+                },
+                "policy": {"download_dir": home, "temp_dir": temp, "emit_progress_every_ms": 0},
+            },
+            scenario=scenario,
+            env={"AULOS_STUB_DUMP": dump},
+        )
+        check(code == 0, "exits 0")
+        with open(dump, "r", encoding="utf-8") as handle:
+            got = json.load(handle)
+    check(
+        got["layout"]["home"] == ["01JOBULID", "Stub clip.info.json", "Stub clip.mp4"],
+        f"only the media and its own sidecar move, got {got['layout']['home']}",
+    )
+    check(
+        got["layout"]["temp"] == ["Other clip.info.json", "Stub clip", "Stub clip.mp4.part",
+                                  "Stub clip.mp4.part-Frag3", "Stub clip.mp4.ytdl"],
+        f"the work files stay in the scratch dir, got {got['layout']['temp']}",
     )
 
 
@@ -475,8 +642,8 @@ def test_a_sidecar_the_operator_placed_elsewhere_is_left_alone():
             f"the info.json stayed where the operator put it, got {os.listdir(elsewhere)}",
         )
     check(
-        [os.path.basename(p) for p in got["layout"]["registered"]] == ["Stub clip.description"],
-        f"only the scratch-dir sidecar is registered, got {got['layout']['registered']}",
+        [os.path.basename(p) for p in got["layout"]["moving"]] == ["Stub clip.description"],
+        f"only the scratch-dir sidecar is registered, got {got['layout']['moving']}",
     )
 
 
@@ -509,6 +676,10 @@ def main():
         test_progress_rate_limit,
         test_outtmpl,
         test_sidecars_stay_next_to_the_media,
+        test_what_a_legacy_metube_exec_hook_writes_reaches_the_library,
+        test_an_after_move_postprocessor_sees_the_final_sidecar_path,
+        test_a_failing_sweep_is_reported_at_every_loglevel,
+        test_a_transient_file_never_leaves_the_scratch_directory,
         test_a_sidecar_the_operator_placed_elsewhere_is_left_alone,
         test_replay_is_byte_faithful,
     ):
