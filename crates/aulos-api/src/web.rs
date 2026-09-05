@@ -40,7 +40,10 @@
 //! Every response carries a strong `ETag` — the hex SHA-256 of the body actually served — and
 //! `Cache-Control: no-cache`, which means "revalidate every time" rather than "do not store": the
 //! browser keeps the bytes and a reload costs one conditional request per file, answered with a
-//! bodyless `304`. The static assets hash themselves once ([`ASSETS`]); the two templates are
+//! bodyless `304` — `If-None-Match` is matched against the weak form `W/"…"` too, because a
+//! gzipping reverse proxy weakens the tag on its way out and the browser replays what it stored.
+//! `GET <p>` additionally carries `Vary: Accept`, so an intermediary cannot serve one caller's
+//! representation to the other. The static assets hash themselves once ([`ASSETS`]); the two templates are
 //! rendered and hashed once per `(prefix, theme)` pair and memoised, because a process serves
 //! exactly one such pair and a test process serves two.
 
@@ -287,12 +290,25 @@ pub fn router(state: ApiState) -> Router {
 ///
 /// `HEAD` is answered by axum's `get` router, which runs this and drops the body.
 pub async fn root(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    if state.cfg.web_ui && wants_html(&headers) {
-        return index(&state, &headers);
+    // One URL, two representations: a shared cache that keys on the URL alone would otherwise be
+    // free to replay the page to `curl` and the JSON to a browser. `Vary: Accept` is what makes
+    // the negotiation visible to it, and it goes on *both* branches or it protects neither. When
+    // `AULOS_WEB_UI` is false the route has exactly one representation again, so it is omitted:
+    // an unnecessary `Vary` only fragments a cache.
+    let negotiated = state.cfg.web_ui;
+    let mut response = if negotiated && wants_html(&headers) {
+        index(&state, &headers)
+    } else {
+        crate::v2::meta::identity(State(state))
+            .await
+            .into_response()
+    };
+    if negotiated {
+        response
+            .headers_mut()
+            .insert(header::VARY, HeaderValue::from_static("accept"));
     }
-    crate::v2::meta::identity(State(state))
-        .await
-        .into_response()
+    response
 }
 
 /// The rendered `index.html`, with the CSP.
@@ -348,6 +364,12 @@ fn serve(headers: &HeaderMap, body: Bytes, content_type: &str, etag: &str) -> Re
         .flat_map(|value| value.to_str().into_iter())
         .flat_map(|raw| raw.split(','))
         .map(str::trim)
+        // nginx has weakened the ETag on a gzipped response since 1.7.3, so the browser stores and
+        // replays `W/"<sha>"`. Comparing that byte-for-byte against the strong tag never matches
+        // and every conditional request re-sends the whole body — which is the entire point of the
+        // `no-cache` + strong-ETag design. The weak prefix is stripped before comparing: these
+        // bodies are byte-identical whenever the tag is, so weak and strong comparison agree.
+        .map(|candidate| candidate.strip_prefix("W/").unwrap_or(candidate))
         .any(|candidate| candidate == etag || candidate == "*");
 
     let mut response = if matched {
@@ -468,6 +490,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rendered_html_element_carries_the_theme() {
+        // `DEFAULT_THEME` has to reach the *CSS*, not just a meta tag app.js reads: the stylesheet
+        // keys the palette off `<html data-mode>`, so without this attribute a `dark` deployment
+        // paints the light palette until the module has parsed and run.
+        let (prefix, _) = Prefix::normalize("/");
+        for theme in [Theme::Auto, Theme::Light, Theme::Dark] {
+            let page = Rendered::render(INDEX_TEMPLATE, &prefix, theme);
+            assert!(
+                page.text()
+                    .contains(&format!(r#"data-mode="{}""#, theme.as_str())),
+                "the <html> element carries data-mode={theme:?}"
+            );
+            assert!(
+                page.text()
+                    .contains(&format!(r#"content="{}""#, theme.as_str())),
+                "and the meta tag still carries it too"
+            );
+        }
+    }
+
+    #[test]
     fn the_etag_changes_with_the_prefix_and_with_the_theme() {
         let (root, _) = Prefix::normalize("/");
         let (nested, _) = Prefix::normalize("/metube/");
@@ -487,6 +530,21 @@ mod tests {
              form-action 'none'; frame-ancestors 'none'"
         );
         assert!(!CSP.contains("unsafe-inline"));
+    }
+
+    #[test]
+    fn the_page_stays_inside_its_size_budget() {
+        // A hard rule of the brief: no bundler, no dependency, and `app.js` + `app.css` together
+        // under 70 KB unminified. It is asserted here because the only way it ever regresses is
+        // one more "just a few lines" at a time.
+        const BUDGET: usize = 70 * 1024;
+        let total = APP_JS.len() + APP_CSS.len();
+        assert!(
+            total <= BUDGET,
+            "app.js ({}) + app.css ({}) = {total} bytes, over the {BUDGET}-byte budget",
+            APP_JS.len(),
+            APP_CSS.len()
+        );
     }
 
     #[test]

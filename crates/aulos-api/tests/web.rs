@@ -155,6 +155,13 @@ async fn a_browser_gets_the_page_and_everyone_else_gets_the_identity_document() 
             page.text().trim_start()[..15].eq_ignore_ascii_case("<!doctype html>"),
             "an HTML document, not the JSON"
         );
+        // One URL, two representations: without this a shared cache is free to hand the page to
+        // an API client and the JSON to a browser.
+        assert_eq!(
+            page.header("vary").map(str::to_ascii_lowercase).as_deref(),
+            Some("accept"),
+            "the HTML branch says what it varied on"
+        );
 
         // The identity document, for the three shapes a non-browser client sends.
         let expected = raw(&rig, "GET", "", &[("Accept", "application/json")]).await;
@@ -186,6 +193,11 @@ async fn a_browser_gets_the_page_and_everyone_else_gets_the_identity_document() 
                 other.header("content-security-policy"),
                 None,
                 "no CSP on an API JSON response"
+            );
+            assert_eq!(
+                other.header("vary").map(str::to_ascii_lowercase).as_deref(),
+                Some("accept"),
+                "and the JSON branch varies on Accept too, or the header protects neither"
             );
         }
     })
@@ -364,6 +376,20 @@ async fn if_none_match_answers_304_with_the_same_etag_and_no_body() {
 
             let wildcard = raw(&rig, "GET", suffix, &[("If-None-Match", "*")]).await;
             assert_eq!(wildcard.status, 304, "{suffix}: `*` matches anything held");
+
+            // nginx weakens the ETag on a gzipped response, so the browser replays `W/"…"`.
+            // Comparing that byte-for-byte would 200 every conditional request forever.
+            let weak = format!("W/{tag}");
+            let weakened = raw(&rig, "GET", suffix, &[("If-None-Match", &weak)]).await;
+            assert_eq!(
+                weakened.status, 304,
+                "{suffix}: a weak validator still matches"
+            );
+            assert!(weakened.body.is_empty(), "{suffix}");
+
+            let many = format!("W/\"other\", {weak}");
+            let listed = raw(&rig, "GET", suffix, &[("If-None-Match", &many)]).await;
+            assert_eq!(listed.status, 304, "{suffix}: and it matches inside a list");
 
             let stale = raw(&rig, "GET", suffix, &[("If-None-Match", "\"stale\"")]).await;
             assert_eq!(stale.status, 200, "{suffix}: a miss re-sends the body");
@@ -593,6 +619,10 @@ async fn disabling_the_web_ui_restores_the_pre_ui_surface_exactly() {
             assert_eq!(response.body, baseline.body, "{accept:?}");
             assert_eq!(response.header("content-security-policy"), None);
         }
+
+        // With one representation left there is nothing to vary on, and an unnecessary `Vary`
+        // only fragments a cache.
+        assert_eq!(baseline.header("vary"), None);
 
         // The assets and the manifest are ordinary 404s in the standard envelope.
         for (suffix, _) in UI_ROUTES {
