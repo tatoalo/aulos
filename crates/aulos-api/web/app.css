@@ -82,6 +82,12 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 
+/* The inputs and selects below clear their own outline so the `.field` pill draws focus, not the
+   bare box — the ring comes back here, later and no less specific than the rules that clear it. */
+.field:focus-within,
+.sheet-url:focus-visible,
+.inline-sel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ---------- header ---------- */
 
 .brandbar { height: 3px; background: linear-gradient(135deg, #E07850, #8B3A4C); }
@@ -530,6 +536,19 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 
   .iconbtn { width: 44px; height: 44px; border-radius: 10px; }
   .iconbtn.lg { width: 44px; height: 44px; }
+
+  /* 44px is the floor for a finger, and on a phone the sheet is the only way to add a download.
+     The section links take a negative margin so the taller hit box does not move the header, and
+     the switch's 51x31 track becomes a pseudo-element inside a 44px button. */
+  .seg button, .chip { height: 44px; }
+  .chip { padding: 0 16px; }
+  .text-btn, .link, .danger-link { min-height: 44px; display: inline-flex; align-items: center; }
+  .danger-link { gap: 4px; }
+  .sec-hd .link, .sec-hd .danger-link { margin: -12px 0; }
+  .rs-row .sw, .rs-row .sw[aria-checked="true"] { height: 44px; background: transparent; }
+  .rs-row .sw::before { content: ""; position: absolute; inset: 6px 0; border-radius: 16px; background: var(--track); }
+  .rs-row .sw[aria-checked="true"]::before { background: var(--ok); }
+  .rs-row .sw::after { top: 8px; }
   .row-acts { gap: 0; margin-right: -8px; }
   .row-acts .iconbtn:not(.act-primary):not(.act-more) { display: none; }
   .act-more { display: flex; }
