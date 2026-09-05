@@ -15,6 +15,25 @@ import { expect, test } from '@playwright/test';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHOTS = join(HERE, 'screenshots');
 
+/**
+ * `AULOS_WEB_BASE` points the suite at a REAL `aulos-server` instead of the mock, e.g.
+ *
+ *   AULOS_WEB_BASE=http://127.0.0.1:8091/ npx playwright test
+ *   AULOS_WEB_BASE=http://127.0.0.1:8091/metube/ npx playwright test
+ *
+ * A real server has no scripted queue, so every test that asserts on the mock's fixed rows,
+ * deltas, request log or `__test/` routes is skipped; what runs is the static/serving subset —
+ * the routes, headers, ETag/304, manifest, the 404 envelope, the identity document — plus the
+ * two real-server screenshots. The value is a base URL including the URL_PREFIX; a missing
+ * trailing `/` is added.
+ */
+const REAL_BASE = process.env.AULOS_WEB_BASE
+  ? process.env.AULOS_WEB_BASE.replace(/\/*$/, '/')
+  : '';
+
+/** The reason string a mock-only test is skipped with when `AULOS_WEB_BASE` is set. */
+const MOCK_ONLY = 'mock-only: needs the scripted queue of mock-server.mjs';
+
 const ID = (s) => (s + '00000000000000000000000000').slice(0, 26);
 const IDS = {
   dl: ID('DL'), group: ID('GRP'), c1: ID('C1'), c2: ID('C2'), c3: ID('C3'),
@@ -53,6 +72,7 @@ async function startMock(opts = {}) {
 /** Spawn a mock, run `body`, always kill the child. */
 function withMock(opts, body) {
   return async ({ page, request }) => {
+    test.skip(REAL_BASE !== '', MOCK_ONLY);
     const mock = await startMock(opts);
     try { await body({ page, request, mock }); } finally { mock.stop(); }
   };
@@ -377,6 +397,7 @@ test('50 active rows and 20 deltas stay inside the frame budget', withMock({ fre
 }));
 
 test('a dropped socket reconnects with backoff and the pill tracks it', async ({ page }) => {
+  test.skip(REAL_BASE !== '', MOCK_ONLY);
   let mock = await startMock();
   const port = mock.port;
   try {
@@ -513,3 +534,142 @@ test('screenshot — phone dark', withMock({ freeze: true, theme: 'dark' }, asyn
 test('screenshot — phone add sheet', withMock({ freeze: true, theme: 'light' }, async ({ page, mock }) => {
   await shoot(page, mock, 'phone-add', { phone: true, sheet: true });
 }));
+
+/* ------------------------------------------------- against a real server */
+
+/**
+ * The subset that needs nothing but a served page: run only when `AULOS_WEB_BASE` names a live
+ * `aulos-server`. It asserts the same contract the mock is held to — so the two halves are
+ * checked against one another — and then photographs the real page at both widths, empty queue
+ * included (an empty queue must still look intentional).
+ */
+test.describe('real server', () => {
+  test.skip(REAL_BASE === '', 'set AULOS_WEB_BASE to a running aulos-server');
+
+  const CSP =
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+    "connect-src 'self'; manifest-src 'self'; font-src 'self'; base-uri 'none'; " +
+    "form-action 'none'; frame-ancestors 'none'";
+
+  test('index.html: the page, the CSP, the ETag and a 304', async ({ request }) => {
+    const res = await request.get(REAL_BASE, { headers: { accept: 'text/html' } });
+    expect(res.status()).toBe(200);
+    const h = res.headers();
+    expect(h['content-type']).toContain('text/html');
+    expect(h['cache-control']).toBe('no-cache');
+    expect(h['x-content-type-options']).toBe('nosniff');
+    expect(h['referrer-policy']).toBe('no-referrer');
+    expect(h['content-security-policy']).toBe(CSP);
+    expect(h.etag).toMatch(/^"[0-9a-f]{64}"$/);
+
+    const body = await res.text();
+    expect(body).not.toContain('{{');
+    const prefix = new URL(REAL_BASE).pathname;
+    expect(body).toContain(`<meta name="aulos-prefix" content="${prefix}">`);
+    expect(body).toMatch(/<meta name="aulos-theme" content="(auto|light|dark)">/);
+    expect(body).toContain(`href="${prefix}assets/app.css"`);
+    expect(body).toContain(`src="${prefix}assets/app.js"`);
+    expect(body).toContain(`href="${prefix}manifest.webmanifest"`);
+
+    const again = await request.get(REAL_BASE, {
+      headers: { accept: 'text/html', 'if-none-match': h.etag },
+    });
+    expect(again.status()).toBe(304);
+    expect(again.headers().etag).toBe(h.etag);
+    expect(await again.body()).toHaveLength(0);
+  });
+
+  test('the same route without text/html is still the identity document', async ({ request }) => {
+    const res = await request.get(REAL_BASE, { headers: { accept: 'application/json' } });
+    expect(res.status()).toBe(200);
+    expect(res.headers()['content-type']).toContain('application/json');
+    expect(res.headers()['content-security-policy']).toBeUndefined();
+    const body = await res.json();
+    expect(body.name).toBe('aulos-server');
+  });
+
+  for (const [path, type] of [
+    ['assets/app.css', 'text/css'],
+    ['assets/app.js', 'javascript'],
+    ['assets/icon.svg', 'image/svg+xml'],
+    ['assets/icon-180.png', 'image/png'],
+    ['manifest.webmanifest', 'application/manifest+json'],
+  ]) {
+    test(`${path}: 200 with its type, then 304`, async ({ request }) => {
+      const res = await request.get(REAL_BASE + path);
+      expect(res.status()).toBe(200);
+      const h = res.headers();
+      expect(h['content-type']).toContain(type);
+      expect(h['cache-control']).toBe('no-cache');
+      expect(h['x-content-type-options']).toBe('nosniff');
+      expect(h['referrer-policy']).toBe('no-referrer');
+      expect(h.etag).toMatch(/^"[0-9a-f]{64}"$/);
+      expect(h['content-security-policy']).toBeUndefined();
+      expect((await res.body()).length).toBeGreaterThan(0);
+
+      const again = await request.get(REAL_BASE + path, { headers: { 'if-none-match': h.etag } });
+      expect(again.status()).toBe(304);
+      expect(await again.body()).toHaveLength(0);
+    });
+  }
+
+  test('the manifest is scoped to the prefix', async ({ request }) => {
+    const res = await request.get(REAL_BASE + 'manifest.webmanifest');
+    const m = await res.json();
+    expect(m.name).toBe('Aulos');
+    expect(m.display).toBe('standalone');
+    expect(m.theme_color).toBe('#E07850');
+    expect(m.background_color).toBe('#F2F2F7');
+    // Either spelling of the contract: the literal prefix, or a relative URL that resolves to it.
+    const prefix = new URL(REAL_BASE).pathname;
+    const resolve = (u) => new URL(u, REAL_BASE + 'manifest.webmanifest').pathname;
+    expect(resolve(m.start_url)).toBe(prefix);
+    expect(resolve(m.scope)).toBe(prefix);
+    for (const icon of m.icons) expect(resolve(icon.src)).toBe(`${prefix}assets/${icon.src.split('/').pop()}`);
+  });
+
+  test('an unknown asset gets the standard 404 envelope', async ({ request }) => {
+    const res = await request.get(REAL_BASE + 'assets/nope.js');
+    expect(res.status()).toBe(404);
+    expect(res.headers()['content-type']).toContain('application/json');
+    const body = await res.json();
+    expect(body.error.code).toBe('not_found');
+    expect(typeof body.error.message).toBe('string');
+  });
+
+  test('the page boots, reaches the API and renders an empty queue', async ({ page }) => {
+    const failures = [];
+    page.on('console', (m) => { if (m.type() === 'error') failures.push(m.text()); });
+    page.on('pageerror', (e) => failures.push(String(e)));
+    await page.addInitScript(() => {
+      window.__csp = [];
+      document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(`${e.violatedDirective} ${e.blockedURI}`));
+    });
+
+    await page.goto(REAL_BASE);
+    await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 20_000 });
+    await expect(page.locator('#addbar')).toBeVisible();
+    expect(await page.evaluate(() => window.__csp)).toEqual([]);
+    expect(failures).toEqual([]);
+
+    // Empty or not, the page is never blank: the add bar is always there, and with no rows the
+    // empty line is what fills the space.
+    const rows = await page.locator('.row').count();
+    if (rows === 0) await expect(page.locator('#empty')).toBeVisible();
+    expect(await page.evaluate(() => document.scrollingElement.scrollWidth))
+      .toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth));
+  });
+
+  for (const [name, width, height] of [
+    ['real-desktop', 1440, 1000],
+    ['real-phone', 390, 844],
+  ]) {
+    test(`screenshot — ${name}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto(REAL_BASE);
+      await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 20_000 });
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: true, animations: 'disabled' });
+    });
+  }
+});

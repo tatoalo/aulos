@@ -9,7 +9,7 @@ cd tools/web
 npm ci
 npx playwright install chromium
 
-npx playwright test          # the smoke — 19 tests, all offline
+npx playwright test          # the smoke against the mock — all offline
 npm run serve                # a mock on http://127.0.0.1:8099/ for hand-driving the page
 ```
 
@@ -27,6 +27,38 @@ every path in the UI.
 
 Two routes exist only for the smoke and are not part of the contract: `GET <p>__test/log`
 returns every mutating request the mock received, and `GET <p>__test/reset` reseeds it.
+
+## Running the smoke against a real `aulos-server`
+
+`AULOS_WEB_BASE` points the same suite at a live server instead of the mock:
+
+```bash
+cargo build -p aulos-server
+DOWNLOAD_DIR=/tmp/dl STATE_DIR=/tmp/state PORT=8091 HOST=127.0.0.1 \
+  ./target/debug/aulos-server &
+
+cd tools/web
+AULOS_WEB_BASE=http://127.0.0.1:8091/ npx playwright test
+```
+
+A real server has no scripted queue, so every test that asserts on the mock's fixed rows, its
+deltas, its request log or its `__test/` routes is **skipped**; what runs is the static/serving
+subset — the routes, the headers, the ETag and the 304, the manifest, the 404 envelope, the
+identity document on the same route without `Accept: text/html` — plus a boot check (the page
+reaches the API, the socket goes Live, no CSP violation, no console error) and two screenshots,
+`screenshots/real-desktop.png` (1440) and `screenshots/real-phone.png` (390). The queue is
+normally empty on a scratch server, which is the point of those two: the empty state has to look
+composed rather than half-loaded.
+
+The value is a base URL **including the `URL_PREFIX`**, so the nested-prefix posture is the same
+command against a server started with `URL_PREFIX=metube`:
+
+```bash
+AULOS_WEB_BASE=http://127.0.0.1:8091/metube/ npx playwright test
+```
+
+This mode is not wired into CI — the `web` job has no Rust toolchain — it is the manual
+integration check that the two halves of the contract meet on the real binary.
 
 ## What the server side owes the page
 
