@@ -69,6 +69,29 @@ meaning and default. The **complete table** — roughly ninety variables, each m
 **[`docs/DESIGN.md` §17.3](docs/DESIGN.md)**. `yt-dlp` options themselves come from
 `YTDL_OPTIONS` / `YTDL_OPTIONS_FILE` (hot-reloaded on change), not from env vars.
 
+## The web UI
+
+Opening the server in a browser gives you the built-in UI: the queue, the add form, per-item
+progress and the completed history. It is compiled into the binary — no static root to mount, no
+Node, no CDN — and it is served at the same address as the API, under `URL_PREFIX`.
+
+`GET <prefix>` is content-negotiated, so nothing that already talks to the server changes: a
+request whose `Accept` list contains `text/html` (every browser, on a document navigation) gets
+the page, and everything else — `Accept: application/json`, the bare `*/*` that `curl` sends, no
+`Accept` header at all — gets the same JSON identity document it always did.
+
+- `AULOS_WEB_UI=false` turns the UI off entirely: `GET <prefix>` is then the identity document for
+  every `Accept`, and the assets and the manifest answer `404`.
+- `DEFAULT_THEME` (`auto` | `light` | `dark`) is the theme the page *starts* in; a viewer's own
+  choice is remembered in their browser, never in a cookie the server sets.
+- The page, its assets and its manifest are served **without** authentication even when
+  `AULOS_API_TOKEN` or `AULOS_TRUSTED_PROXY_AUTH_HEADER` is configured — they contain nothing
+  secret, and a browser cannot attach a bearer token to a document navigation. Every API route
+  keeps its auth: the page asks for the token when the API answers `401`, and stores it locally.
+  Put the whole thing behind your reverse proxy's auth if you want the UI itself gated.
+- It installs as a PWA (`<prefix>manifest.webmanifest`), which is what makes it usable full-screen
+  from an iPhone home screen.
+
 ## Talking to it
 
 - **[`docs/PROTOCOL.md`](docs/PROTOCOL.md)** is the wire contract: the v2 REST surface (§4), the
@@ -142,6 +165,48 @@ docker compose run --rm aulos import \
 unparseable records instead of aborting. Only `schema_version: 2` JSON is supported — the legacy
 pickle/shelve state is out of scope. The report lists every error and warning; a clean run reports
 `errors: []`.
+
+### Exec postprocessors carried over from MeTube
+
+Aulos downloads into a per-job scratch directory (`/downloads/<ULID>/`) and moves the finished
+file to its destination at the end of the job — MeTube downloaded straight into `DOWNLOAD_DIR`.
+That matters for a `YTDL_OPTIONS` entry many MeTube setups carry:
+
+```json
+{ "key": "Exec", "exec_cmd": "python3 /config/jellyfin_nfo_generator.py %(filepath)q" }
+```
+
+A postprocessor's default `when` is `post_process`, which yt-dlp runs **before** the move, so
+`%(filepath)q` is a path inside the scratch directory. Aulos keeps every sidecar it writes — the
+`.info.json`, the `.description`, thumbnails, subtitles — next to the media in that directory,
+and moves the whole set together with anything a postprocessor of yours *wrote* there. So a hook
+that reads a sidecar relative to `%(filepath)q`, or writes its output next to it, works: it sees
+the file set it expects, and what it produces reaches `DOWNLOAD_DIR`.
+
+Four things to know:
+
+- The path an `Exec` hook is handed is the **pre-move** one. If your script needs the final path
+  (to hand it to another service, say), add `"when": "after_move"` to the postprocessor entry —
+  yt-dlp then runs it with `%(filepath)q`, and Aulos with `%(infojson_filename)q`, already
+  pointing at `DOWNLOAD_DIR`.
+- **Remove the `jellyfin_nfo_generator.py` entry** rather than carrying it over.
+  `AULOS_NFO_ENABLED=true` writes the same `.nfo` in-process for **every** provider — not just
+  yt-dlp — with no grandchild process per download, and honours `AULOS_NFO_DELETE_INFO_JSON`.
+  Set `AULOS_NFO_PROVIDERS` (a comma-separated list of provider ids, empty by default, meaning
+  all) to narrow it. Running **both** is worse than running either: the script deletes the
+  `.info.json` as soon as it has read it, so the built-in hook — which runs after the download —
+  finds no metadata at all and, exactly as the script itself does in that situation, writes
+  nothing. Whichever `.nfo` you end up with is then the script's, wherever its `when` left it. If
+  you would rather keep the script, leave `AULOS_NFO_ENABLED` off.
+- The built-in hook renders from the `.info.json`, so yt-dlp has to be writing one: keep
+  `"writeinfojson": true` in your `YTDL_OPTIONS` (a MeTube setup that ran the NFO script already
+  has it). Without a sidecar — and without one of the providers that store their metadata in the
+  queue row, such as StreamingCommunity — there is nothing to render from, and the hook writes no
+  file rather than a title-and-empty-plot stub that Jellyfin would adopt as that video's metadata.
+  `GET /healthz` counts those runs as `components.nfo.wrote_nothing_total`.
+- A **cancelled** download takes its sidecars with it. The scratch directory is removed on cancel
+  (it is removed on delete either way), and since the `.info.json` now lives there until the
+  move, a cancelled job no longer leaves one orphaned in `DOWNLOAD_DIR` with no video beside it.
 
 ## Development
 

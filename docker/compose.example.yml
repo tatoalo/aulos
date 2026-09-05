@@ -32,6 +32,13 @@ services:
       TEMP_DIR: /downloads/.tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       SC_MAX_CONCURRENT_DOWNLOADS: "1"
+      # The built-in web UI, served at the same address as the API. `GET <URL_PREFIX>` answers the
+      # page when the request asks for `text/html` and the JSON identity document otherwise, so
+      # curl, the iOS app and the v1 clients are unaffected. `false` turns it off entirely.
+      # The page, its assets and its manifest are NOT behind AULOS_API_TOKEN (a browser cannot put
+      # a bearer token on a document navigation); every API route keeps its auth.
+      AULOS_WEB_UI: "true"
+      DEFAULT_THEME: auto                    # the UI's initial theme: auto | light | dark
       YTDL_OPTIONS_FILE: /config/ytdl-options.json
       JELLYFIN_SYNC_ENABLED: "true"
       JELLYFIN_URL: http://jellyfin:8096

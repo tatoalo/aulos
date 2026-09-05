@@ -358,7 +358,7 @@ present and may be `null`. **No key is ever absent.**
 | `fragment_count` | `integer \| null` | |
 | `phase` | `string \| null` | a finer-grained, purely cosmetic label: `"video"`, `"audio"`, `"fragment"`, `"remux"`, `"audio_sync"`, or a provider-specific string. Do not switch on it. |
 | `phase_percent` | `number \| null` | progress **of the current postprocessing phase**, `0.0…100.0`. Independent of `percent`. When `status == "postprocessing"` and this is non-null, render it as a secondary bar. |
-| `msg` | `string \| null` | a short human status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`. Already cleaned. |
+| `msg` | `string \| null` | a short **live** status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`, `"Paused"`, `"Retrying in 30s"`. Already cleaned. It describes what is happening *now*, so **no terminal status ever carries a live line**: the server clears it at the terminal write. It is **always `null` when `status == "finished"`**, on every writer — the engine, a group's roll-up, the legacy importer and the schema migration that backfilled the rows an older build wrote. On `error` and `canceled` it is `null` too, unless something set an explicit terminal *note* that was never a progress line (the legacy importer writes one for a record whose status it could not map); the reason itself is in `error`, and the v1 shim projects `error.message` back into v1's overloaded `msg`. The clear arrives as an explicit `null` in the `delta`/`completed` frame, per §5.4. |
 | `error` | `WireError \| null` | `{ code, message, field, provider, provider_code }` — the §1.5 object without `request_id`. Non-null when `status == "error"`, optionally when `canceled`, **and also on a `queued` item that has a pre-download problem** — an upcoming livestream, where `error.code == "not_yet_live"` and `error.message` is the scheduled-start text. That last case is not a failure: the item exists, is not scheduled, and starts when the user presses start (or when its subscription notices the stream went live). Render it as a queued row with an explanatory subtitle, not as a failure. |
 | `filename` | `string \| null` | the produced file, **relative** to its download root. `null` until known. The key always exists. |
 | `size` | `integer \| null` | bytes on disk |
@@ -436,6 +436,13 @@ never to appear in a `delta` frame. Read them once from `added`/`snapshot` and n
 - **Progress bar.** Show `percent` for `preparing`/`downloading`. For `postprocessing`, show
   `percent` (which will be at or near 100) plus `phase_percent` as a secondary indicator when it
   is non-null; `msg` says what is happening.
+- **`msg` is a live line, not a summary.** Render it as the row's subtitle while the item is
+  running and it will read correctly, because the server clears it at the terminal write: a
+  `finished` item always has `msg == null`, and so does a row that failed or was cancelled while a
+  postprocessor was running. Do not cache the last non-null value you saw for a row — the clear is
+  delivered as an explicit `null` (§5.4), and treating it as "no change" is what makes a completed
+  download read as a job stuck in its final postprocessor. A `finished` row's subtitle is yours to
+  compose from `size`, `filename` and `finished_at`; a failed one's is `error.message`.
 - **`resolving`.** The item exists, has an `id`, and its `title` is still the URL. Show a spinner
   and the URL. It will get a real title within a second or two, delivered as a `delta`.
 
@@ -454,9 +461,9 @@ Exactly these eight strings ever appear in `status`, on items and on groups alik
 | `preparing` | the download process has been spawned but has produced no progress yet |
 | `downloading` | bytes are moving |
 | `postprocessing` | the bytes are down; ffmpeg / a remux / an audio re-encode is running |
-| `finished` | done. `percent == 100.0`, `filename` and `download_url` are non-null. |
-| `error` | terminal failure. `error` is non-null. |
-| `canceled` | terminal, cancelled by a user |
+| `finished` | done. `percent == 100.0`, `filename` and `download_url` are non-null, and `msg` and `error` are both `null`. |
+| `error` | terminal failure. `error` is non-null and carries the reason; `msg` is `null` unless an importer left a terminal note (§2.3). |
+| `canceled` | terminal, cancelled by a user. `msg` follows the `error` rule above. |
 
 There is no `pending` and no `done` in v2. If you decode an unknown value, treat it as an
 `unknown` case and render the row as inert — do **not** map it to `queued`, or a future status will

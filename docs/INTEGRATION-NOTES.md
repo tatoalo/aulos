@@ -861,6 +861,60 @@ with your WP id.
      DESIGN §13 says a `PreTerminal` hook's `applies()` reads "the prospective outcome carried by
      `HookCtx.batch[0].status`", which a one-argument `applies(&item)` cannot see. The value passed
      is the same one that lands in `BatchEntry.status`.
+  3. **(bug-2a fix, 2026-09-05)** `Hook::skip_reason(&self, item, outcome) -> Option<SkipReason>`
+     sits alongside `applies`, and is what the dispatcher actually gates on. `applies` stays a
+     required method — several `impl Hook` blocks live outside this crate (`aulos-server`'s
+     `adapters.rs` stub and `tests/server.rs`) and must keep compiling — and every built-in defines
+     it as `skip_reason(..).is_none()`. `skip_reason` has a default that derives the answer from
+     `applies` with the generic reason `it does not apply to this item`, so an out-of-tree hook is
+     still counted, just not specific. **If a later pass is free to touch every `impl Hook` in the
+     workspace, invert them**: make `skip_reason` the required method and `applies` the provided
+     one, which removes the one-line `applies` body from each built-in and the possibility of the
+     two disagreeing.
+
+- **The NFO hook was gated to `provider == "streamingcommunity"` and therefore never ran in
+  production (bug 2a, 2026-09-05).** DESIGN §13 scoped it to SC on the reasoning that YouTube NFOs
+  came from the user's own yt-dlp `Exec` postprocessor — which the temp-dir layout had already
+  broken (the media file is in `/downloads/<ULID>/` at exec time while `writeinfojson` has written
+  the sidecar to `/downloads/`), so the cutover produced no `.nfo` from either path. The hook now
+  applies to every provider, reads the on-disk `<file>.info.json` when the row carries no metadata
+  blob (which for a plain yt-dlp row is always, per DESIGN §7.5), and `AULOS_NFO_PROVIDERS`
+  (comma list, default empty = all) is the opt-in narrowing. `tests/nfo_legacy_parity.rs` pins the
+  output against XML captured from `jellyfin_nfo_generator.py` itself, so the port cannot drift
+  from what legacy wrote for the same `.info.json`; the module doc there carries the regeneration
+  command.
+- **Skips are counted and named (bug 2a, second half).** The dispatcher logs `hook skipped` at
+  DEBUG (hook id, item id, outcome, reason), counts `skipped_total` per hook and keeps
+  `last_skip_reason`; a hook with `runs_total: 0` and a non-zero `skipped_total` also gets a
+  `detail` string in `healthz`. `status` stays `ok`. `HookStat` grew the two fields, so anything
+  matching it exhaustively needs them. A hook of the *other* phase is not counted as a skip — it
+  was never offered the event.
+  **Amended (review pass 2):** the two `healthz` keys are published **only once something has been
+  skipped**. `HookStat` still carries `skipped_total: 0`, but the component detail omits it, so a
+  hook that has never declined an event serialises to exactly the payload it did before this change
+  — which is what keeps DESIGN §16.3's stock sample and the hand-assembled snapshot that pins it
+  (`crates/aulos-api/tests/snapshots/rest_meta__healthz_stock.snap`) from disagreeing. That snapshot
+  is built from a literal in `crates/aulos-api/tests/rest_meta.rs`, not from
+  `aulos_hooks::dispatcher::health_of`, so it cannot fail when the real payload changes shape;
+  **whoever owns `aulos-api` should consider deriving it from `health_of`**, or the two will drift
+  again on the next field.
+- **Review pass 2 on bug 2a — the hook must not write a file it cannot fill.** The first pass
+  rendered unconditionally, so an install with no `.info.json` (nothing in aulos forces
+  `writeinfojson`) got a `movie/title/plot` stub next to every download, which Jellyfin adopts as
+  local metadata and which truncated any `.nfo` a user's own `Exec` postprocessor had written.
+  Legacy wrote no file in that case, and now neither does this: `render` takes a non-optional blob,
+  `run` writes only when one of the two sources yielded something, and the runs that yield nothing
+  are counted as `wrote_nothing_total` in the hook's own `healthz` detail (same publish-once-non-zero
+  rule). Two more things came out of the same review and are worth knowing outside this crate:
+  `aulos-queue`'s `keeps_entry` is `provider == streamingcommunity`, so a **`command:<name>` plugin
+  row has no blob at hook time either** — the NFO source table in DESIGN §13.2 said otherwise; and
+  `aulos_provider::entry::outtmpl_info` keeps `channel` for a playlist/channel child, which the
+  hook's "does this blob carry metadata?" test now discounts explicitly (`is_outtmpl_hint`) rather
+  than relying on the engine's terminal drop to hide it. `nfo::render` also reproduces legacy's
+  nested-`get` semantics exactly for a sidecar (`uploader` present-but-null writes no `<studio>`,
+  a sidecar with no url writes no `<website>`, an absent `title` becomes `"Unknown Title"`); the row
+  fills a gap only for a stored `entry_json`, which legacy never saw. `nfo::Source` is the new
+  parameter that distinguishes the two.
 - **`HookFilter::matches` (WP-10) takes `&Item` and is therefore unusable from this crate.**
   `ManifestHook::filter_matches` reimplements the same three axes against `ItemView`, with identical
   semantics (including "an item with no provider fails a `when.provider` filter rather than passing
@@ -2308,3 +2362,52 @@ Two things reached outside a single crate and are recorded here.
   derives the name from the repository — the assumption the pinned name rests on. The bullet above
   in this file (§"Final integration") and the two mentions in STATUS.md keep the old name on
   purpose: they are the record of the defect, and rewriting them would make them false.
+
+## Production bug 1 — the stale `msg` on a terminal row
+
+- **The schema gained its first post-`0001` migration, and it is data-only.**
+  `crates/aulos-store/migrations/0002_clear_finished_msg.sql` is
+  `UPDATE items SET msg = NULL WHERE status = 'finished'`, and `SCHEMA_VERSION` is now `2`. It
+  changes no DDL, so `crates/aulos-store/schema.sql` and its `insta` snapshot are unchanged and
+  `migrations_from_empty_match_the_checked_in_schema` still passes untouched. It exists because the
+  code fix (clearing `msg` at the terminal write) is forward-only: `set_status` is the only writer
+  of that column and it is never re-run for a settled row, so every download the first production
+  build completed would have kept `"MoveFiles…"` across the upgrade, and boot recovery would have
+  reloaded it into the engine's cache. A `0002` that changed DDL would have needed the snapshot
+  regenerated; a future one will.
+- **The invariant is `finished ⇒ msg IS NULL`, defended on four writers**, not on one: the engine's
+  terminal write, the group roll-up (`sync_group_status`, which does not go through `terminate`),
+  the legacy importer (which bypasses the engine entirely and was importing `completed.json`'s own
+  `msg` verbatim onto finished rows), and the migration above. DESIGN §8.10 lists them.
+- **`error` and `canceled` clear the live line too, which the bug report did not ask for.** The
+  report's premise that "the `error` status already carries its text in `msg` correctly" is true
+  only of `GET /history`, where the v1 shim substitutes `error.message`
+  (`aulos_api::v1::history::project_item`). On v2 and on the WebSocket an `error` row carried
+  whatever stage it happened to die in — `status: "error", msg: "MoveFiles…"` — which is the same
+  cosmetic defect on the other status. The importer's terminal *note* ("Imported with unknown
+  legacy status: …") is not a live line and is deliberately kept, which is also why the migration
+  is scoped to `finished`: SQL cannot tell a note from a stale progress line.
+
+## Production bug 2b — the sidecars and the per-job scratch directory
+
+- **`aulos-hooks`' NFO hook and a carried-over `jellyfin_nfo_generator.py` `Exec` entry now
+  actively conflict, and only documentation separates them.** Before the fix the legacy script
+  found no `.info.json` and returned early, so the built-in hook always had the sidecar to itself.
+  Now the script works as designed: it writes `<base>.nfo` and **deletes** the `.info.json` it
+  consumed, in the scratch directory, before the move. The shim carries the `.nfo` out and drops
+  the deleted sidecar from the move set, so the operator gets the NFO they always wanted — but
+  `NfoHook::run` then runs, finds nothing at `info_json_path(file)`, renders from the queue row
+  alone (no plot, no tags, no upload date) and **overwrites** the good file. README now tells
+  migrating users to drop the `Exec` entry, which is the documented fix. If `aulos-hooks` wants a
+  belt-and-braces one, the cheap version is to skip when `nfo_path(file)` already exists and the
+  sidecar does not — i.e. "somebody else already wrote this NFO from data I no longer have". That
+  is a one-condition change in `NfoHook::run` and it is outside this WP's paths.
+- **`aulos-queue` owns the two cleanup facts this change depends on**, and one of them is a
+  behaviour change: (a) on the **success** path nothing removes `/downloads/<ULID>/` — neither
+  `release_job` (`cleanup_partials` is reached only when `slot.settled` is `Some`, i.e.
+  cancel/pause) nor `recovery`'s orphan sweep, which only matches `.part`/`.ytdl`. That is why the
+  shim sweeps the directory rather than trusting it to be cleaned: a file left there is left there
+  for good. (b) On **cancel**, `cleanup_partials` removes the whole directory, and the
+  `.info.json`/`.description` now live in it, so a cancelled job destroys them where it used to
+  leave them orphaned in `DOWNLOAD_DIR`. README and DESIGN §9.2 both say so; nothing in
+  `aulos-queue` needs to change for it.

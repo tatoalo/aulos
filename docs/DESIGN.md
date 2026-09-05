@@ -2156,6 +2156,36 @@ anyway.
 
 ### 8.10 Clear, delete, `CLEAR_COMPLETED_AFTER`
 
+- **The terminal write clears `msg`.** `msg` is the *live* status line: the last stage label a
+  provider wrote (`"MoveFiles…"`, §9.5), the pre-terminal hook's label (`"Re-encoding audio"`,
+  §13), `"Paused"`, `"Retrying in 30s"`. None of those describe a settled row, and a client renders
+  `msg` as the row's subtitle — so carrying the last one across the terminal edge makes every
+  finished item read as a job stuck in its final postprocessor, which is what the first production
+  build did. `error` and `canceled` clear it for the same reason: `"MoveFiles…"` is no more a
+  *reason* for a failure than for a success. The reason lives in `error`, which is structured on
+  v2, and which the v1 shim projects back into legacy's overloaded `msg` (§11.4), so no client ever
+  loses a failure message. The rule holds on **four** writers, because four of them can put a
+  terminal row on disk:
+    1. `Engine::terminate` — every item's terminal write.
+    2. `Engine::sync_group_status` — a group's rolled-up terminal status, which does *not* go
+       through `terminate` (§8.6). No live writer reaches a group id today, but `park_running`
+       will write `"Paused"` onto whatever id it is handed and `expand_targets` puts a group id on
+       its own target list, so the roll-up defends the invariant rather than relying on callers.
+    3. The legacy importer (§7.6), which bypasses the engine entirely. It clears `msg` on
+       `finished` only: an unmappable legacy record keeps the terminal *note* the importer writes
+       for it, which was never a progress line.
+    4. Migration `0002`, a data-only migration that nulls `msg` on the `finished` rows a pre-fix
+       build already persisted. The code fix is forward-only — `set_status` is the only writer of
+       that column and it is never re-run for a settled row — so without the backfill the rows on
+       disk keep the stale line across the upgrade and boot recovery reloads it into the cache.
+- **A stage frame is refused once the provider no longer owns the row.** `Engine::handle_stage`
+  drops a frame on a row that is terminal, settled (a cancel or a pause inside the `killpg` grace),
+  or awaiting its pre-terminal hooks — `ProgressMsg::Stage` travels provider → aggregator → engine
+  while `EngineCmd::Finished` travels provider → engine, so the last `pp` frame really can be
+  handled after the outcome. The awaiting-hooks arm is scoped to *that run*: `park_running` drops
+  the `pending_hooks` entry exactly as `cancel_one` does, so a pause during the pre-terminal window
+  neither strands a stale outcome for `expire_pending_hooks` to finalise nor makes the restarted
+  run's own frames unwritable.
 - On a terminal `finished`/`error`, when `CLEAR_COMPLETED_AFTER > 0`, `clear_after = now + N` is
   **persisted**. `ClearScheduler` runs on the 1 Hz `Tick` plus a `sleep_until(min(clear_after))`
   fast path, and queries SQLite — so auto-clear also applies to items that have aged out of the
@@ -2283,6 +2313,54 @@ the postprocessor `info_dict`, which never crosses the boundary:
 `coerce` names option keys whose string values the shim converts to yt-dlp Python objects. Today
 exactly one: `impersonate → ImpersonateTarget.from_str`. Adding another is a shim-only change. An
 unknown coercion name is a `contract` error naming the key — never a silent behaviour change.
+
+`paths` is `{home, temp}` plus one entry per **sidecar type**. yt-dlp resolves every output type
+through `get_output_path(<type>)`, which joins `paths[<type>]` onto `paths.home`; it writes
+subtitles and thumbnails next to the *temp* file and registers both in `__files_to_move`, but it
+writes the `.info.json` and the `.description` straight to `paths.home` and registers neither. With
+the per-job scratch directory of §8.7 (`temp != home`, which legacy MeTube never had) that splits
+the file set for the whole download: a user `Exec` postprocessor defaults to `when="post_process"`,
+which runs **before** `MoveFilesAfterDownloadPP`, so `%(filepath)q` names the scratch directory
+while the sidecar it wants is already at the destination. Every migrating MeTube user carries such
+a hook (`jellyfin_nfo_generator.py %(filepath)q`).
+
+So `provider.rs::download_options` calls `pin_sidecars_to_the_scratch_dir`, which adds
+`"description"` and `"infojson"` entries pointing at `paths.temp` — after the user merge, since a
+`paths` key in `YTDL_OPTIONS` replaces the base dict's, and never over an entry the operator set
+themselves. Subtitles and thumbnails are **not** pinned: they are already written to the scratch
+directory, and pinning them would make `MoveFiles` see source == destination and strand them.
+Link shortcut files (`writeurllink` and friends) are deliberately left in `paths.home`: nothing
+resolves a `.url` from `%(filepath)q`, and their names come from a private yt-dlp helper.
+
+Writing them there is only half of it, and the other half is why the shim **sweeps** rather than
+naming types. `install_sidecar_postprocessors` appends `SidecarsTravelWithTheMedia` to the
+`post_process` chain, so it runs after every user postprocessor and immediately before
+`MoveFilesAfterDownloadPP` — the one moment the scratch directory holds its final contents. It
+then does two things:
+
+- it registers, into `__files_to_move`, every file beside the media that shares its stem and is
+  not a work file (`.part`, `.part-Frag*`, `.ytdl`, …). That covers the two sidecars yt-dlp never
+  registers **and** anything a user postprocessor wrote there — `jellyfin_nfo_generator.py` writes
+  `<base>.nfo` next to `%(filepath)q`, which yt-dlp has never heard of and would leave behind in a
+  directory nothing on the success path removes;
+- it drops registrations whose source has since disappeared. The same script deletes the
+  `.info.json` once it has read it, and a registered file MoveFiles cannot find is an unexplained
+  `File "…" cannot be found` warning on a download that went perfectly.
+
+A failure in either half is reported through `report_warning` — i.e. the shim's `FrameLogger`, at
+every `LOGLEVEL` — not `write_debug`, which yt-dlp no-ops unless `verbose` is set.
+
+`SidecarPathsAreFinal` is then spliced in at the **head** of the `after_move` chain (upstream's
+`add_post_processor` only appends, and the user's own `after_move` postprocessors are registered
+first) and rewrites `infojson_filename` to the moved path, so an operator told to use
+`%(infojson_filename)q` for the final path actually gets it.
+
+Two consequences worth stating. The item's own reported artifacts are unaffected: the shim reports
+only `media`/`subtitle`/`chapter` roles and takes the media path from `MoveFiles`' `__finaldir`, so
+they were final before this and are final now. And a **cancelled** job now loses its `.info.json`
+and `.description` with the scratch directory (§8.7 `cleanup_partials`), where before they had
+already been written to `paths.home` — an improvement, since a cancelled download no longer strands
+an orphan sidecar in the library, but a behaviour change all the same.
 
 ### 9.3 shim → Rust: frames
 
@@ -2681,7 +2759,7 @@ can be switched off after the v2 client ships, and its eventual removal is a one
 | `GET /` when `URL_PREFIX != "/"` | yes | `302` to `URL_PREFIX` |
 | `GET <p>download/*`, `<p>audio_download/*` | yes | `Range` support added |
 | `OPTIONS` on all of the above | yes | `{"status":"ok"}` + CORS; v2 routes also send `Access-Control-Allow-Methods` |
-| `GET <p>` (Angular index + `metube_theme` cookie) | **no** | returns a tiny JSON identity document; no HTML, no cookie |
+| `GET <p>` (Angular index + `metube_theme` cookie) | **partly** | content-negotiated: an `Accept` list containing `text/html` gets the embedded web UI (`AULOS_WEB_UI`, §17.3), and everything else — `application/json`, the bare `*/*` `curl` sends, no `Accept` at all — gets the tiny JSON identity document unchanged. Never a `metube_theme` cookie: `DEFAULT_THEME` is substituted into the page as `{{THEME}}` at request time and the page remembers a viewer's override locally |
 | `GET <p>socket.io/*` | **no** | `501` with `{"error":{"code":"socketio_removed","message":"Socket.IO is not supported; use <prefix>ws (protocol v2) or GET <prefix>api/v2/state"}}` — deliberate, so a stale client fails loudly instead of hanging on a handshake. `socketio_removed` is a member of the §5 `ErrorCode` enum and 501 is a documented status, so the code appears in the `print-schema` snapshot and in the `aulos_http_errors_total{code}` label set |
 | `POST <p>cancel-add` (v2 equivalent) | yes | the same handler backs `POST api/v2/downloads/cancel-resolve`, which additionally accepts `{"generation": n}` so a v2-only client can abort one specific 500-item add (PROTOCOL §4.7) |
 
@@ -3268,7 +3346,7 @@ file, so the NFO and the Jellyfin scan must come after it.
 | Hook | `phase` | `ordering` | `applies` |
 |---|---|---|---|
 | `audio_sync` | `PreTerminal` | 10 | `outcome is success && selection == (video, mp4, best_remux)` — evaluated on the *pending* terminal status, since the row is still `postprocessing` |
-| `nfo` | `PostTerminal` | 20 | `finished && provider == "streamingcommunity" && AULOS_NFO_ENABLED` |
+| `nfo` | `PostTerminal` | 20 | `finished && AULOS_NFO_ENABLED && the item produced a file`, narrowed further only when `AULOS_NFO_PROVIDERS` is set (§13.2) |
 | community `[[hook]]` | `PostTerminal` | 50 (configurable) | its own `on` + `when` filters |
 | `jellyfin` | `PostTerminal` | 90 | `finished && JELLYFIN_SYNC_ENABLED` |
 
@@ -3276,6 +3354,18 @@ file, so the NFO and the Jellyfin scan must come after it.
 `PreTerminal` hook the row is still `postprocessing`, so it reads the *prospective* outcome carried
 by `HookCtx.batch[0].status` instead — which is why `BatchEntry.status` is a `TerminalStatus` and
 not an `Option`.
+
+**A skip names itself.** Every gate in the table above is expressed as a `skip_reason()` returning
+`Option<SkipReason>`, not as a bare `false`; `applies()` remains as the cheap predicate and is
+defined as `skip_reason(..).is_none()`. The dispatcher gates on `skip_reason`, logs
+`hook skipped` at DEBUG with the hook id, the item id and the reason, counts `skipped_total` per
+hook and keeps the `last_skip_reason` (§16.3) — both published only once something has actually
+been declined, so a hook that never skips carries the payload it always did. This exists because the alternative was observed in
+production: the NFO hook was gated out of every yt-dlp download and reported
+`{"runs_total": 0, "failures_total": 0, "status": "ok"}` — the exact shape of a healthy hook with
+nothing to do — while emitting no log line at any level. A hook of the *other* phase is not a skip:
+it was never offered the event. An out-of-tree hook that implements only `applies()` is still
+counted, with the generic reason `it does not apply to this item`.
 
 ### 13.1 Jellyfin refresh, debounced and targeted
 
@@ -3315,11 +3405,44 @@ not an `Option`.
 
 ### 13.2 NFO generation (now actually wired)
 
-A port of `jellyfin_nfo_generator.py`, in-process with `quick-xml`, applied to SC items. The
-legacy script existed but was **never referenced by any code path**.
+A port of `jellyfin_nfo_generator.py`, in-process with `quick-xml`, applied to **every** finished
+download. The legacy image ran that script as a yt-dlp `Exec` postprocessor, so it wrote an NFO for
+every download, YouTube included.
 
-- Input: the item's `entry_json` (SC entries are stored whole) — **not** the on-disk
-  `.info.json`, so there is nothing to delete and no race with the user.
+- **Every provider, not only StreamingCommunity.** An earlier revision of this section gated the
+  hook on `provider == "streamingcommunity"`, on the reasoning that YouTube NFOs came out of the
+  user's own `Exec` postprocessor. On the production cutover they did not, and the download that
+  found this produced no `.nfo` from either path: aulos downloads into a per-job temp dir and only
+  `MoveFiles` at the end, while `writeinfojson` writes the sidecar straight to the final dir, so an
+  `Exec` command resolving `<file>.info.json` next to `%(filepath)q` looks in the temp dir and the
+  legacy script exits having found nothing. The gate is therefore the outcome, the produced file
+  and `AULOS_NFO_ENABLED`. `AULOS_NFO_PROVIDERS` (comma list, default empty = every provider) is
+  available for anyone who wants the old narrowing back.
+- **Input**: the item's `entry_json` when it carries metadata, otherwise the on-disk
+  `<file>.info.json`. Only a StreamingCommunity row has a blob at hook time — §7.5's `keeps_entry`
+  is `provider == "streamingcommunity"`, so a `command:<name>` plugin's row is dropped at the
+  terminal write exactly like a yt-dlp one — and "carries metadata" explicitly discounts the
+  output-template hints a playlist or channel child keeps (`^(playlist|channel)`, `n_entries`,
+  `__last_playlist_index`). `channel` is both a hint and the source of `<studio>`, so without that
+  rule a channel download's hint blob would look like metadata and shadow the real info dict lying
+  unread next to the file. The sidecar read is capped at 16 MB; a missing, oversized or malformed
+  one is logged, not a hook failure.
+- **No source, no file.** When neither the blob nor the sidecar yields anything, **nothing is
+  written** — legacy's own behaviour (`generate_nfo` returns before opening the output file when
+  the sidecar is missing), and the only safe one: `writeinfojson` is the operator's choice while
+  `AULOS_NFO_ENABLED` defaults to `true`, so the alternative is a `title`+empty-`plot` stub next to
+  every media file on a stock install, which Jellyfin adopts as that file's local metadata and
+  which would truncate a `.nfo` another tool had already written correctly. Each such run
+  increments the hook's `wrote_nothing_total` (§16.3): "the hook ran and wrote no file" is not a
+  skip — the hook did apply — and `runs_total` alone would claim a file exists.
+- **The sidecar is rendered exactly as legacy rendered it**, its odd fallbacks included, because
+  the promise to anyone cutting over is that the same `.info.json` yields the same bytes: a missing
+  `title` key becomes `"Unknown Title"` (an empty one stays empty), `channel` is consulted for
+  `<studio>`/`<director>` only when `uploader` is **absent** (a present-but-null `uploader` writes
+  neither, which is `info.get("uploader", info.get("channel", ""))`), and a sidecar carrying
+  neither `original_url` nor `webpage_url` gets no `<website>` at all. The item row may fill a gap
+  only when the source is a stored `entry_json`, which legacy never saw — that is what lets an SC
+  `state` (no `title` in it, §10.3) render its title and url at all.
 - Output: `<base>.nfo` next to the produced file. Root `episodedetails` when any of
   `series`/`season_number`/`episode_number` is set, else `movie`.
 - Elements in legacy order: `title`, `originaltitle`, (`showtitle`, `season`, `episode`,
@@ -3332,7 +3455,11 @@ legacy script existed but was **never referenced by any code path**.
   `AULOS_NFO_DELETE_INFO_JSON=true`, default **`false`**. The legacy CLI always deleted it;
   making that opt-in avoids breaking anyone's pipeline on the wrong side of a cutover.
 - Once the NFO exists, the item's `entry_json` is dropped from the DB via
-  `ctx.store.drop_entry_blob(item.id)` (§7.1) — the port, not the store.
+  `ctx.store.drop_entry_blob(item.id)` (§7.1) — the port, not the store. A StreamingCommunity row
+  is always told to drop (a failed blob read is not proof there is nothing to drop, and the
+  retryable error that raises is how it gets another try); a row of any other provider is told only
+  when a blob was actually loaded — which today is never, since §7.5 drops it, so a plain download
+  costs no engine round trip and the second arm is a guard for a future provider that keeps one.
 
 ### 13.3 `best_remux` audio-sync fix, in-process
 
@@ -3917,7 +4044,8 @@ the one condition that makes the service useless. The Docker `HEALTHCHECK` uses 
     "jellyfin":     { "status":"ok", "last_success_at":1757000300000, "pending":false,
                       "runs_total":18, "failures_total":0 },
     "nfo":          { "status":"ok", "runs_total":7, "failures_total":0 },
-    "audio_sync":   { "status":"ok", "runs_total":2, "failures_total":0, "phase":"pre_terminal" },
+    "audio_sync":   { "status":"ok", "runs_total":2, "failures_total":0,
+                      "phase":"pre_terminal" },
     "events":       { "status":"ok", "dropped":{"hooks":0,"telegram":0} },
     "subscriptions":{ "status":"ok", "total":7, "failing":1, "next_due_in_s":412 },
     "importer":     { "status":"ok", "imported_at":1757000000000, "warnings":2 }
@@ -3929,6 +4057,33 @@ the one condition that makes the service useless. The Docker `HEALTHCHECK` uses 
   "plugin_warnings": [ "loud: limits.max_concurrent: 0 is not a concurrency; clamped to 1" ],
   "ws": { "clients":2, "frames_total":10293, "lagged_total":0, "slow_disconnects":0 } }
 ```
+
+A hook component grows three further keys, each **only once it has something to report**, so a hook
+that has always run when asked publishes exactly the payload above and the documented sample and the
+snapshot that pins it cannot drift over a counter that is always zero there:
+
+```jsonc
+    "nfo":          { "status":"ok", "runs_total":0, "failures_total":0, "skipped_total":42,
+                      "last_skip_reason":"AULOS_NFO_ENABLED is false",
+                      "detail":"never ran: 42 event(s) skipped, most recently because AULOS_NFO_ENABLED is false" },
+    "audio_sync":   { "status":"ok", "runs_total":2, "failures_total":0, "skipped_total":16,
+                      "last_skip_reason":"the selection is mp4/best, not mp4/best_remux",
+                      "phase":"pre_terminal" },
+```
+
+- `skipped_total` / `last_skip_reason` — the hook was offered an event and declined it, with the
+  reason it gave (§13).
+- `detail` — added when `runs_total` is `0` and `skipped_total` is not: `never ran: N event(s)
+  skipped, most recently because <reason>`. This is the one thing
+  `{"runs_total": 0, "failures_total": 0, "status": "ok"}` could not say, and that shape hid a
+  completely disabled NFO hook through a production cutover.
+- `wrote_nothing_total` (`nfo` only) — the hook applied, ran, and found no metadata to render from,
+  so it wrote no file (§13.2). A run that writes nothing is not a skip, and `runs_total` alone
+  claims an NFO exists; on a yt-dlp install a non-zero count almost always means `writeinfojson`
+  is off.
+
+`status` stays `ok` throughout: declining an event, or having nothing to write, is not a failure, so
+it must not page anyone — but it may not be silent either.
 
 The `components` object above is **complete for the stock configuration** and is what WP-14
 snapshot-tests: one entry per built-in hook (`jellyfin`, `nfo`, `audio_sync`) because §16.7 maps
@@ -4207,7 +4362,7 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `HTTPS` | `false` | bool | TLS via `CERTFILE`/`KEYFILE` | L |
 | `CERTFILE` / `KEYFILE` | `''` | path | PEM only, loaded with `rustls-pemfile` | L |
 | `BASE_DIR` | `''` | path | now used **only** to resolve `ROBOTS_TXT`; UI serving is out of scope | L\* |
-| `DEFAULT_THEME` | `auto` | `light\|dark\|auto` | accepted and echoed in capabilities; **no cookie is set** (no web UI) | L\* |
+| `DEFAULT_THEME` | `auto` | `light\|dark\|auto` | the embedded web UI's **initial** theme — substituted into the page as `{{THEME}}` at request time (`AULOS_WEB_UI`) — and the value `capabilities.config.default_theme` echoes. **No cookie is ever set**: a viewer's own override lives in the browser, not on the server | L\* |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | int ≥ 1 (fatal) | global download slots | L |
 | `LOGLEVEL` | `INFO` | str (unknown ⇒ INFO + warn) | tracing filter base | L |
 | `ENABLE_ACCESSLOG` | `false` | bool | request span at INFO vs DEBUG | L |
@@ -4273,8 +4428,9 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `AULOS_POT_MAX_RESTARTS` | `10` | int | per 10 min, then `failed` | N |
 | `AULOS_JELLYFIN_DEBOUNCE_SECS` | `30` | int | trailing debounce | N |
 | `AULOS_JELLYFIN_MAX_WAIT_SECS` | `300` | int | debounce cap, so a long playlist still refreshes | N |
-| `AULOS_NFO_ENABLED` | `true` | bool | NFO hook for SC items | N |
+| `AULOS_NFO_ENABLED` | `true` | bool | NFO hook, for every provider; writes nothing for an item with neither a stored entry nor a readable `<file>.info.json` (§13.2) | N |
 | `AULOS_NFO_DELETE_INFO_JSON` | `false` | bool | legacy's CLI always deleted it; opt-in here | N |
+| `AULOS_NFO_PROVIDERS` | `''` | comma list | provider ids the NFO hook writes for; **empty = all** | N |
 | `AULOS_TELEGRAM_BOARD` | `board` | `board\|per_job` | live board vs one message per job | N |
 | `AULOS_TELEGRAM_EDIT_INTERVAL_MS` | `3000` | int | per-chat edit budget | N |
 | `AULOS_TELEGRAM_WATCH_ALL` | `true` | bool | report web/subscription jobs too; `false` = exact legacy blind spot | N |
@@ -4286,6 +4442,7 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `AULOS_CONFIG_POLL_SECS` | `30` | int (0 = off) | mtime/size poll fallback for network mounts | N |
 | `AULOS_LOG_FORMAT` | `text` | `text\|json` | | N |
 | `AULOS_V1_ENABLED` | `true` | bool | mounts the v1 shim; set `false` after the v2 client ships | N |
+| `AULOS_WEB_UI` | `true` | bool | serve the embedded web UI: `GET <p>` answers the page when the request's `Accept` list contains `text/html`, plus `<p>assets/{app.css,app.js,icon.svg,icon-180.png}` and `<p>manifest.webmanifest`. All of them are served **without** auth even when `AULOS_API_TOKEN` or `AULOS_TRUSTED_PROXY_AUTH_HEADER` is set — they hold nothing secret and a browser cannot put a bearer token on a document navigation; the page turns a 401 from the API into a token prompt instead. `false` restores the pre-UI surface exactly: the identity document for every `Accept`, and a `404 not_found` envelope on the assets and the manifest | N |
 | `AULOS_API_TOKEN` | `''` | secret str | optional bearer token for non-browser clients | N |
 | `AULOS_TRUSTED_PROXY_AUTH_HEADER` | `''` | str | when set, its absence on a v2 route is a 401 | N |
 | `AULOS_ALLOW_PRIVATE_TARGETS` | `true` | bool | SSRF guard for API adds (Telegram is always guarded) | N |
