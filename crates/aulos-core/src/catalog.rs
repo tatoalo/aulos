@@ -229,7 +229,11 @@ pub struct MergedCatalog {
     /// must not grey out controls that some providers honour.
     pub naming: NamingPolicy,
     /// The union of the contributing download types. Registration order wins on a collision: the
-    /// first provider that declares a `download_type`/`format` id owns its spec.
+    /// first provider that declares a `download_type`/`format` id owns its spec — **unless** that
+    /// spec is `advisory` and a later provider declares the same id for real. An advisory format
+    /// (StreamingCommunity's single "Source" `mp4`) is a placeholder the server does not honour,
+    /// so it must never hide a real provider's quality ladder from a merged picker; the real spec
+    /// takes the advisory one's slot, so the position in the list is still the first declaration's.
     pub download_types: Vec<DownloadTypeSpec>,
 }
 
@@ -245,8 +249,14 @@ impl MergedCatalog {
                     None => download_types.push(dt.clone()),
                     Some(existing) => {
                         for f in &dt.formats {
-                            if existing.format(&f.id).is_none() {
-                                existing.formats.push(f.clone());
+                            match existing.formats.iter_mut().find(|e| e.id == f.id) {
+                                None => existing.formats.push(f.clone()),
+                                // A real ladder replaces an advisory placeholder in place; every
+                                // other collision keeps the first declaration.
+                                Some(shadowed) if shadowed.flags.advisory && !f.flags.advisory => {
+                                    *shadowed = f.clone();
+                                }
+                                Some(_) => {}
                             }
                         }
                         for o in &dt.options {
@@ -1022,6 +1032,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["video", "audio", "captions", "thumbnail"]
         );
+    }
+
+    /// The production registration order is `command:*`, then `streamingcommunity`, then `ytdlp`
+    /// (bootstrap), so without this rule the merged `video/mp4` was SC's advisory "Source" entry
+    /// with a single quality, and the web UI's picker offered nothing else until a URL was typed.
+    #[test]
+    fn an_advisory_format_never_shadows_a_real_one_whatever_the_registration_order() {
+        let real = Arc::new(ytdlp_catalog());
+        let mut sc = FormatCatalog {
+            provider: ProviderId::parse("streamingcommunity").unwrap(),
+            version: 1,
+            naming: NamingPolicy::Provider,
+            download_types: Vec::new(),
+        };
+        let mut video = ytdlp_catalog()
+            .download_type("video")
+            .cloned()
+            .expect("video");
+        video.formats = vec![FormatSpec {
+            id: "mp4".into(),
+            label: "Source".into(),
+            qualities: vec![QualitySpec {
+                id: "best".into(),
+                label: "Source".into(),
+                notice: None,
+            }],
+            default_quality: "best".into(),
+            codecs: vec![],
+            notice: None,
+            flags: FormatFlags {
+                advisory: true,
+                requires_ffmpeg: true,
+                lossy_remux: false,
+                slow: false,
+            },
+        }];
+        sc.download_types.push(video);
+        let sc = Arc::new(sc);
+
+        for order in [
+            vec![Arc::clone(&sc), Arc::clone(&real)],
+            vec![real.clone(), sc.clone()],
+        ] {
+            let merged = MergedCatalog::merge(&order);
+            let mp4 = merged
+                .download_types
+                .iter()
+                .find(|d| &*d.id == "video")
+                .and_then(|d| d.format("mp4"))
+                .expect("video/mp4");
+            assert!(!mp4.flags.advisory, "the advisory placeholder won");
+            assert_eq!(&*mp4.label, "MP4");
+            assert!(mp4.qualities.len() > 1, "{:?}", mp4.qualities);
+            assert_eq!(&*mp4.quality("best").unwrap().label, "Best");
+        }
     }
 
     #[test]
