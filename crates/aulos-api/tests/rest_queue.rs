@@ -457,13 +457,29 @@ async fn the_reachable_skip_reasons_are_all_produced() {
         assert_eq!(body["applied"], json!([resolving]));
         rig.until_status(&resolving, "canceled").await;
 
+        // PROTOCOL §4.2: `start` on an error/canceled item *is* a retry, so it is applied, not
+        // skipped (review round 2, aulos-queue). Only `finished` stays `already_terminal`.
         let (_, body) = rig
             .post(
                 "api/v2/items/actions",
                 &json!({ "action": "start", "ids": [resolving] }),
             )
             .await;
-        assert_eq!(body["skipped"][0]["reason"], "already_terminal");
+        assert_eq!(
+            body["applied"],
+            json!([resolving]),
+            "start on canceled is a retry: {body}"
+        );
+
+        let finished = rig.add("https://example.test/a").await; // ytdlp_like is the catch-all; fake.test would hit slow_resolve
+        rig.until_status(&finished, "finished").await;
+        let (_, body) = rig
+            .post(
+                "api/v2/items/actions",
+                &json!({ "action": "start", "ids": [finished] }),
+            )
+            .await;
+        assert_eq!(body["skipped"][0]["reason"], "already_terminal", "{body}");
     })
     .await;
 }

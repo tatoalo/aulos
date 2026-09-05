@@ -164,6 +164,30 @@ code disagreed with a doc that was already right — PROTOCOL §3.3, DESIGN §6.
 **Round 2** (regression review, blind end-to-end trace, shipped-iOS simulation against the v1 shim)
 has not run — it was interrupted by the org's API spend limit. Resume from there.
 
+## Review round 2 (2026-09-05)
+
+Three reviewers (regression of the round-1 fixes, a blind end-to-end code trace, and a simulation
+of the currently shipped iOS build against the v1 shim) raised 13 findings; the skeptics confirmed
+all 13. Five fix commits (`76f0339`..`326f0a7`): DESIGN §11.6/R2 now state that the shipped iOS
+build goes blank against Aulos (it only loads history inside its Socket.IO connect handler), making
+"ship the v2 app first" a cutover gate; the compose `stop_grace_period` covers the whole shutdown
+chain; boot deletes only a database it created itself; the download-tree exclusion, the v1 delete
+and the batch envelope were scoped correctly; group byte sums, mid-resolve recovery, start-as-retry
+(PROTOCOL §4.2), cancel-resolve scope, the `done_total` seed and deferred partial cleanup in the
+engine. One cross-crate fallout fixed by the orchestrator: the API skip-reasons test still expected
+`start` on a canceled item to be refused.
+
+Integration by the orchestrator: fmt/clippy clean, `cargo test --workspace` green, image rebuilt,
+`AULOS_E2E=1 tests/e2e/run.sh` → `END-TO-END: PASS` (43 checks).
+
+## Where things stand
+
+- **Server**: reviewed twice, gates and e2e green, published as `ghcr.io/tatoalo/aulos:latest`.
+- **iOS**: `v2-protocol` branch reviewed (24 fixes), builds, 137 tests incl. live suite green.
+- **Owner tasks**: on-device test of the v2 app (Keychain Sharing on the App ID for the token access
+  group); VPS cutover per DESIGN §19 with the v2 app installed first; StreamingCommunity check against
+  the live site through the VPN; decide whether to merge `v2-protocol` into the iOS default branch.
+
 ## How the work is being done
 
 Claude Code orchestrates; Opus 5 agents implement one WP each in a shared checkout, commit only
