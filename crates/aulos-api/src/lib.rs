@@ -11,7 +11,8 @@
 //! ```text
 //!                  ┌──────────── trace: X-Request-Id, X-Aulos-Seq, the access log
 //!   request ──────►│
-//!                  ├── open:  GET <p>, healthz, livez, robots.txt, socket.io/* (501)
+//!                  ├── open:  GET <p>, healthz, livez, robots.txt, socket.io/* (501),
+//!                  │          the web UI: <p>assets/*, <p>manifest.webmanifest
 //!                  └── auth ──┬── <p>api/v2/*      v2::router
 //!                             ├── <p>ws            ws::router
 //!                             ├── <p>download/*    files::router
@@ -34,6 +35,7 @@
 //! | `POST downloads`, actions, `state`, `items`, `capabilities`, `catalog`, … | [`v2`] |
 //! | the WebSocket session | [`ws`] |
 //! | `add`, `history`, `delete`, `start`, the legacy subscription and cookie routes | [`v1`] |
+//! | the embedded web UI, its assets and its manifest | [`web`] |
 //! | `download/*`, `audio_download/*`, `Range`, the JSON listing | [`files`] |
 //! | `healthz`, `livez` | [`health`] |
 //!
@@ -60,6 +62,7 @@ pub mod trace;
 pub mod v1;
 pub mod v2;
 pub mod view;
+pub mod web;
 pub mod ws;
 
 use std::sync::atomic::{AtomicI64, AtomicU64};
@@ -288,8 +291,13 @@ impl ApiState {
 /// under v1 because a v1 client uses them, not because the shim re-implements them).
 pub fn router(state: ApiState) -> Router {
     let p = state.cfg.url_prefix.clone();
+    // `GET <p>` is content-negotiated: an `Accept` list containing `text/html` gets the embedded
+    // page, and everything else — `application/json`, the bare `*/*` that `curl` sends, no
+    // `Accept` at all — gets the identity document byte for byte, which is what the iOS app and
+    // every existing script depend on. With `AULOS_WEB_UI=false` it is the identity document for
+    // every `Accept`.
     let open: Router = Router::new()
-        .route(&p.route(""), get(v2::meta::identity))
+        .route(&p.route(""), get(web::root))
         .route(&p.route("version"), get(v2::meta::version))
         .route(&p.route("robots.txt"), get(v2::meta::robots))
         .route(&p.route("healthz"), get(health::healthz))
@@ -308,6 +316,18 @@ pub fn router(state: ApiState) -> Router {
             state.clone(),
             auth::require,
         ));
+
+    // The page, its two assets, its two icons and its manifest are served **without** auth even
+    // when `AULOS_API_TOKEN` or the trusted-proxy header is configured: they hold nothing secret,
+    // a browser cannot put a bearer token on a document navigation, and the page's own job is to
+    // turn a 401 from the API into a token prompt. Every API route below keeps its auth unchanged.
+    // With `AULOS_WEB_UI=false` nothing is registered, so the routes fall through to
+    // `no_such_route` and answer the standard `404 not_found` envelope.
+    let open = if state.cfg.web_ui {
+        open.merge(web::router(state.clone()))
+    } else {
+        open
+    };
 
     let mut router = open.merge(guarded);
     if let Some(layer) = cors::v2(&state.cfg.cors_allowed_origins) {
