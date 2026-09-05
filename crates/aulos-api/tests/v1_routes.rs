@@ -21,6 +21,9 @@ use aulos_core::{
     SourceKind, SourceRef, Status,
 };
 use aulos_provider::fake::FakeProvider;
+use aulos_provider::{
+    DownloadCtx, Match, Outcome, ProgressSink, Provider, ProviderError, ProviderHealth, ResolveCtx,
+};
 use aulos_store::{Durability, Store, WriteOp};
 use serde_json::{Value, json};
 use support::{Rig, for_each_prefix, ytdlp_like};
@@ -1365,6 +1368,92 @@ async fn the_advisory_snap_does_not_loosen_a_real_catalog() {
     assert_eq!(body["error"]["field"], "format");
 }
 
+/// A provider that walks the **real** frame path — `ProgressSink` → aggregator → engine — and then
+/// parks at a gate the test opens.
+///
+/// Injecting the frame through `engine.stage(…)` instead would assert the same values while
+/// testing a different code path: a handle call is ordered against the outcome by the command
+/// channel, and it is precisely the *unordered* provider frame that lost in production
+/// (`aulos_provider_ytdlp`'s `on_pp` → `sink.stage(Stage::Postprocessing, …)`, DESIGN §9.5).
+/// Parking also removes the wall clock: the frame is on the wire, the outcome is not, and the test
+/// decides when that changes.
+struct Postprocessing {
+    inner: FakeProvider,
+    line: &'static str,
+    gate: Arc<tokio::sync::Notify>,
+    /// Whether the download fails once the gate opens, instead of producing a file.
+    fails: bool,
+}
+
+#[async_trait::async_trait]
+impl Provider for Postprocessing {
+    fn id(&self) -> aulos_provider::ProviderId {
+        self.inner.id()
+    }
+
+    fn matches(&self, url: &url::Url) -> Match {
+        self.inner.matches(url)
+    }
+
+    fn catalog(&self) -> Arc<aulos_core::FormatCatalog> {
+        self.inner.catalog()
+    }
+
+    async fn resolve(
+        &self,
+        url: &url::Url,
+        ctx: ResolveCtx<'_>,
+    ) -> Result<Vec<aulos_provider::MediaEntry>, ProviderError> {
+        self.inner.resolve(url, ctx).await
+    }
+
+    async fn download(
+        &self,
+        ctx: DownloadCtx<'_>,
+        sink: ProgressSink,
+    ) -> Result<Outcome, ProviderError> {
+        sink.stage(aulos_provider::Stage::Preparing, None).await;
+        sink.stage(aulos_provider::Stage::Downloading, None).await;
+        sink.stage(
+            aulos_provider::Stage::Postprocessing,
+            Some(self.line.into()),
+        )
+        .await;
+        self.gate.notified().await;
+        if self.fails {
+            return Err(ProviderError::from_code(
+                aulos_core::ErrorCode::Unavailable,
+                "no video formats found",
+            ));
+        }
+        let name = "A video.mp4";
+        std::fs::write(ctx.out_dir.join(name), vec![0_u8; 1_024])
+            .map_err(|e| ProviderError::Disk(e.to_string()))?;
+        let mut outcome = Outcome::file(aulos_core::RelPath::parse(name).unwrap(), 1_024);
+        outcome.entry_final = Some(ctx.entry.state.clone());
+        Ok(outcome)
+    }
+
+    async fn probe(&self) -> ProviderHealth {
+        self.inner.probe().await
+    }
+}
+
+/// The provider above on `fake.test`, plus the gate that releases its outcome.
+fn postprocessing(fails: bool) -> (Arc<Postprocessing>, Arc<tokio::sync::Notify>) {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(Postprocessing {
+        inner: FakeProvider::from_toml(
+            "id = \"fake\"\nscore = 200\nstrong = true\nhosts = [\"fake.test\"]\n",
+        )
+        .expect("the provider must parse"),
+        line: "MoveFiles…",
+        gate: Arc::clone(&gate),
+        fails,
+    });
+    (provider, gate)
+}
+
 /// The same bug through the legacy surface the shipped clients read: `GET history`'s `done[]`.
 ///
 /// v1 overloaded `msg` — the live stage line for a running item, the failure text for a terminal
@@ -1372,54 +1461,25 @@ async fn the_advisory_snap_does_not_loosen_a_real_catalog() {
 /// there as it is on v2. It is `null` on `done[]`, and the `error` projection is untouched.
 #[tokio::test]
 async fn a_finished_history_entry_carries_no_postprocessor_line() {
-    /// `preparing → downloading → a window this test can act in → finished`.
-    fn slow_finish() -> FakeProvider {
-        FakeProvider::from_toml(
-            r#"
-            id     = "fake"
-            score  = 200
-            strong = true
-            hosts  = ["fake.test"]
-
-            [[timeline]]
-            download = [
-                { kind = "stage", stage = "preparing" },
-                { kind = "stage", stage = "downloading" },
-                { kind = "wait",  ms = 900 },
-                { kind = "finish", filename = "A video.mp4", size = 1024 },
-            ]
-        "#,
-        )
-        .expect("the slow provider must parse")
-    }
-
+    let (provider, gate) = postprocessing(false);
     let rig = Rig::builder("/")
         .without_default_providers()
         .env("AULOS_RESOLVE_FALLTHROUGH", "false")
         .provider(Arc::new(ytdlp_like()))
-        .provider(Arc::new(slow_finish()))
+        .provider(provider)
         .start()
         .await;
     let id = rig.add("https://fake.test/watch/pp").await;
-    rig.until_status(&id, "downloading").await;
 
-    // The shim's last `pp` frame (DESIGN §9.5), on an item that is still running.
-    rig.state
-        .engine
-        .stage(
-            id.parse::<ItemId>().expect("a ULID"),
-            aulos_provider::Stage::Postprocessing,
-            Some("MoveFiles…".into()),
-        )
-        .await;
     let running = rig
         .until(
-            "the postprocessor line",
+            "the live postprocessor line",
             |item| item["msg"] == "MoveFiles…",
             &id,
         )
         .await;
     assert_eq!(running["status"], "postprocessing", "{running}");
+    gate.notify_one();
 
     rig.until_status(&id, "finished").await;
     rig.settle().await;
@@ -1439,4 +1499,55 @@ async fn a_finished_history_entry_carries_no_postprocessor_line() {
         "a finished row's status line is null, not the last postprocessor: {body}"
     );
     assert_eq!(done[0]["error"], Value::Null);
+}
+
+/// The other terminal status: a job that fails **during** postprocessing must not report
+/// `"MoveFiles…"` as its subtitle either.
+///
+/// v1 hid half of this from the bug report. `project_item` substitutes the *error text* into `msg`
+/// for an `error` row, so `GET history` looked correct even while the row underneath it carried
+/// the stage line — which is what a v2 client (and the shipped WS) actually renders. Both surfaces
+/// are asserted here; the v2 half is the one that was wrong.
+#[tokio::test]
+async fn a_failed_item_reports_its_error_rather_than_its_last_stage() {
+    let (provider, gate) = postprocessing(true);
+    let rig = Rig::builder("/")
+        .without_default_providers()
+        .env("AULOS_RESOLVE_FALLTHROUGH", "false")
+        .provider(Arc::new(ytdlp_like()))
+        .provider(provider)
+        .start()
+        .await;
+    let id = rig.add("https://fake.test/watch/pp").await;
+    rig.until(
+        "the live postprocessor line",
+        |item| item["msg"] == "MoveFiles…",
+        &id,
+    )
+    .await;
+    gate.notify_one();
+
+    let failed = rig.until_status(&id, "error").await;
+    assert!(
+        failed.get("msg").is_some(),
+        "the key is always present: {failed}"
+    );
+    assert_eq!(
+        failed["msg"],
+        Value::Null,
+        "v2 renders `msg` as the row's subtitle; the reason belongs in `error`: {failed}"
+    );
+    assert_eq!(failed["error"]["code"], "unavailable", "{failed}");
+
+    // And v1's overload still reads as legacy clients expect, off `error` rather than off `msg`.
+    rig.settle().await;
+    let (_, body) = rig.get("history").await;
+    let done = body["done"].as_array().expect("done");
+    assert_eq!(done.len(), 1, "{body}");
+    assert_eq!(done[0]["status"], "error");
+    assert!(
+        done[0]["error"].is_string(),
+        "the reason is reported: {body}"
+    );
+    assert_eq!(done[0]["msg"], done[0]["error"], "legacy overloaded msg");
 }

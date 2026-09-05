@@ -9,6 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aulos_core::{ComponentHealth, ComponentStatus};
+use aulos_provider::fake::FakeProvider;
+use aulos_provider::{
+    DownloadCtx, Match, Outcome, ProgressSink, Provider, ProviderError, ProviderHealth, ResolveCtx,
+};
 use aulos_queue::FrameKind;
 use serde_json::{Value, json};
 use support::{
@@ -728,6 +732,85 @@ async fn a_lagging_client_gets_one_fresh_snapshot() {
     );
 }
 
+/// A provider that walks the **real** frame path — `ProgressSink` → aggregator → engine — and then
+/// parks at a gate the test opens.
+///
+/// Injecting the frame through `engine.stage(…)` instead would assert the same wire values while
+/// testing a different code path: a handle call is ordered against the outcome by the command
+/// channel, and it is precisely the *unordered* provider frame that lost in production
+/// (`aulos_provider_ytdlp`'s `on_pp` → `sink.stage(Stage::Postprocessing, …)`, DESIGN §9.5).
+/// Parking also removes the wall clock: the frames are on the wire, the outcome is not, and the
+/// test decides when that changes.
+struct Postprocessing {
+    inner: FakeProvider,
+    line: &'static str,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Postprocessing {
+    fn id(&self) -> aulos_provider::ProviderId {
+        self.inner.id()
+    }
+
+    fn matches(&self, url: &url::Url) -> Match {
+        self.inner.matches(url)
+    }
+
+    fn catalog(&self) -> Arc<aulos_core::FormatCatalog> {
+        self.inner.catalog()
+    }
+
+    async fn resolve(
+        &self,
+        url: &url::Url,
+        ctx: ResolveCtx<'_>,
+    ) -> Result<Vec<aulos_provider::MediaEntry>, ProviderError> {
+        self.inner.resolve(url, ctx).await
+    }
+
+    async fn download(
+        &self,
+        ctx: DownloadCtx<'_>,
+        sink: ProgressSink,
+    ) -> Result<Outcome, ProviderError> {
+        sink.stage(aulos_provider::Stage::Preparing, None).await;
+        sink.stage(aulos_provider::Stage::Downloading, None).await;
+        // Exactly what the shim emits for
+        // `{"t":"pp","postprocessor":"MoveFiles","status":"started"}` (DESIGN §9.5).
+        sink.stage(
+            aulos_provider::Stage::Postprocessing,
+            Some(self.line.into()),
+        )
+        .await;
+        self.gate.notified().await;
+        let name = "A video.mp4";
+        std::fs::write(ctx.out_dir.join(name), vec![0_u8; 1_024])
+            .map_err(|e| ProviderError::Disk(e.to_string()))?;
+        let mut outcome = Outcome::file(aulos_core::RelPath::parse(name).unwrap(), 1_024);
+        outcome.entry_final = Some(ctx.entry.state.clone());
+        Ok(outcome)
+    }
+
+    async fn probe(&self) -> ProviderHealth {
+        self.inner.probe().await
+    }
+}
+
+/// The provider above on `fake.test`, plus the gate that releases its outcome.
+fn postprocessing() -> (Arc<Postprocessing>, Arc<tokio::sync::Notify>) {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(Postprocessing {
+        inner: FakeProvider::from_toml(
+            "id = \"fake\"\nscore = 200\nstrong = true\nhosts = [\"fake.test\"]\n",
+        )
+        .expect("the provider must parse"),
+        line: "MoveFiles…",
+        gate: Arc::clone(&gate),
+    });
+    (provider, gate)
+}
+
 /// A finished download must not carry the postprocessor line it ran last.
 ///
 /// Production shipped one that did: yt-dlp's `MoveFiles` frame stayed in `msg` through the
@@ -738,70 +821,45 @@ async fn a_lagging_client_gets_one_fresh_snapshot() {
 /// client showing the stale line forever.
 #[tokio::test]
 async fn a_finished_item_clears_its_postprocessor_line_on_the_wire() {
-    /// `preparing → downloading → a window this test can act in → finished`.
-    fn slow_finish() -> aulos_provider::fake::FakeProvider {
-        aulos_provider::fake::FakeProvider::from_toml(
-            r#"
-            id     = "fake"
-            score  = 200
-            strong = true
-            hosts  = ["fake.test"]
-
-            [[timeline]]
-            download = [
-                { kind = "stage", stage = "preparing" },
-                { kind = "stage", stage = "downloading" },
-                { kind = "wait",  ms = 900 },
-                { kind = "finish", filename = "A video.mp4", size = 1024 },
-            ]
-        "#,
-        )
-        .expect("the slow provider must parse")
-    }
-
+    let (provider, gate) = postprocessing();
     let rig = Rig::builder("/")
         .without_default_providers()
         .provider(Arc::new(ytdlp_like()))
-        .provider(Arc::new(slow_finish()))
+        .provider(provider)
         .start()
         .await;
-    let id = rig.add("https://fake.test/watch/pp").await;
-    rig.until_status(&id, "downloading").await;
 
     let mut socket = connect(&rig, "ws").await;
     next_frame_of(&mut socket, "snapshot").await;
+    let id = rig.add("https://fake.test/watch/pp").await;
 
-    // Exactly what the shim turns `{"t":"pp","postprocessor":"MoveFiles","status":"started"}`
-    // into (DESIGN §9.5): a stage frame with a human line, on an item that is still running.
-    rig.state
-        .engine
-        .stage(
-            id.parse::<aulos_core::ItemId>().expect("a ULID"),
-            aulos_provider::Stage::Postprocessing,
-            Some("MoveFiles…".into()),
-        )
-        .await;
-
+    // Read deltas until the live line is on the wire, then — and only then — let the download
+    // finish. Nothing here waits on a clock.
     let mut live_line: Option<Value> = None;
-    let completed = loop {
+    while live_line.is_none() {
         let frame = next_frame(&mut socket).await;
-        match frame["t"].as_str() {
-            Some("delta") => {
-                if let Some(msg) = frame["items"][0].get("msg") {
-                    live_line = Some(msg.clone());
-                }
-            }
-            Some("completed") => break frame,
-            _ => {}
+        if frame["t"] == "delta"
+            && let Some(msg) = frame["items"][0].get("msg")
+            && msg == &json!("MoveFiles…")
+        {
+            live_line = Some(msg.clone());
         }
-    };
+    }
     assert_eq!(
         live_line,
         Some(json!("MoveFiles…")),
         "the line is on the wire while the postprocessor runs"
     );
+    gate.notify_one();
 
+    let completed = loop {
+        let frame = next_frame(&mut socket).await;
+        if frame["t"] == "completed" {
+            break frame;
+        }
+    };
     let item = &completed["items"][0];
+    assert_eq!(item["id"], json!(id));
     assert_eq!(item["status"], "finished");
     assert!(
         item.get("msg").is_some(),

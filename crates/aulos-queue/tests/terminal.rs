@@ -1,75 +1,177 @@
-//! What a row is left carrying after the terminal write (DESIGN §8.7, §8.10, §13; PROTOCOL §2.4,
-//! §3.1).
+//! What a row is left carrying after the terminal write (DESIGN §8.7, §8.10, §13; PROTOCOL §2.3,
+//! §2.4, §3.1).
 //!
 //! `msg` is the **live** status line — the stage label a provider last wrote, or the pre-terminal
 //! hook's label — and production shipped it straight into the terminal row: yt-dlp's last
 //! postprocessor frame (`"MoveFiles…"`, DESIGN §9.5) was still there on every finished download,
 //! so a completed item rendered as a job stuck in its final postprocessor. These are the
-//! regressions for that, and for the late frames that could put it back.
+//! regressions for that, for the other terminal statuses that had the same hole, for the group
+//! roll-up that writes a terminal status without going through `Engine::terminate`, and for the
+//! late frames that could put the line back.
+//!
+//! **No test here waits on wall-clock time.** The provider parks at a [`Gate`] and the test opens
+//! it only once it has *observed* the state it wanted to act in, so the ordering every assertion
+//! depends on is a barrier rather than a sleep long enough to probably win.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aulos_core::{ErrorCode, Status};
-use aulos_provider::Stage;
+use aulos_core::{
+    DownloadRequest, ErrorCode, GroupId, Item, ItemId, Kind, SourceKind, SourceRef, Status,
+};
 use aulos_provider::fake::FakeProvider;
-use support::{AlwaysPreTerminal, Harness};
+use aulos_provider::{
+    DownloadCtx, Match, MediaEntry, Outcome, ProgressSink, Provider, ProviderError, ProviderHealth,
+    ProviderId, ResolveCtx, Stage,
+};
+use aulos_queue::Action;
+use support::{AlwaysPreTerminal, Harness, selection};
+use tokio_util::sync::CancellationToken;
 
 /// The postprocessor line yt-dlp's shim writes for its last `pp` frame (DESIGN §9.5).
 const MOVE_FILES: &str = "MoveFiles…";
 
-/// A provider that holds the item in `downloading` long enough for a test to slip a postprocessor
-/// frame in behind it — the same race production loses — and then finishes.
-fn slow_finish() -> FakeProvider {
-    scripted("{ kind = \"finish\", filename = \"A video.mp4\", size = 1024 }")
+// ---------------------------------------------------------------------------
+// the gated provider
+// ---------------------------------------------------------------------------
+
+/// A one-way gate a test opens once it has seen what it was waiting for.
+type Gate = CancellationToken;
+
+/// How a gated download ends once its gate opens.
+#[derive(Clone, Copy)]
+enum Ending {
+    /// One small file.
+    Finish,
+    /// A non-retryable failure (DESIGN §8.8), so the item terminates rather than backing off.
+    Fail(ErrorCode),
 }
 
-/// The same, failing instead of finishing. `unavailable` is not retryable (DESIGN §8.8), so the
-/// item terminates rather than arming a backoff.
-fn slow_failure() -> FakeProvider {
-    scripted("{ kind = \"fail\", code = \"unavailable\" }")
+/// A provider that walks the **real** frame path — `ProgressSink` → aggregator → engine, the one
+/// `EngineCmd::Finished` races (DESIGN §15.1) — and then parks at a gate.
+///
+/// It exists because injecting a frame through the engine handle proves nothing about that race:
+/// a handle call is ordered against the outcome by the command channel, a provider frame is not.
+/// Parking at the gate is what makes the ordering exact without a sleep: the frames are on the
+/// wire, the outcome is not, and the test decides when that changes.
+struct Gated {
+    /// Delegate for everything that is not `download`.
+    inner: FakeProvider,
+    /// The `Postprocessing` line to emit before parking, if any.
+    line: Option<&'static str>,
+    gate: Gate,
+    ending: Ending,
+    /// Calls with an index below this run straight through, so a *restarted* run can be the one
+    /// that parks.
+    gate_from: usize,
+    calls: AtomicUsize,
 }
 
-/// `preparing → downloading → a window a test can act in → `last``.
-fn scripted(last: &str) -> FakeProvider {
-    FakeProvider::from_toml(&format!(
-        r#"
-        id = "fake"
-        score = 200
-        hosts = ["fake.test"]
+impl Gated {
+    fn new(ending: Ending) -> Self {
+        Self {
+            inner: FakeProvider::from_toml("id = \"fake\"\nscore = 200\nhosts = [\"fake.test\"]\n")
+                .unwrap(),
+            line: None,
+            gate: Gate::new(),
+            ending,
+            gate_from: 0,
+            calls: AtomicUsize::new(0),
+        }
+    }
 
-        [[timeline]]
-        download = [
-            {{ kind = "stage", stage = "preparing" }},
-            {{ kind = "stage", stage = "downloading" }},
-            {{ kind = "wait", ms = 900 }},
-            {last},
-        ]
-    "#
-    ))
-    .unwrap()
+    /// Emits `line` as a `postprocessing` stage frame before parking.
+    fn with_line(mut self, line: &'static str) -> Self {
+        self.line = Some(line);
+        self
+    }
+
+    /// Lets the first `n` downloads run to their ending without parking.
+    fn gate_from(mut self, n: usize) -> Self {
+        self.gate_from = n;
+        self
+    }
+
+    fn gate(&self) -> Gate {
+        self.gate.clone()
+    }
 }
 
-/// The bug, end to end: a postprocessor line is on the row while it runs, and gone the moment it
-/// is `finished` — on the persisted row and on the view the `completed` frame is built from.
-#[tokio::test]
-async fn a_finished_item_carries_no_postprocessor_message() {
-    let h = Harness::builder()
-        .provider(Arc::new(slow_finish()))
-        .build()
-        .await;
-    let id = h.add("https://fake.test/watch/pp").await;
-    h.until_status(id, Status::Downloading).await;
+#[async_trait::async_trait]
+impl Provider for Gated {
+    fn id(&self) -> ProviderId {
+        self.inner.id()
+    }
 
-    // Exactly what the shim emits for `{"t":"pp","postprocessor":"MoveFiles","status":"started"}`.
-    h.sink
-        .for_item(id)
-        .stage(Stage::Postprocessing, Some(MOVE_FILES.into()))
-        .await;
+    fn matches(&self, url: &url::Url) -> Match {
+        self.inner.matches(url)
+    }
+
+    fn catalog(&self) -> Arc<aulos_core::FormatCatalog> {
+        self.inner.catalog()
+    }
+
+    async fn resolve(
+        &self,
+        url: &url::Url,
+        ctx: ResolveCtx<'_>,
+    ) -> Result<Vec<MediaEntry>, ProviderError> {
+        self.inner.resolve(url, ctx).await
+    }
+
+    async fn download(
+        &self,
+        ctx: DownloadCtx<'_>,
+        sink: ProgressSink,
+    ) -> Result<Outcome, ProviderError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        sink.stage(Stage::Preparing, None).await;
+        sink.stage(Stage::Downloading, None).await;
+        if call >= self.gate_from {
+            if let Some(line) = self.line {
+                // Exactly what the shim emits for
+                // `{"t":"pp","postprocessor":"MoveFiles","status":"started"}` (DESIGN §9.5).
+                sink.stage(Stage::Postprocessing, Some(line.into())).await;
+            }
+            tokio::select! {
+                () = self.gate.cancelled() => {}
+                () = ctx.cancel.cancelled() => return Err(ProviderError::Canceled),
+            }
+        }
+        match self.ending {
+            Ending::Fail(code) => Err(ProviderError::from_code(code, "scripted failure")),
+            Ending::Finish => {
+                let name = "A video.mp4";
+                std::fs::write(ctx.out_dir.join(name), vec![0_u8; 1_024])
+                    .map_err(|e| ProviderError::Disk(e.to_string()))?;
+                let mut outcome = Outcome::file(aulos_core::RelPath::parse(name).unwrap(), 1_024);
+                outcome.entry_final = Some(ctx.entry.state.clone());
+                Ok(outcome)
+            }
+        }
+    }
+
+    async fn probe(&self) -> ProviderHealth {
+        self.inner.probe().await
+    }
+}
+
+/// A harness whose only provider parks at a gate carrying the postprocessor line, plus that gate.
+async fn parked(ending: Ending) -> (Harness, Gate) {
+    let provider = Arc::new(Gated::new(ending).with_line(MOVE_FILES));
+    let gate = provider.gate();
+    let h = Harness::builder().provider(provider).build().await;
+    (h, gate)
+}
+
+/// Waits for the row to be carrying the live postprocessor line, and fails loudly if it never is —
+/// the assertion that keeps every "and then it is gone" below from passing vacuously.
+async fn until_live_line(h: &Harness, id: ItemId) -> Item {
     let running = h
-        .until(id, "the postprocessor line", |i| {
+        .until(id, "the live postprocessor line", |i| {
             i.msg.as_deref() == Some(MOVE_FILES)
         })
         .await;
@@ -78,6 +180,21 @@ async fn a_finished_item_carries_no_postprocessor_message() {
         Status::Postprocessing,
         "the line belongs to a real state while it is live"
     );
+    running
+}
+
+// ---------------------------------------------------------------------------
+// the terminal write
+// ---------------------------------------------------------------------------
+
+/// The bug, end to end: a postprocessor line is on the row while it runs, and gone the moment it
+/// is `finished` — on the persisted row and on the view the `completed` frame is built from.
+#[tokio::test]
+async fn a_finished_item_carries_no_postprocessor_message() {
+    let (h, gate) = parked(Ending::Finish).await;
+    let id = h.add("https://fake.test/watch/pp").await;
+    until_live_line(&h, id).await;
+    gate.cancel();
 
     let done = h.until_status(id, Status::Finished).await;
     assert_eq!(
@@ -96,34 +213,44 @@ async fn a_finished_item_carries_no_postprocessor_message() {
     );
 }
 
-/// The other half of the rule: the clear is on **success**, not on every terminal write. Legacy
-/// overloaded `msg` with the failure text and the v1 shim still projects it that way, so a failed
-/// row keeps its last line.
+/// The same defect on the other terminal status. `"MoveFiles…"` is no more a *reason* for a
+/// failure than it is for a success, and a v2 client renders `msg` as the row's subtitle either
+/// way — the only thing that hid this on v1 is the shim substituting the error text.
 #[tokio::test]
-async fn a_failed_item_keeps_its_message_beside_its_error() {
-    let h = Harness::builder()
-        .provider(Arc::new(slow_failure()))
-        .build()
-        .await;
+async fn a_failed_item_carries_no_postprocessor_message_either() {
+    let (h, gate) = parked(Ending::Fail(ErrorCode::Unavailable)).await;
     let id = h.add("https://fake.test/watch/pp").await;
-    h.until_status(id, Status::Downloading).await;
-
-    h.sink
-        .for_item(id)
-        .stage(Stage::Postprocessing, Some(MOVE_FILES.into()))
-        .await;
-    h.until(id, "the postprocessor line", |i| {
-        i.msg.as_deref() == Some(MOVE_FILES)
-    })
-    .await;
+    until_live_line(&h, id).await;
+    gate.cancel();
 
     let failed = h.until_status(id, Status::Error).await;
     assert_eq!(
-        failed.msg.as_deref(),
-        Some(MOVE_FILES),
-        "an errored row keeps the last thing it was doing"
+        failed.msg, None,
+        "a failed row's status line is null too; the reason is in `error`"
     );
-    assert_eq!(failed.error.unwrap().code, ErrorCode::Unavailable);
+    let error = failed.error.expect("the failure is still reported");
+    assert_eq!(error.code, ErrorCode::Unavailable);
+    assert!(!error.message.is_empty(), "with a message a human can read");
+}
+
+/// And on the third. A cancel lands on whatever the item was doing, so without the clear a
+/// cancelled row reads `"MoveFiles…"` exactly like a finished one did.
+#[tokio::test]
+async fn a_canceled_item_carries_no_postprocessor_message_either() {
+    let (h, _gate) = parked(Ending::Finish).await;
+    let id = h.add("https://fake.test/watch/pp").await;
+    until_live_line(&h, id).await;
+
+    h.handle.actions(Action::Cancel, vec![id], None).await;
+    let canceled = h.until_status(id, Status::Canceled).await;
+    assert_eq!(
+        canceled.msg, None,
+        "the live line does not survive a cancel"
+    );
+    assert_eq!(
+        canceled.error.expect("cancel records itself").code,
+        ErrorCode::Canceled
+    );
 }
 
 /// The pre-terminal phase writes its own label (DESIGN §13). It is a live line like any other, so
@@ -145,6 +272,84 @@ async fn a_pre_terminal_hook_label_does_not_survive_the_terminal_write() {
     assert_eq!(done.msg, None, "the hook's label is not a terminal summary");
     assert_eq!(done.size, Some(1_024), "and the outcome still landed");
 }
+
+// ---------------------------------------------------------------------------
+// the group roll-up
+// ---------------------------------------------------------------------------
+
+/// A group's terminal status is written by `Engine::sync_group_status`, **not** by
+/// `Engine::terminate` (DESIGN §8.6), so the rule has to hold there independently.
+///
+/// The row is seeded carrying `"Paused"` rather than driven into that state through the API,
+/// because today no live writer reaches a group id: promotion clears `msg`, no provider frame
+/// carries a group, and a `pause` on a group finds it already rolled to `queued` by the time its
+/// own turn comes. That is a fact about the current callers, not an invariant — `park_running`
+/// will set `Paused` on whatever id it is handed and `expand_targets` does put a group id on its
+/// own target list — and a restart reloads whatever the column holds. This pins the roll-up so the
+/// next writer that does reach a group cannot reintroduce the reported symptom on it.
+#[tokio::test]
+async fn a_finished_group_carries_no_status_line() {
+    let mut group = seed_row(1, Status::Downloading, true);
+    group.kind = Kind::Group;
+    group.children_total = Some(1);
+    group.msg = Some("Paused".into());
+    let gid: GroupId = group.id;
+
+    let mut child = seed_row(2, Status::Queued, true);
+    child.group_id = Some(gid);
+    child.group_index = Some(1);
+
+    let h = Harness::builder().seed(vec![group, child]).build().await;
+
+    let rolled = h
+        .until(gid, "the group's terminal roll-up", |i| {
+            i.status.is_terminal()
+        })
+        .await;
+    assert_eq!(rolled.status, Status::Finished, "its only child finished");
+    assert_eq!(
+        rolled.msg, None,
+        "a group's roll-up clears the line the same way an item's terminal write does"
+    );
+}
+
+/// A seed row in whatever state a test needs (the shape `tests/recovery.rs` uses).
+fn seed_row(ord: i64, status: Status, auto_start: bool) -> Item {
+    let url = url::Url::parse(&format!("https://fake.test/watch/{ord}")).unwrap();
+    Item {
+        id: ItemId::new(),
+        kind: Kind::Item,
+        group_id: None,
+        group_index: None,
+        ord,
+        url: url.clone(),
+        canonical_key: format!("fake\u{1f}seed-{ord}").into(),
+        provider: Some(support::pid("fake")),
+        media_id: Some(format!("seed-{ord}").into()),
+        title: format!("Seed {ord}").into(),
+        status,
+        auto_start,
+        msg: None,
+        error: None,
+        request: DownloadRequest::new(url, selection()),
+        entry: None,
+        filename: None,
+        size: None,
+        chapter_files: Vec::new(),
+        subtitle_files: Vec::new(),
+        created_at: 1_700_000_000_000 + ord,
+        started_at: None,
+        finished_at: None,
+        attempt: 0,
+        source: SourceRef::bare(SourceKind::ApiV2),
+        children_total: None,
+        clear_after: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// late frames
+// ---------------------------------------------------------------------------
 
 /// A stage frame the provider emitted before it finished can be handled after the outcome was:
 /// `ProgressMsg::Stage` goes provider → aggregator → engine, `EngineCmd::Finished` goes provider →
@@ -202,4 +407,58 @@ async fn a_stage_frame_that_arrives_during_the_finalizer_phase_is_refused() {
     h.handle.hooks_finished(id).await;
     let done = h.until_status(id, Status::Finished).await;
     assert_eq!(done.msg, None);
+}
+
+/// The awaiting-hooks refusal arm is scoped to *this* run, not to the id.
+///
+/// `postprocessing` is a running status, so a pause during the pre-terminal window takes
+/// `Engine::park_running`, which parks the row as `queued` — and used to leave the id in
+/// `pending_hooks` (only `cancel_one` cleared it). The restarted run's frames were then all
+/// refused by the arm this fix added, so the row sat at `preparing` with no `downloading`
+/// transition until the hook deadline fired `finalise_success` against the *previous* run's
+/// outcome, on a row with a live download process.
+#[tokio::test]
+async fn pausing_inside_the_pre_terminal_phase_frees_the_row_for_its_next_run() {
+    // Call 0 finishes at once, so the row reaches the pre-terminal phase; call 1 — the restarted
+    // run — parks at the gate where the test can look at it.
+    let provider = Arc::new(Gated::new(Ending::Finish).gate_from(1));
+    let gate = provider.gate();
+    let h = Harness::builder()
+        .provider(provider)
+        .pre_terminal(Arc::new(AlwaysPreTerminal("Re-encoding audio")))
+        .build()
+        .await;
+
+    let id = h.add("https://fake.test/watch/remux").await;
+    h.until(id, "the pre-terminal phase", |i| {
+        i.status == Status::Postprocessing && i.msg.as_deref() == Some("Re-encoding audio")
+    })
+    .await;
+
+    let paused = h.handle.actions(Action::Pause, vec![id], None).await;
+    assert_eq!(paused.applied, vec![id], "postprocessing is pausable");
+    let parked = h
+        .until(id, "the parked row", |i| i.status == Status::Queued)
+        .await;
+    assert_eq!(parked.msg.as_deref(), Some("Paused"));
+    assert!(!parked.auto_start, "parked means the user has to say go");
+
+    h.handle.actions(Action::Start, vec![id], None).await;
+    // The whole point: the restarted run's own frames are applied. Without the `pending_hooks`
+    // removal this never leaves `preparing`.
+    h.until(id, "the restarted run reporting progress", |i| {
+        i.status == Status::Downloading
+    })
+    .await;
+
+    gate.cancel();
+    h.until(id, "the second pre-terminal phase", |i| {
+        i.status == Status::Postprocessing && i.msg.as_deref() == Some("Re-encoding audio")
+    })
+    .await;
+    h.handle.hooks_finished(id).await;
+
+    let done = h.until_status(id, Status::Finished).await;
+    assert_eq!(done.msg, None);
+    assert_eq!(done.size, Some(1_024), "the second run's outcome landed");
 }

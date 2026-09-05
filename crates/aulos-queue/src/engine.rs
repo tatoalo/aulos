@@ -943,6 +943,13 @@ impl Engine {
     }
 
     /// Writes and publishes a group's rolled-up status when it has actually changed (DESIGN §8.6).
+    ///
+    /// A group's roll-up is a terminal write like any other, so it obeys the same `msg` rule as
+    /// [`Engine::terminate`]: the live line does not cross the terminal edge. A group row is not
+    /// supposed to carry one at all — promotion clears it (`crate::resolve`) and no provider ever
+    /// writes to a group id — but `Engine::park_running` will set `Paused` on whatever id it is
+    /// handed and `Engine::expand_targets` puts a group id on its own target list, so "nothing
+    /// writes `msg` here today" is a fact about callers, not an invariant. This makes it one.
     pub(crate) async fn sync_group_status(&mut self, group: GroupId) {
         let Some(acc) = self.groups.get(&group) else {
             return;
@@ -962,7 +969,11 @@ impl Engine {
                 vec![WriteOp::SetStatus {
                     id: group,
                     status: rolled,
-                    msg: FieldUpdate::Keep,
+                    msg: if rolled.is_terminal() {
+                        FieldUpdate::Clear
+                    } else {
+                        FieldUpdate::Keep
+                    },
                     error: FieldUpdate::Keep,
                     auto_start: None,
                     at,
@@ -978,6 +989,7 @@ impl Engine {
             g.status = rolled;
             if rolled.is_terminal() {
                 g.finished_at = Some(at);
+                g.msg = None;
             } else if from.is_terminal() {
                 g.finished_at = None;
             }
@@ -1128,29 +1140,33 @@ impl Engine {
 
     /// Writes a terminal status, arms `clear_after` and publishes `Completed` (DESIGN §8.10).
     ///
-    /// **`finished` clears `msg`** (PROTOCOL §2.4, §3.1). `msg` is the *live* status line — the
-    /// stage label a provider last wrote (`"MoveFiles…"`, `"Merging formats"`, DESIGN §9.5) or the
-    /// pre-terminal hook's label (`"Re-encoding audio"`, DESIGN §13) — and a client renders it as
-    /// the row's subtitle. Carrying the last one of those into the terminal row makes a completed
-    /// download read as a job stuck in its final postprocessor forever, which is what it did in
-    /// production. Nothing describes a successful download better than the empty string, so the
-    /// terminal write drops it.
+    /// **A terminal write always clears `msg`** (PROTOCOL §2.4, §3.1). `msg` is the *live* status
+    /// line — the stage label a provider last wrote (`"MoveFiles…"`, `"Merging formats"`,
+    /// DESIGN §9.5) or the pre-terminal hook's label (`"Re-encoding audio"`, DESIGN §13) — and a
+    /// client renders it as the row's subtitle. Carrying the last one of those into the terminal
+    /// row makes a completed download read as a job stuck in its final postprocessor forever,
+    /// which is what it did in production. Nothing describes a settled row better than the empty
+    /// string, so the live line stops at the terminal edge.
     ///
-    /// `error` and `canceled` **keep** it: legacy overloaded the field with the failure text, the
-    /// v1 shim still projects it that way (`aulos_api::v1::history`'s `msg`/`error` pair), and on
-    /// those two statuses the last live line is the closest thing to a reason there is.
+    /// `error` and `canceled` clear it too, and for the same reason: `"MoveFiles…"` is no more a
+    /// reason for a failure than it is for a success. The reason lives in `error`, which is
+    /// structured on v2 and which the v1 shim projects back into `msg` for legacy clients
+    /// (`aulos_api::v1::history`'s `(Status::Error, _, Some(text))` arm), so nothing that ever
+    /// showed a human a failure message loses one.
+    ///
+    /// A terminal *note* that is not a live line — the importer's "unknown legacy status", which
+    /// bypasses this path entirely — is still allowed on `error` and `canceled`. `finished` is the
+    /// one status where `msg` is unconditionally `null`, on every writer.
     pub(crate) async fn terminate(
         &mut self,
         id: ItemId,
         status: Status,
         error: FieldUpdate<aulos_core::WireError>,
     ) -> bool {
-        let msg = if status == Status::Finished {
-            FieldUpdate::Clear
-        } else {
-            FieldUpdate::Keep
-        };
-        if !self.write_status(id, status, msg, error, None).await {
+        if !self
+            .write_status(id, status, FieldUpdate::Clear, error, None)
+            .await
+        {
             return false;
         }
         if let Some(item) = self.cached(id) {

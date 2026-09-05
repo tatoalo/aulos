@@ -849,3 +849,45 @@ async fn the_whole_import_is_one_transaction() {
         "every row, subscription, seen id, chat and meta key must land in one commit"
     );
 }
+
+/// The importer is the one `msg` writer that bypasses the engine's terminal write, so it has to
+/// keep the rule itself: **a `finished` row's `msg` is always `null`** (PROTOCOL §2.3, §3.1).
+///
+/// Legacy overloaded `msg` with the live progress line and persisted whatever was on the record
+/// when it completed, so a real `completed.json` carries lines like `"MoveFiles…"` on finished
+/// entries. Imported verbatim they reproduce the reported bug on the imported half of the history —
+/// the half the bug report used as its *contrast* case, only because the reporter's own record
+/// happened to have none.
+#[tokio::test]
+async fn a_finished_legacy_record_does_not_import_its_live_status_line() {
+    let rig = Rig::new("mixed");
+    let path = rig.state.join("completed.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    doc["items"][0]["info"]["msg"] = serde_json::json!("MoveFiles…");
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    rig.run(opts()).await;
+    let items = rig.items().await;
+    let finished = by_url(&items, "mix2");
+    assert_eq!(finished.status, Status::Finished);
+    assert_eq!(
+        finished.msg, None,
+        "a finished import carries no live status line either"
+    );
+}
+
+/// The other half: a legacy record the importer could not map keeps the note it writes, because
+/// that note is a terminal *reason*, not a stale progress line.
+#[tokio::test]
+async fn an_unmappable_legacy_record_keeps_its_import_note() {
+    let rig = Rig::new("v2");
+    rig.run(opts()).await;
+    let items = rig.items().await;
+    let unknown = by_url(&items, "cAnc3ll3d");
+    assert_eq!(unknown.status, Status::Error);
+    assert_eq!(
+        unknown.msg.as_deref(),
+        Some("Imported with unknown legacy status: cancelled")
+    );
+}

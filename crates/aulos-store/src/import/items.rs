@@ -267,7 +267,19 @@ pub(crate) fn build(staged: &Staged, ord: Ord0, opts: ItemOpts) -> Result<Built,
 
     // --- error and timers ---------------------------------------------------------------------
     let error = r.error.as_deref().map(classify_error);
-    let msg = mapped.msg.or_else(|| r.msg.clone());
+    // The importer is the one `msg` writer that bypasses the engine's terminal write, so it has to
+    // keep that rule itself: a `finished` row's `msg` is always `null` (PROTOCOL §2.3, §3.1).
+    // Legacy overloaded the field with the live progress line and persisted whatever was on the
+    // record when it completed, so `completed.json` really does carry lines like `"MoveFiles…"` on
+    // finished entries — importing them verbatim reproduces the exact bug on the imported half of
+    // the history. A `mapped.msg` note ("unknown legacy status", "Restarted after upgrade") is a
+    // terminal reason rather than a live line and is never written on `finished`, so nothing is
+    // lost here.
+    let msg = if mapped.status == Status::Finished {
+        None
+    } else {
+        mapped.msg.or_else(|| r.msg.clone())
+    };
     let finished_at = mapped.status.is_terminal().then_some(created_at);
     let clear_after = finished_at
         .filter(|_| opts.clear_completed_after_s > 0)

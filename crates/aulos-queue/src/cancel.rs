@@ -145,6 +145,15 @@ impl Engine {
     ///
     /// The same `killpg` sequence as cancel, but the partial file is **kept** and `attempt` is
     /// unchanged, so `start` re-runs the job and yt-dlp resumes from the `.part`.
+    ///
+    /// `postprocessing` is a running status ([`Status::is_running`]), so this is also the path a
+    /// pause takes during the **pre-terminal hook** window (DESIGN §13), when the download is over
+    /// and the row is waiting on `HooksFinished`. The pending entry has to go with it, exactly as
+    /// [`Engine::cancel_one`] drops it: the outcome it holds belongs to a run the user has just
+    /// parked, so leaving it there would let `Engine::expire_pending_hooks` finalise a *stale*
+    /// outcome onto a row that is queued or downloading again — and would make
+    /// `Engine::handle_stage` refuse every frame of the restarted run, which watches its
+    /// awaiting-hooks arm.
     async fn park_running(&mut self, id: ItemId) {
         if let Some(slot) = self.running.get_mut(&id) {
             slot.settled = Some(Settled::Paused);
@@ -155,6 +164,7 @@ impl Engine {
             }
         }
         self.beats.disarm(id);
+        self.pending_hooks.remove(&id);
         // An SC job's partials go anyway: its m3u8 token is dead (DESIGN §8.7, §8.9).
         self.cleanup_partials(id, false);
         self.write_status(

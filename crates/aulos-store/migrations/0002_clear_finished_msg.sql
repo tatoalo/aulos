@@ -1,0 +1,16 @@
+-- 0002 — clear the stale live status line off rows a pre-fix build settled as `finished`.
+--
+-- `items.msg` is the *live* status line (PROTOCOL §2.3): the stage label a provider last wrote.
+-- Until the fix that ships with this migration, the terminal write kept it, so every download
+-- aulos completed itself was persisted carrying yt-dlp's last postprocessor frame — `"MoveFiles…"`
+-- — and every client rendered a finished row as a job stuck in its final postprocessor.
+--
+-- `set_status` is the only writer of that column and it is never re-run for a settled row, so the
+-- code fix alone is forward-only: the rows already on disk would keep the stale line for ever and
+-- boot recovery would load it straight back into the engine's cache. This rewrites them once.
+--
+-- Only `finished` is touched. `error` and `canceled` may legitimately carry a terminal *note* that
+-- was never a live line — the legacy importer writes "Imported with unknown legacy status: …" on a
+-- record whose status it could not map — and there is no way to tell those apart from a stale
+-- progress line in SQL. `finished` has no such note on any writer, so it is safe to null wholesale.
+UPDATE items SET msg = NULL WHERE status = 'finished' AND msg IS NOT NULL;

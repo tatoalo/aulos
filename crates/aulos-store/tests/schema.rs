@@ -142,3 +142,109 @@ async fn deleting_a_group_cascades_to_its_children() {
 
     assert!(h.store.item(child_id).await.unwrap().is_none());
 }
+
+/// Migration `0002` rewrites the rows a **pre-fix build already settled** (PROTOCOL §2.3).
+///
+/// `set_status` is the only writer of `items.msg` and it is never re-run for a settled row, so
+/// clearing the line at the terminal write is forward-only: without this migration the reporter's
+/// own `finished` row keeps `"MoveFiles…"` across the upgrade and boot recovery reloads it into
+/// the engine's cache, so the bug report's repro still prints the stale line after deploying.
+///
+/// The pre-fix database is reproduced the only honest way: a `finished` row really written with a
+/// `msg`, then `user_version` rolled back so the store has not seen `0002` yet.
+#[tokio::test]
+async fn the_backfill_clears_a_stale_status_line_off_rows_an_older_build_finished() {
+    use aulos_core::{FieldUpdate, Status};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(support::options(dir.path())).unwrap();
+    let item = support::item(0);
+    let id = item.id;
+    store
+        .write(
+            vec![
+                WriteOp::InsertItems { items: vec![item] },
+                WriteOp::SetStatus {
+                    id,
+                    status: Status::Finished,
+                    msg: FieldUpdate::Set("MoveFiles…".into()),
+                    error: FieldUpdate::Clear,
+                    auto_start: None,
+                    at: 1_757_000_000_000,
+                },
+            ],
+            Durability::Sync,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.item(id).await.unwrap().unwrap().msg.as_deref(),
+        Some("MoveFiles…"),
+        "the store itself is dumb: this is exactly what the buggy build persisted"
+    );
+    store.close().await.unwrap();
+
+    // Rewind to the schema the buggy build shipped, so the reopen has a migration to run.
+    let conn = Connection::open(support::db_path(dir.path())).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+
+    let upgraded = Store::open(support::options(dir.path())).unwrap();
+    assert_eq!(
+        upgraded.item(id).await.unwrap().unwrap().msg,
+        None,
+        "the upgrade rewrites the line the older build left behind"
+    );
+    assert_eq!(
+        upgraded
+            .meta()
+            .await
+            .unwrap()
+            .get("schema_version")
+            .map(std::convert::AsRef::as_ref),
+        Some("2"),
+        "and records the schema it migrated to"
+    );
+}
+
+/// The backfill is scoped to `finished`. `error` and `canceled` may carry a terminal *note* that
+/// was never a live progress line — the importer's "Imported with unknown legacy status: …" — and
+/// SQL cannot tell one from the other, so those rows are left alone.
+#[tokio::test]
+async fn the_backfill_leaves_a_failed_row_its_message() {
+    use aulos_core::{ErrorCode, FieldUpdate, Status, WireError};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(support::options(dir.path())).unwrap();
+    let item = support::item(0);
+    let id = item.id;
+    store
+        .write(
+            vec![
+                WriteOp::InsertItems { items: vec![item] },
+                WriteOp::SetStatus {
+                    id,
+                    status: Status::Error,
+                    msg: FieldUpdate::Set("Imported with unknown legacy status: cancelled".into()),
+                    error: FieldUpdate::Set(WireError::new(ErrorCode::Unavailable, "unavailable")),
+                    auto_start: None,
+                    at: 1_757_000_000_000,
+                },
+            ],
+            Durability::Sync,
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+
+    let conn = Connection::open(support::db_path(dir.path())).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+
+    let upgraded = Store::open(support::options(dir.path())).unwrap();
+    assert_eq!(
+        upgraded.item(id).await.unwrap().unwrap().msg.as_deref(),
+        Some("Imported with unknown legacy status: cancelled"),
+        "an import note is a reason, not a stale progress line"
+    );
+}
