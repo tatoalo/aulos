@@ -3078,6 +3078,12 @@ that knows about `last_rendered` and the per-chat interval. `healthz` exports
 Neither timeout cancels the download (parity). In board mode the two warnings are sent as
 **separate** messages — they are alerts, not state — and the board line gains a `⚠️`/`⏱️` marker.
 
+Both clocks time the **download**, not the wait: they start when the item first reaches a running
+status and are held off (and reset) while it sits `Queued`/`Resolving` or is paused back into the
+queue. An item merely waiting behind `MAX_CONCURRENT_DOWNLOADS` is not stalled, and with
+`AULOS_TELEGRAM_WATCH_ALL` on by default a large playlist or subscription batch would otherwise
+fire one bogus warning per queued item into every allowed chat.
+
 ### 12.6 The `Notifier` seam (for APNs later)
 
 ```rust

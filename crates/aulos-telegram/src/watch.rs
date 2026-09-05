@@ -35,8 +35,14 @@ pub use aulos_core::event::Notifier;
 pub struct Watched {
     /// The chats to notify.
     pub chats: BTreeSet<i64>,
-    /// When the watch began.
+    /// When the watch began — i.e. when the item was queued.
     pub started_at: Instant,
+    /// When the item last *started running*, or `None` while it is merely queued.
+    ///
+    /// Both watchdogs measure download time, not time spent waiting behind
+    /// `MAX_CONCURRENT_DOWNLOADS`, so they are held off entirely while this is `None`
+    /// (DESIGN §12.5).
+    pub running_since: Option<Instant>,
     /// The last time this job reported progress.
     pub last_progress_at: Instant,
     /// Chats already told it looks stalled.
@@ -125,9 +131,11 @@ impl WatchRegistry {
         if chats.is_empty() {
             return chats;
         }
+        let running = item.status.is_running();
         let entry = self.jobs.entry(item.id).or_insert_with(|| Watched {
             chats: BTreeSet::new(),
             started_at: now,
+            running_since: running.then_some(now),
             last_progress_at: now,
             stall_notified: BTreeSet::new(),
             timeout_notified: BTreeSet::new(),
@@ -140,9 +148,24 @@ impl WatchRegistry {
         chats
     }
 
-    /// Records that a watched job made progress, which is what keeps the stall watchdog honest.
+    /// Records that a watched job is **running** and made progress, which is what keeps the stall
+    /// watchdog honest.
+    ///
+    /// The first such call also starts the hard-timeout clock: an item that is only waiting behind
+    /// `MAX_CONCURRENT_DOWNLOADS` is not late, so neither watchdog may run until it starts.
     pub fn touch(&mut self, id: ItemId, now: Instant) {
         if let Some(w) = self.jobs.get_mut(&id) {
+            w.running_since.get_or_insert(now);
+            w.last_progress_at = now;
+        }
+    }
+
+    /// Records that a watched job is **not** running — still queued or resolving, or paused back
+    /// into the queue. Both watchdogs are held off until it runs again, and both clocks restart
+    /// from the moment it does.
+    pub fn park(&mut self, id: ItemId, now: Instant) {
+        if let Some(w) = self.jobs.get_mut(&id) {
+            w.running_since = None;
             w.last_progress_at = now;
         }
     }
@@ -182,11 +205,18 @@ impl WatchRegistry {
     /// Neither warning cancels the download — parity. Each one is recorded as sent before it is
     /// returned, so a caller that drops a message does not get it again; that matches legacy,
     /// where the `add` to `stall_notified` happened under the lock before the send.
+    ///
+    /// A job that has not started running is skipped by both watchdogs: with
+    /// `AULOS_TELEGRAM_WATCH_ALL` on, a 200-item playlist behind `MAX_CONCURRENT_DOWNLOADS=3`
+    /// would otherwise fire ~197 "stalled" messages into every allowed chat three minutes later.
     pub fn due_warnings(&mut self, now: Instant) -> Vec<Warning> {
         let mut out = Vec::new();
         for (id, w) in &mut self.jobs {
+            let Some(running_since) = w.running_since else {
+                continue;
+            };
             let since_progress = now.saturating_duration_since(w.last_progress_at);
-            let elapsed = now.saturating_duration_since(w.started_at);
+            let elapsed = now.saturating_duration_since(running_since);
             let stalled = since_progress > self.stall;
             let overrun = elapsed > self.hard;
             for chat in &w.chats {
@@ -236,6 +266,14 @@ mod tests {
     fn item(source: SourceRef) -> ItemView {
         let mut v = view_template();
         v.source = source;
+        v
+    }
+
+    /// A view in a given lifecycle state, which is what the two watchdogs key off.
+    fn item_in(source: SourceRef, status: Status, auto_start: bool) -> ItemView {
+        let mut v = item(source);
+        v.status = status;
+        v.auto_start = auto_start;
         v
     }
 
@@ -418,6 +456,97 @@ mod tests {
         let overrun = r.due_warnings(start + Duration::from_secs(7_201));
         assert_eq!(overrun.len(), 1);
         assert_eq!(overrun[0].kind, Mark::Timeout);
+    }
+
+    /// Regression (ops-5): a merely-*queued* item is not stalled, it is waiting behind
+    /// `MAX_CONCURRENT_DOWNLOADS`. With `AULOS_TELEGRAM_WATCH_ALL` on by default, letting the
+    /// watchdogs run from `Added` fanned one bogus "stalled" message per queued item out to every
+    /// allowed chat three minutes after a playlist or subscription batch landed.
+    #[tokio::test(start_paused = true)]
+    async fn neither_watchdog_fires_on_an_item_that_has_not_started() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7, 8]);
+        let start = Instant::now();
+
+        let queued = item_in(SourceRef::bare(SourceKind::ApiV2), Status::Queued, true);
+        // `auto_start = false` is the legacy *pending* bucket: also not started, also silent.
+        let pending = item_in(SourceRef::bare(SourceKind::ApiV2), Status::Queued, false);
+        r.watch(&queued, start);
+        r.watch(&pending, start);
+        assert_eq!(r.len(), 2);
+
+        assert!(r.due_warnings(start + Duration::from_secs(181)).is_empty());
+        assert!(
+            r.due_warnings(start + Duration::from_secs(7_201))
+                .is_empty()
+        );
+        assert!(r.get(queued.id).expect("watched").running_since.is_none());
+        assert_eq!(
+            r.get(queued.id).expect("watched").mark,
+            None,
+            "and the board line carries no warning glyph either"
+        );
+    }
+
+    /// …and both clocks start from the moment it does run.
+    #[tokio::test(start_paused = true)]
+    async fn both_clocks_start_when_the_item_leaves_the_queue() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let start = Instant::now();
+        let it = item_in(SourceRef::bare(SourceKind::ApiV2), Status::Queued, true);
+        r.watch(&it, start);
+
+        // An hour behind the concurrency limit, then it starts.
+        let began = start + Duration::from_secs(3_600);
+        r.touch(it.id, began);
+        assert_eq!(r.get(it.id).expect("watched").running_since, Some(began));
+
+        assert!(
+            r.due_warnings(began + Duration::from_secs(180)).is_empty(),
+            "the stall clock runs from the start of work, not from the add"
+        );
+        let stalls = r.due_warnings(began + Duration::from_secs(181));
+        assert_eq!(stalls.len(), 1);
+        assert_eq!(stalls[0].secs, 181);
+
+        assert!(
+            r.due_warnings(start + Duration::from_secs(7_201))
+                .is_empty(),
+            "the hard timeout is measured from `running_since` too"
+        );
+        let overruns = r.due_warnings(began + Duration::from_secs(7_201));
+        assert_eq!(overruns.len(), 1);
+        assert_eq!(overruns[0].kind, Mark::Timeout);
+        assert_eq!(overruns[0].secs, 7_201);
+    }
+
+    /// A pause writes `Downloading → Queued(auto_start = false)`; the item is queued again, so
+    /// both watchdogs stop until it resumes.
+    #[tokio::test(start_paused = true)]
+    async fn parking_a_running_item_holds_both_watchdogs_off() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let start = Instant::now();
+        let it = item(SourceRef::bare(SourceKind::ApiV2));
+        r.watch(&it, start);
+        assert_eq!(
+            r.get(it.id).expect("watched").running_since,
+            Some(start),
+            "the template view is already `Downloading`"
+        );
+
+        r.park(it.id, start + Duration::from_secs(60));
+        assert!(
+            r.due_warnings(start + Duration::from_secs(9_999))
+                .is_empty()
+        );
+
+        // Resuming restarts both clocks from the resume, not from the original add.
+        let resumed = start + Duration::from_secs(10_000);
+        r.touch(it.id, resumed);
+        assert!(
+            r.due_warnings(resumed + Duration::from_secs(180))
+                .is_empty()
+        );
+        assert_eq!(r.due_warnings(resumed + Duration::from_secs(181)).len(), 1);
     }
 
     #[tokio::test]

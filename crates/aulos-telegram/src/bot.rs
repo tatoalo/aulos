@@ -615,8 +615,14 @@ impl TelegramActor {
             DomainEvent::StatusChanged { id, view, .. } => {
                 if let Some(watched) = self.watches.get(*id) {
                     let chats: Vec<i64> = watched.chats.iter().copied().collect();
+                    let now = self.clock.instant();
+                    // The two watchdogs of DESIGN §12.5 time the *download*: an item still waiting
+                    // behind `MAX_CONCURRENT_DOWNLOADS` (or paused back into the queue) is parked,
+                    // so neither fires on it.
                     if view.status.is_running() {
-                        self.watches.touch(*id, self.clock.instant());
+                        self.watches.touch(*id, now);
+                    } else {
+                        self.watches.park(*id, now);
                     }
                     self.watches.retitle(view);
                     for chat in chats {
