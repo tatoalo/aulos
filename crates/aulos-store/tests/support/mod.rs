@@ -1,7 +1,9 @@
 //! Shared fixtures for the store's integration tests.
 //!
 //! Everything is a temporary file on the local disk, the flush window is five milliseconds so a
-//! batched write is not a 200 ms wait, and nothing touches the network.
+//! test that *does* want a batch to fill does not wait 200 ms for it, and nothing touches the
+//! network. (A lone batched write no longer waits out the window anywhere — the writer commits on
+//! the idle grace, DESIGN §7.1 — so the short window is a convenience, not a workaround.)
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};

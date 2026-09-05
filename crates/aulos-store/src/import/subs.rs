@@ -1,5 +1,7 @@
 //! `subscriptions.json` → the `subscriptions` and `subscription_seen` tables (DESIGN §7.6.4).
 
+use std::collections::HashSet;
+
 use aulos_core::{
     RelDir, SubId, SubscriptionRecord, SubtitleLang, SubtitleMode, UnixMs,
     normalize_download_selection,
@@ -175,16 +177,24 @@ fn seen_ids(obj: &Map<String, Value>, max: u32) -> Vec<Box<str>> {
     };
     let cap = if max == 0 { usize::MAX } else { max as usize };
     let mut out: Vec<Box<str>> = Vec::new();
+    // The membership set is what keeps this linear: the cap is 50 000 by default, and a scan of
+    // `out` per element made one busy subscription cost ~1.25e9 string comparisons on the
+    // cutover's critical path (DESIGN §19.3). The `Vec` still fixes the order.
+    let mut seen: HashSet<Box<str>> = HashSet::new();
     for v in a {
         let id = match v {
             Value::String(s) => s.trim().to_owned(),
             Value::Number(n) => n.to_string(),
             _ => continue,
         };
-        if id.is_empty() || out.iter().any(|k| **k == *id) {
+        if id.is_empty() {
             continue;
         }
-        out.push(id.into_boxed_str());
+        let id: Box<str> = id.into_boxed_str();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(id);
         if out.len() >= cap {
             break;
         }
@@ -327,6 +337,37 @@ mod tests {
         );
         assert_eq!(b.seen_at, 1_757_000_100_500);
         assert!(b.warnings.is_empty());
+    }
+
+    /// A full `SUBSCRIPTION_MAX_SEEN_IDS` list must dedupe in linear time.
+    ///
+    /// The importer runs before the listener binds during the cutover (DESIGN §19.3), so a scan of
+    /// the accumulator per element — 1.25e9 string comparisons at the default cap — is a hang the
+    /// operator watches. The bound is deliberately loose: the linear version is milliseconds, the
+    /// quadratic one is minutes in a debug build.
+    #[test]
+    fn a_full_seen_id_list_dedupes_without_a_quadratic_scan() {
+        let mut ids: Vec<Value> = (0..50_000)
+            .map(|n| Value::String(format!("video-{n:06}")))
+            .collect();
+        // Duplicates take the other branch; they must not extend the accumulator.
+        ids.extend((0..5_000).map(|n| Value::String(format!("video-{n:06}"))));
+        let mut v = legacy();
+        v.as_object_mut()
+            .expect("object")
+            .insert("seen_ids".to_owned(), Value::Array(ids));
+
+        let started = std::time::Instant::now();
+        let b = build(&v, 0, opts()).expect("must build");
+        let elapsed = started.elapsed();
+
+        assert_eq!(b.seen.len(), 50_000, "each id kept exactly once");
+        assert_eq!(&*b.seen[0], "video-000000", "in first-seen order");
+        assert_eq!(&*b.seen[49_999], "video-049999");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "deduping 55 000 seen ids took {elapsed:?}; the scan is quadratic again"
+        );
     }
 
     #[test]

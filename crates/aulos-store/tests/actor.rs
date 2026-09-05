@@ -140,25 +140,73 @@ async fn a_sync_write_short_circuits_the_flush_window() {
     );
 }
 
-/// A batched write does wait for its window — the property the batching claim rests on.
+/// A lone batched write commits on the idle grace, not on the flush window.
+///
+/// The window is a coalescing window, not a latency floor: with nothing behind it there is nothing
+/// to coalesce with. Every caller that awaits its own write before publishing the change (the
+/// engine's `queued → preparing → downloading` transitions, DESIGN §8) used to pay the whole
+/// `AULOS_DB_FLUSH_MS` per transition, three times over for one finished download.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_batched_write_waits_for_its_window() {
+async fn a_lone_batched_write_commits_on_the_idle_grace() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(support::options(dir.path()).with_flush_ms(300)).unwrap();
+    // A window long enough that waiting it out would be unmistakable.
+    let store = Store::open(support::options(dir.path()).with_flush_ms(2_000)).unwrap();
+
     let started = Instant::now();
-    store
-        .write(
-            vec![WriteOp::InsertItems {
-                items: vec![support::item(0)],
-            }],
-            Durability::Batched,
-        )
-        .await
-        .unwrap();
+    for ord in 0..5 {
+        store
+            .write(
+                vec![WriteOp::InsertItems {
+                    items: vec![support::item(ord)],
+                }],
+                Durability::Batched,
+            )
+            .await
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() >= Duration::from_millis(250),
-        "the writer extends the batch until AULOS_DB_FLUSH_MS expires"
+        elapsed < Duration::from_millis(1_000),
+        "5 isolated batched writes must not each wait out the 2 s window, took {elapsed:?}"
     );
+    assert_eq!(store.job_count(), 5);
+    assert_eq!(store.items(ItemFilter::default()).await.unwrap().total, 5);
+}
+
+/// A *stream* of batched writes still coalesces: the idle exit only fires on an idle channel.
+///
+/// Arrivals one millisecond apart, spanning far less than the flush window, must still land in a
+/// handful of transactions — that is the claim the single writer thread exists for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_of_batched_writes_still_coalesces() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(support::options(dir.path()).with_flush_ms(2_000)).unwrap();
+    let before = store.commit_count();
+
+    let mut tasks = Vec::with_capacity(60);
+    for ord in 0..60 {
+        let s = store.clone();
+        tasks.push(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ord as u64)).await;
+            s.write(
+                vec![WriteOp::InsertItems {
+                    items: vec![support::item(ord)],
+                }],
+                Durability::Batched,
+            )
+            .await
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+
+    let commits = store.commit_count() - before;
+    assert!(
+        commits <= 8,
+        "60 writes arriving 1 ms apart should coalesce, took {commits} transactions"
+    );
+    assert_eq!(store.items(ItemFilter::default()).await.unwrap().total, 60);
 }
 
 /// A deliberately locked database must surface as [`StoreError::Busy`], which `aulos-api` maps to

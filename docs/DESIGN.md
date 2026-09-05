@@ -1367,9 +1367,13 @@ to be killed first (§8.7).
 
 - Writer: **one** dedicated OS thread (`std::thread::spawn`, not a tokio worker) holding a
   `rusqlite::Connection`. It drains up to 256 jobs per loop iteration into **one** transaction,
-  extending the batch until `AULOS_DB_FLUSH_MS` (200) expires or 256 is reached. A `Sync` job
-  short-circuits the extension and commits immediately. This is what turns "500 playlist inserts"
-  into ~5 transactions instead of legacy's 500 whole-file JSON rewrites with 1000 `fsync`s.
+  extending the batch until `AULOS_DB_FLUSH_MS` (200) expires, 256 is reached, or **the channel has
+  been idle for 5 ms** (`IDLE_GRACE`). A `Sync` job short-circuits the extension and commits
+  immediately. This is what turns "500 playlist inserts" into ~5 transactions instead of legacy's
+  500 whole-file JSON rewrites with 1000 `fsync`s. The idle exit keeps the window a *coalescing*
+  window rather than a latency floor: a write with nothing arriving behind it commits in ~5 ms
+  instead of always paying the full 200 ms, which is what a caller awaiting its own write before
+  publishing a status change (§8) would otherwise pay per transition.
 - Readers: `ReadPool` = `Semaphore(AULOS_DB_READERS, default 4)` + that many threads, each with a
   `SQLITE_OPEN_READ_ONLY` connection. Reads never block writes (WAL).
 - Pragmas: `journal_mode=WAL`, `synchronous=NORMAL` (`AULOS_DB_SYNCHRONOUS=FULL` available),

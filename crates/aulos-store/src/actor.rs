@@ -6,10 +6,16 @@
 //! answer and no `Connection` ever crosses an `await`.
 //!
 //! The loop drains up to [`MAX_BATCH`] jobs into **one** transaction, extending the batch until
-//! `AULOS_DB_FLUSH_MS` expires. That is what turns a 500-item playlist into ~2 transactions
-//! instead of legacy's 500 whole-file JSON rewrites with 1 000 `fsync`s. A
-//! [`Durability::Sync`] job short-circuits the extension and commits immediately, with
-//! `PRAGMA synchronous = FULL` for the duration.
+//! `AULOS_DB_FLUSH_MS` expires, [`MAX_BATCH`] is reached, or the channel has been idle for
+//! [`IDLE_GRACE`]. That is what turns a 500-item playlist into ~2 transactions instead of legacy's
+//! 500 whole-file JSON rewrites with 1 000 `fsync`s. A [`Durability::Sync`] job short-circuits the
+//! extension and commits immediately, with `PRAGMA synchronous = FULL` for the duration.
+//!
+//! The idle exit is what keeps the window a *coalescing* window rather than a latency floor: there
+//! is nothing to coalesce a lone write with, so holding it for the full 200 ms only delayed the
+//! commit — and every caller that awaits its write before publishing an event (the engine's status
+//! transitions) paid that 200 ms per transition. Batching under load is unaffected: while writes
+//! keep arriving the batch keeps growing to the full window.
 //!
 //! **Poison isolation.** If any op in a batch fails, the batch is rolled back and then replayed
 //! one job at a time, each in its own transaction. Without that, one bad write — a `NotFound`
@@ -32,6 +38,14 @@ use crate::{alloc, items, kv, meta, schema, subscriptions, telegram};
 
 /// The most jobs one transaction may cover (DESIGN §7.1).
 pub(crate) const MAX_BATCH: usize = 256;
+
+/// How long the writer waits for the *next* job before committing the batch it already holds
+/// (DESIGN §7.1).
+///
+/// `AULOS_DB_FLUSH_MS` bounds how long a batch may keep growing; this bounds how long it may sit
+/// idle while growing. Deliberately much smaller than the flush window and deliberately not
+/// configurable: it is a floor on write latency, not a tuning knob.
+pub(crate) const IDLE_GRACE: Duration = Duration::from_millis(5);
 
 /// Counters the handle exposes for `healthz` and for the batching tests.
 #[derive(Debug, Default)]
@@ -164,16 +178,19 @@ pub(crate) fn run(
             WriteMsg::Checkpoint(tx) => checkpoint = Some(tx),
         }
 
-        // Extend the batch until the flush window closes, 256 jobs have accumulated, or a `Sync`
-        // job demands the platter now.
+        // Extend the batch until the flush window closes, 256 jobs have accumulated, the channel
+        // goes idle for `IDLE_GRACE`, or a `Sync` job demands the platter now.
         if close.is_none() && !flush.is_zero() {
             let deadline = Instant::now() + flush;
+            let grace = flush.min(IDLE_GRACE);
             while batch.len() < MAX_BATCH && !sync_now {
                 let now = Instant::now();
                 if now >= deadline {
                     break;
                 }
-                match rx.recv_timeout(deadline - now) {
+                // Never block past the deadline, and never block on an idle channel for longer
+                // than the grace: an isolated write has nothing to wait for.
+                match rx.recv_timeout((deadline - now).min(grace)) {
                     Ok(WriteMsg::Job(j)) => {
                         sync_now |= j.durability == Durability::Sync;
                         batch.push(j);

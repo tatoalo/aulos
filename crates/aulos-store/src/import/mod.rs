@@ -668,12 +668,17 @@ fn resolve_duplicates(
     counts: &HashMap<Collection, FileCounts>,
 ) -> Vec<Staged> {
     let mut kept: Vec<Staged> = Vec::with_capacity(staged.len());
+    // url → its position in `kept`. A scan per candidate made a `completed.json` of a few thousand
+    // rows cost tens of millions of string comparisons while the importer holds the boot
+    // (DESIGN §19.3); the index is order-preserving and picks the same winner.
+    let mut by_url: HashMap<Box<str>, usize> = HashMap::with_capacity(staged.len());
     for candidate in staged {
-        let existing = kept
-            .iter()
-            .position(|k| k.record.url == candidate.record.url);
+        let existing = by_url.get(&candidate.record.url).copied();
         match existing {
-            None => kept.push(candidate),
+            None => {
+                by_url.insert(candidate.record.url.clone(), kept.len());
+                kept.push(candidate);
+            }
             Some(i) => {
                 let (winner, loser) = if candidate.advancement() > kept[i].advancement() {
                     let loser = std::mem::replace(&mut kept[i], candidate);
@@ -817,6 +822,44 @@ mod tests {
         ] {
             assert!(stage(&bad, Collection::Queue, 0).is_err(), "{bad}");
         }
+    }
+
+    /// Duplicate resolution must be linear in the number of staged rows.
+    ///
+    /// A scan of `kept` per candidate cost tens of millions of URL comparisons on a real
+    /// `completed.json`, and the importer holds the boot while it runs (DESIGN §19.3). The bound is
+    /// loose on purpose: indexed it is milliseconds, quadratic it is many seconds in a debug build.
+    #[test]
+    fn duplicate_resolution_scales_linearly_and_still_keeps_the_winner() {
+        let mut staged: Vec<Staged> = (0..50_000)
+            .map(|n| {
+                let element = serde_json::json!({
+                    "key": format!("u{n}"),
+                    "info": {"url": format!("https://x.test/{n}"), "status": "pending"},
+                });
+                stage(&element, Collection::Queue, n).expect("fixture")
+            })
+            .collect();
+        // One url that really is duplicated, from the file whose record is more advanced.
+        let dup = serde_json::json!({
+            "key": "u0",
+            "info": {"url": "https://x.test/0", "status": "finished"},
+        });
+        staged.push(stage(&dup, Collection::Completed, 0).expect("fixture"));
+
+        let mut report = ImportReport::new(PathBuf::from("/x"), 0);
+        let started = std::time::Instant::now();
+        let kept = resolve_duplicates(staged, &mut report, &HashMap::new());
+        let elapsed = started.elapsed();
+
+        assert_eq!(kept.len(), 50_000, "only the one duplicate is collapsed");
+        assert_eq!(kept[0].collection, Collection::Completed, "terminal wins");
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].code, WarningCode::DuplicateUrl);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "resolving 50 001 staged rows took {elapsed:?}; the scan is quadratic again"
+        );
     }
 
     #[test]
