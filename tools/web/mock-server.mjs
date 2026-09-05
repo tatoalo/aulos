@@ -8,7 +8,7 @@
  * the per-URL catalog, custom dirs, and a token mode that answers 401 until the bearer is sent.
  *
  *   node tools/web/mock-server.mjs [--port N] [--prefix /metube/] [--theme auto|light|dark]
- *                                  [--token SECRET] [--freeze]
+ *                                  [--token SECRET] [--freeze] [--big-group] [--flap]
  *
  * `--port 0` picks an ephemeral port; the chosen one is printed as `LISTENING <port>`.
  * `--freeze` stops the delta timer so screenshots are byte-stable.
@@ -38,6 +38,8 @@ const THEME = arg('theme', 'auto');
 const TOKEN = arg('token', '');
 const FREEZE = flag('freeze');
 const BIG_GROUP = flag('big-group');
+/* Accept every upgrade and close it at once with 1013 — §5.1's "back off and reconnect". */
+const FLAP = flag('flap');
 const PREFIX = (() => {
   let p = arg('prefix', '/');
   if (!p.startsWith('/')) p = '/' + p;
@@ -53,7 +55,7 @@ const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 's
 
 const ULID = (s) => (s + '00000000000000000000000000').slice(0, 26);
 const now = Date.now();
-const BOOT = ULID('BOOT');
+let BOOT = ULID('BOOT');
 
 const SELECTION = { download_type: 'video', codec: 'auto', format: 'mp4', quality: '1080' };
 const REQUEST = {
@@ -270,11 +272,65 @@ function catalogFor(url) {
 
 const sockets = new Set();
 
+/* The replay window §6.2 talks about: the last `REPLAY` frames, so a reconnect carrying
+   `?since=&boot=` can be answered with `resume` + a fold instead of a whole new snapshot. */
+const REPLAY = 512;
+const ring = [];
+
 function send(frame) {
   frame.seq = ++seq;
+  ring.push(frame);
+  if (ring.length > REPLAY) ring.shift();
   const text = JSON.stringify(frame);
   for (const s of sockets) { if (s.readyState === 1) s.send(text); }
   return frame.seq;
+}
+
+/**
+ * §6.3: fold everything after `since` into at most one `added`, one `completed`, one `removed`
+ * per reason and one `delta`, in that order. Last value wins per `(id, field)`; an `added` that
+ * was later removed is dropped; a `completed` supersedes an earlier delta for the same id.
+ */
+function foldSince(since) {
+  const added = new Map(), completed = new Map(), removed = new Map(), delta = new Map();
+  for (const f of ring) {
+    if (f.seq <= since) continue;
+    if (f.t === 'added') for (const it of f.items) { added.set(it.id, it); delta.delete(it.id); }
+    else if (f.t === 'completed') for (const it of f.items) { completed.set(it.id, it); added.delete(it.id); delta.delete(it.id); }
+    else if (f.t === 'removed') {
+      const bucket = removed.get(f.reason) || [];
+      for (const id of f.ids) { bucket.push(id); added.delete(id); completed.delete(id); delta.delete(id); }
+      removed.set(f.reason, bucket);
+    } else if (f.t === 'delta') {
+      for (const patch of f.items) {
+        if (added.has(patch.id) || completed.has(patch.id)) { Object.assign(added.get(patch.id) || completed.get(patch.id), patch); continue; }
+        delta.set(patch.id, Object.assign(delta.get(patch.id) || { id: patch.id }, patch));
+      }
+    }
+  }
+  const removedIds = [...removed.values()].reduce((n, ids) => n + ids.length, 0);
+  return { added, completed, removed, delta, removedIds };
+}
+
+/** Answers one upgrade: `resume` + the fold when the cursor is resumable, else a snapshot. */
+function greet(sock, since, boot) {
+  const resumable = boot === BOOT && Number.isFinite(since) && since > 0
+    && since <= seq && (!ring.length || since >= ring[0].seq - 1);
+  if (!resumable) { sock.send(JSON.stringify(snapshot())); return 'snapshot'; }
+  const f = foldSince(since);
+  const out = [{
+    t: 'resume', seq: ++seq, from: since, to: seq,
+    merged: { added: f.added.size, completed: f.completed.size, removed: f.removedIds, delta_items: f.delta.size },
+  }];
+  if (f.added.size) out.push({ t: 'added', seq: ++seq, reason: 'created', items: [...f.added.values()] });
+  if (f.completed.size) out.push({ t: 'completed', seq: ++seq, items: [...f.completed.values()] });
+  for (const reason of ['deleted', 'cleared', 'auto_cleared', 'group_cascade']) {
+    if (f.removed.has(reason)) out.push({ t: 'removed', seq: ++seq, ids: f.removed.get(reason), reason });
+  }
+  if (f.delta.size) out.push({ t: 'delta', seq: ++seq, ts: Date.now(), items: [...f.delta.values()] });
+  out[0].to = seq;
+  for (const frame of out) sock.send(JSON.stringify(frame));
+  return 'resume';
 }
 
 function snapshot() {
@@ -289,7 +345,8 @@ function snapshot() {
     t: 'snapshot', seq: ++seq, boot_id: BOOT, server_time: Date.now(),
     server: { version: CAPABILITIES.version, yt_dlp: CAPABILITIES.yt_dlp, url_prefix: PREFIX, started_at: now - 86400000 },
     protocol: { batch_ms: 250, urgent_ms: 25, replay_frames: 512, delta_semantics: 'absent-key-means-unchanged' },
-    counts, done_total: done.length + OLDER.length, truncated: { done: true, groups: [] },
+    counts, done_total: done.length + OLDER.length,
+    truncated: { done: true, groups: all.filter((i) => i.children_inline === false).map((i) => i.id) },
     items: live, done, subscriptions: [],
     ytdl_options: { ok: true, msg: '', update_time: now / 1000 },
     health: { status: 'ok', components: { pot: 'ok', store: 'ok', ytdl_options: 'ok' } },
@@ -332,6 +389,24 @@ function advance() {
     r.title = 'Lo-fi beats — resolved';
     send({ t: 'delta', ts: Date.now(), items: [{ id: r.id, title: r.title }] });
   }
+  // …and a beat after that it resolves into a group: §5.5's in-place promotion. One `added` with
+  // `reason: "expanded"`, the same id and the same `ord`, `kind` flipped, and NO `removed`.
+  if (r && tick === 8 && r.status === 'resolving') expand(r);
+}
+
+/** §5.5: promote `g` to a group and deliver it with its first children in one `added` frame. */
+function expand(g) {
+  Object.assign(g, {
+    kind: 'group', status: 'downloading', provider: 'ytdlp', percent: 0,
+    children_total: 3, children_done: 0, children_error: 0, children_active: 1, children_inline: true,
+  });
+  const kids = Array.from({ length: 3 }, (_, i) => item({
+    id: ULID(`PKID${String(i).padStart(2, '0')}Z`), ord: g.ord + 1 + i, group_id: g.id, group_index: i + 1,
+    title: `Track ${i + 1} — Lo-fi beats`, status: i === 0 ? 'downloading' : 'queued',
+    percent: i === 0 ? 15 : 0, provider: 'ytdlp',
+  }));
+  for (const k of kids) items.set(k.id, k);
+  send({ t: 'added', reason: 'expanded', items: [g, ...kids] });
 }
 
 /* --------------------------------------------------------------- routes */
@@ -386,6 +461,9 @@ function authed(req) {
   if (!TOKEN) return true;
   const h = req.headers.authorization || '';
   if (h === `Bearer ${TOKEN}`) return true;
+  // §1.4: on the upgrade the token may also ride in the subprotocol list as `bearer.<token>`.
+  const offered = (req.headers['sec-websocket-protocol'] || '').split(',').map((p) => p.trim());
+  if (offered.includes(`bearer.${TOKEN}`)) return true;
   const u = new URL(req.url, 'http://x');
   return u.searchParams.get('token') === TOKEN;
 }
@@ -409,6 +487,22 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (FILES[path]) { const [ctype, load] = FILES[path]; sendStatic(req, res, load(), ctype, false); return; }
+
+  // Drops every socket without stopping the server, so the page reconnects with ?since=&boot=
+  // and the two §6.2 outcomes can both be exercised. `?reboot=1` rotates `boot_id` first, which
+  // is what forces the snapshot fallback. A change lands during the gap so the fold is non-empty.
+  if (path === '__test/kick') {
+    if (url.searchParams.get('reboot')) { BOOT = ULID('BOO2'); ring.length = 0; CAPABILITIES.boot_id = BOOT; }
+    for (const sock of sockets) sock.close(1001, 'kicked');
+    setTimeout(() => {
+      const dl = items.get(IDS.dl);
+      if (dl) { dl.title = 'Changed while away'; send({ t: 'delta', ts: Date.now(), items: [{ id: dl.id, title: dl.title }] }); }
+      const err = items.get(IDS.err);
+      if (err) { items.delete(err.id); send({ t: 'removed', ids: [err.id], reason: 'cleared' }); }
+    }, 120);
+    json(res, 200, { ok: true, boot_id: BOOT, seq });
+    return;
+  }
 
   if (path === '__test/log') { json(res, 200, log); return; }
   if (path === '__test/reset') { log.length = 0; seed(); json(res, 200, { ok: true }); return; }
@@ -466,7 +560,7 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     log.push({ method: 'POST', path, body });
     const ids = Array.isArray(body.ids) ? body.ids : [];
-    const applied = [], skipped = [], patches = [], completed = [], removed = [];
+    const applied = [], skipped = [], patches = [], completed = [], removed = [], retried = [];
     for (const id of ids) {
       const it = items.get(id);
       if (!it) { skipped.push({ id, reason: 'not_found' }); continue; }
@@ -474,9 +568,13 @@ const server = createServer(async (req, res) => {
       switch (body.action) {
         case 'start':
         case 'retry':
-          if (terminal) { it.status = 'queued'; it.auto_start = true; it.attempt += 1; it.error = null; it.finished_at = null; }
-          else it.auto_start = true;
-          patches.push({ id, status: it.status, auto_start: true, error: it.error });
+          if (terminal) {
+            it.status = 'queued'; it.auto_start = true; it.attempt += 1; it.error = null; it.finished_at = null;
+            retried.push(it);                     // §5.5: a requeue is an `added`, not a delta
+          } else {
+            it.auto_start = true;
+            patches.push({ id, status: it.status, auto_start: true, error: it.error });
+          }
           applied.push(id);
           break;
         case 'pause':
@@ -500,6 +598,8 @@ const server = createServer(async (req, res) => {
           skipped.push({ id, reason: 'not_found' });
       }
     }
+    // §6.3's flush order: added, completed, removed, delta.
+    if (retried.length) send({ t: 'added', reason: 'retried', items: retried });
     if (completed.length) send({ t: 'completed', items: completed });
     if (removed.length) send({ t: 'removed', ids: removed, reason: 'deleted' });
     if (patches.length) send({ t: 'delta', ts: Date.now(), items: patches });
@@ -530,7 +630,8 @@ server.on('upgrade', (req, socket, head) => {
       try { f = JSON.parse(raw.toString()); } catch { return; }
       if (f.t === 'ping') sock.send(JSON.stringify({ t: 'pong', seq: ++seq, server_time: Date.now(), c: f.c }));
     });
-    sock.send(JSON.stringify(snapshot()));
+    if (FLAP) { sock.close(1013, 'too many clients'); return; }
+    greet(sock, Number(url.searchParams.get('since')), url.searchParams.get('boot'));
   });
 });
 

@@ -47,6 +47,7 @@ async function startMock(opts = {}) {
   if (opts.token) args.push('--token', opts.token);
   if (opts.freeze) args.push('--freeze');
   if (opts['big-group']) args.push('--big-group');
+  if (opts.flap) args.push('--flap');
   const child = spawn(process.execPath, args, { cwd: HERE, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.on('data', (d) => process.stderr.write(`[mock] ${d}`));
   const port = await new Promise((resolve, reject) => {
@@ -65,6 +66,11 @@ async function startMock(opts = {}) {
     prefix,
     base: `http://127.0.0.1:${port}${prefix}`,
     async log(request) { return (await request.get(`http://127.0.0.1:${port}${prefix}__test/log`)).json(); },
+    /** Drop every socket (optionally rotating `boot_id`) without stopping the server. */
+    async kick(request, { reboot = false } = {}) {
+      const q = reboot ? '?reboot=1' : '';
+      return (await request.get(`http://127.0.0.1:${port}${prefix}__test/kick${q}`)).json();
+    },
     stop() { child.kill('SIGKILL'); },
   };
 }
@@ -76,6 +82,17 @@ function withMock(opts, body) {
     const mock = await startMock(opts);
     try { await body({ page, request, mock }); } finally { mock.stop(); }
   };
+}
+
+/** Record the `t` of every frame the page receives, in order, across every socket it opens. */
+async function recordFrames(page) {
+  const frames = [];
+  page.on('websocket', (ws) => {
+    ws.on('framereceived', (d) => {
+      try { frames.push(JSON.parse(d.payload).t); } catch { /* binary or noise */ }
+    });
+  });
+  return frames;
 }
 
 async function open(page, mock) {
@@ -240,6 +257,8 @@ test('Show older pages the completed history', withMock({}, async ({ page, mock 
 }));
 
 test('a 401 shows the token sheet, and the token is then used on REST and the WS', withMock({ token: 's3cret' }, async ({ page, mock, request }) => {
+  const wsUrls = [];
+  page.on('websocket', (ws) => wsUrls.push(ws.url()));
   await page.goto(mock.base);
   await expect(page.locator('#token-sheet')).toBeVisible();
   await expect(page.locator('#conn-text')).toHaveText('Sign in');
@@ -248,7 +267,9 @@ test('a 401 shows the token sheet, and the token is then used on REST and the WS
   await page.fill('#token-input', 's3cret');
   await page.click('#token-save');
 
-  // The WS upgrade carried ?token= (the snapshot arrived) …
+  // The WS upgrade carried the token — in the subprotocol list, never in the query string, so a
+  // proxy access log never sees it — and the snapshot arrived.
+  expect(wsUrls.every((u) => !u.includes('token='))).toBe(true);
   await expect(page.locator('#conn-text')).toHaveText('Live');
   await expect(page.locator(`.row[data-id="${IDS.dl}"]`)).toBeVisible();
 
@@ -307,18 +328,6 @@ test('phone 390x844: no horizontal overflow, the sheet opens, targets are ≥ 44
 
   expect(await page.evaluate(() => document.scrollingElement.scrollWidth)).toBeLessThanOrEqual(390);
 
-  const targets = await page.evaluate(() => {
-    const out = [];
-    for (const el of document.querySelectorAll('.iconbtn, .btn-primary, .chip, .seg button')) {
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) continue;
-      out.push({ cls: el.className, h: Math.round(r.height), w: Math.round(r.width) });
-    }
-    return out;
-  });
-  expect(targets.length).toBeGreaterThan(2);
-  for (const t of targets) expect(t.h, `${t.cls} height`).toBeGreaterThanOrEqual(44);
-
   // Only the primary action and the ⋯ button survive the collapse.
   const acts = page.locator(`.row[data-id="${IDS.dl}"] .row-acts .iconbtn:visible`);
   await expect(acts).toHaveCount(2);
@@ -328,6 +337,64 @@ test('phone 390x844: no horizontal overflow, the sheet opens, targets are ≥ 44
   await expect(page.locator('#sheet-type button')).toHaveCount(4);
   await expect(page.locator('#sheet-quality .chip').first()).toBeVisible();
   expect(await page.evaluate(() => document.scrollingElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  // Measured *after* the sheet is open, or the chips and segments sit inside `[hidden]` and the
+  // assertion is vacuous. The count is pinned for the same reason.
+  const targets = await page.evaluate(() => {
+    const out = [];
+    for (const el of document.querySelectorAll('.iconbtn, .btn-primary, .chip, .seg button, .text-btn, .link, .danger-link, .sw')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      out.push({ cls: el.className || el.id, h: Math.round(r.height), w: Math.round(r.width) });
+    }
+    return out;
+  });
+  expect(targets.length, JSON.stringify(targets)).toBeGreaterThanOrEqual(20);
+  for (const t of targets) expect(t.h, `${t.cls} height`).toBeGreaterThanOrEqual(44);
+}));
+
+test('every focusable control shows a focus ring', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const rings = await page.evaluate(() => {
+    const out = {};
+    // The sheets are display:none until opened, and a hidden control cannot take focus.
+    for (const sheet of ['sheet', 'token-sheet']) document.getElementById(sheet).hidden = false;
+    for (const id of ['url', 'type', 'quality', 'sheet-url', 'sheet-format', 'token-input']) {
+      const el = document.getElementById(id);
+      el.focus();
+      // The ring may be on the control or on the `.field` wrapper that contains it.
+      const own = getComputedStyle(el).outlineStyle;
+      const wrap = el.closest('.field');
+      out[id] = own !== 'none' ? own : (wrap ? getComputedStyle(wrap).outlineStyle : 'none');
+    }
+    return out;
+  });
+  for (const [id, style] of Object.entries(rings)) expect(style, `#${id} focus ring`).not.toBe('none');
+}));
+
+test('the add sheet is a real modal: inert behind, Tab trapped, focus restored', withMock({}, async ({ page, mock }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, mock);
+
+  await page.focus('#add-btn');
+  await page.click('#add-btn');
+  await expect(page.locator('#sheet')).toBeVisible();
+  expect(await page.evaluate(() => document.querySelector('main.wrap').inert)).toBe(true);
+  expect(await page.evaluate(() => document.querySelector('header.hdr').getAttribute('aria-hidden'))).toBe('true');
+
+  // Tab all the way round: focus never leaves the sheet.
+  for (let i = 0; i < 25; i++) {
+    await page.keyboard.press('Tab');
+    expect(await page.evaluate(() => !!document.getElementById('sheet').contains(document.activeElement)), `tab ${i}`).toBe(true);
+  }
+  await page.keyboard.press('Shift+Tab');
+  expect(await page.evaluate(() => document.getElementById('sheet').contains(document.activeElement))).toBe(true);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#sheet')).toBeHidden();
+  expect(await page.evaluate(() => document.querySelector('main.wrap').inert)).toBe(false);
+  expect(await page.evaluate(() => document.querySelector('header.hdr').hasAttribute('aria-hidden'))).toBe(false);
+  expect(await page.evaluate(() => document.activeElement.id)).toBe('add-btn');
 }));
 
 test('320px wide still has no horizontal scroll', withMock({}, async ({ page, mock }) => {
@@ -412,6 +479,180 @@ test('a dropped socket reconnects with backoff and the pill tracks it', async ({
     mock.stop();
   }
 });
+
+test('a reconnect inside the replay window resumes instead of re-snapshotting', withMock({}, async ({ page, mock, request }) => {
+  const frames = await recordFrames(page);
+  await open(page, mock);
+  await expect.poll(() => frames.filter((t) => t === 'snapshot').length).toBe(1);
+
+  // The server drops the socket and, while the page is away, changes one row and clears another.
+  await mock.kick(request);
+  await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 20_000 });
+
+  // §6.2: `since` was inside the window and `boot` matched, so the answer is `resume`, not a
+  // second `snapshot` — and §6.3's fold carried the two changes made during the gap.
+  await expect.poll(() => frames.filter((t) => t === 'resume').length, { timeout: 20_000 }).toBe(1);
+  await expect(page.locator(`.row[data-id="${IDS.dl}"] .row-title`)).toHaveText('Changed while away');
+  await expect(page.locator(`.row[data-id="${IDS.err}"]`)).toHaveCount(0);
+  expect(frames.filter((t) => t === 'snapshot').length).toBe(1);
+}));
+
+test('a boot_id change forces the §6.2 snapshot fallback', withMock({}, async ({ page, mock, request }) => {
+  const frames = await recordFrames(page);
+  await open(page, mock);
+
+  await mock.kick(request, { reboot: true });
+  await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 20_000 });
+
+  await expect.poll(() => frames.filter((t) => t === 'snapshot').length, { timeout: 20_000 }).toBe(2);
+  expect(frames.filter((t) => t === 'resume')).toEqual([]);
+  await expect(page.locator(`.row[data-id="${IDS.dl}"]`)).toBeVisible();
+}));
+
+test('a resolving row is promoted to a group in place, without blinking', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const row = page.locator(`.row[data-id="${IDS.resolving}"]`);
+  await expect(row.locator('.st')).toHaveText('Resolving');
+  const before = await row.elementHandle();
+  const ord = await page.evaluate((id) => window.__aulos.state.items.get(id).ord, IDS.resolving);
+
+  // §5.5: one `added` with the same id and the same ord, `kind` flipped, and no `removed`.
+  await expect(row.locator('.chev')).toBeVisible({ timeout: 15_000 });
+  const after = await row.elementHandle();
+  expect(await before.evaluate((el, other) => el === other, after)).toBe(true);
+  expect(await page.evaluate((id) => window.__aulos.state.items.get(id).ord, IDS.resolving)).toBe(ord);
+  expect(await page.evaluate((id) => window.__aulos.state.items.get(id).kind, IDS.resolving)).toBe('group');
+  await expect(row.locator('.rest')).toContainText('0 of 3 done');
+
+  await row.locator('.chev').click();
+  await expect(row.locator('.kids .kid')).toHaveCount(3);
+  // The top-level list did not gain a row: the children are nested under the group.
+  await expect(page.locator('#rows-active > .row')).toHaveCount(4);
+}));
+
+test('a socket the server accepts and closes at once backs off instead of hot-looping', withMock({ flap: true }, async ({ page, mock }) => {
+  let upgrades = 0;
+  page.on('websocket', () => { upgrades++; });
+  const caps = [];
+  page.on('request', (r) => { if (r.url().includes('api/v2/capabilities')) caps.push(r.url()); });
+
+  await page.goto(mock.base);
+  await expect(page.locator('#conn-text')).toHaveText('Reconnecting…', { timeout: 10_000 });
+  await page.waitForTimeout(6000);
+
+  // 500/1000/2000/4000 ms with jitter: at most a handful in six seconds. A backoff reset on
+  // `onopen` produced ~12 here, and one capabilities GET per close on top of them.
+  expect(upgrades, `${upgrades} upgrades in 6 s`).toBeLessThanOrEqual(6);
+  expect(caps.length, `${caps.length} capabilities GETs`).toBeLessThanOrEqual(2);
+}));
+
+test('an expanded large group re-fetches its children after a snapshot', withMock({ 'big-group': true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  const big = page.locator(`.row[data-id="${ID('BIG')}"]`);
+  await big.locator('.chev').click();
+  await expect(big.locator('.kids .kid')).toHaveCount(4);
+
+  // §5.11: a fresh snapshot wipes `state.items`, so an open group has to ask again — and the
+  // group must not silently sit open reading "No children yet".
+  await mock.kick(request, { reboot: true });
+  await expect(page.locator('#conn-text')).toHaveText('Live', { timeout: 20_000 });
+  await expect(big.locator('.chev')).toHaveAttribute('aria-expanded', 'true');
+  await expect(big.locator('.kids .kid')).toHaveCount(4, { timeout: 15_000 });
+  await expect(big.locator('.kids')).not.toContainText('No children yet');
+}));
+
+test('an unknown status renders inert instead of disappearing', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const id = 'UNK00000000000000000000000';
+  await page.evaluate((newId) => {
+    const A = window.__aulos;
+    const seed = A.state.items.get([...A.state.items.keys()][0]);
+    A.applyFrame({
+      t: 'added', seq: A.state.seq + 1, reason: 'created',
+      items: [{ ...seed, id: newId, ord: 950, kind: 'item', group_id: null, title: 'A future status', status: 'archiving', percent: 0, speed: null, eta: null }],
+    });
+  }, id);
+
+  // §3.1: an unknown value is inert, not invisible.
+  const row = page.locator(`.row[data-id="${id}"]`);
+  await expect(row).toBeVisible();
+  await expect(row.locator('.st')).toHaveText('Archiving');
+  expect(await page.evaluate((i) => window.__aulos.state.items.has(i), id)).toBe(true);
+  await expect(page.locator('#empty')).toBeHidden();
+}));
+
+test('a providers frame keeps the URL-refined picker instead of the generic ladder', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  await page.fill('#url', 'https://streamingcommunity.test/titles/42-series');
+  // §4.6: one quality labelled Source, plus the provider's notice.
+  await expect(page.locator('#prov')).toContainText('streamingcommunity', { timeout: 10_000 });
+  await expect(page.locator('#quality option')).toHaveCount(1);
+
+  await page.evaluate(() => window.__aulos.applyFrame({ t: 'providers', seq: window.__aulos.state.seq + 1, reloaded: [], failed: [] }));
+
+  // §5.9 says refetch capabilities *and* the catalog: the refined picker survives.
+  await page.waitForTimeout(600);
+  await expect(page.locator('#quality option')).toHaveCount(1);
+  await expect(page.locator('#prov')).toContainText('streamingcommunity');
+}));
+
+test("switching type picks the catalog's default_format, not formats[0]", withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  // Wait for the per-URL catalog: the capabilities picker declares no `default_format` at all,
+  // so asserting before it lands would test the wrong picker.
+  const catalog = page.waitForResponse((r) => r.url().includes('api/v2/catalog'));
+  await page.fill('#url', 'https://www.youtube.com/watch?v=DEFAULTS');
+  await catalog;
+  await expect(page.locator('#type option')).toHaveCount(4, { timeout: 10_000 });
+
+  await page.selectOption('#type', 'audio');
+  expect(await page.evaluate(() => window.__aulos.add.format)).toBe('m4a');
+  // …and back to video, whose declared default is mp4 while `formats[0]` is `any`.
+  await page.selectOption('#type', 'video');
+  expect(await page.evaluate(() => window.__aulos.add.format)).toBe('mp4');
+}));
+
+test('the completed list is windowed, so a long-lived tab cannot grow without bound', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const counts = await page.evaluate(() => {
+    const A = window.__aulos;
+    const seed = { ...A.state.items.get([...A.state.items.keys()][0]), kind: 'item', group_id: null, status: 'finished', percent: 100, speed: null, eta: null };
+    const items = [];
+    for (let i = 0; i < 400; i++) items.push({ ...seed, id: `BULK${String(i).padStart(22, '0')}`, ord: 1000 + i, title: `Bulk ${i}` });
+    A.applyFrame({ t: 'completed', seq: A.state.seq + 1, items });
+    A.flushNow();
+    A.flushNow();
+    return {
+      done: document.querySelectorAll('#rows-done > .row').length,
+      rows: A.rows.size,
+      items: A.state.items.size,
+    };
+  });
+  expect(counts.done).toBe(200);
+  expect(counts.rows).toBeLessThanOrEqual(210);
+  expect(counts.items).toBeLessThanOrEqual(215);
+  await expect(page.locator('#show-older')).toBeVisible();
+}));
+
+test('"Open source" refuses a non-http(s) URL instead of navigating to it', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  await page.evaluate((id) => {
+    window.__opened = [];
+    window.open = (u) => { window.__opened.push(u); return null; };
+    // An imported metube record's `url` is a bare `url::Url` parse, so `javascript:` gets through
+    // the store; the page is the thing doing the navigating, so the page is where it stops.
+    window.__aulos.state.items.get(id).url = 'javascript:alert(1)';
+  }, IDS.fin);
+
+  await page.click(`.row[data-id="${IDS.fin}"] button[data-action="source"]`);
+  await expect(page.locator('.toast.error')).toContainText('not a web address');
+  expect(await page.evaluate(() => window.__opened)).toEqual([]);
+
+  // …and an ordinary https link still opens.
+  await page.click(`.row[data-id="${IDS.dl}"] .act-more`);
+  await page.locator('#menu button', { hasText: 'Open source' }).click();
+  expect(await page.evaluate(() => window.__opened)).toEqual(['https://www.youtube.com/watch?v=dQw4w9WgXcQ']);
+}));
 
 test('a queued not_yet_live item reads as scheduled, not as a failure', withMock({}, async ({ page, mock }) => {
   await open(page, mock);
@@ -498,6 +739,41 @@ test('the theme button cycles system → light → dark and persists', withMock(
   await page.click('#theme-btn');
   expect(await stored()).toBe('auto');
 }));
+
+test('DEFAULT_THEME=dark paints dark before the module runs', async ({ browser }) => {
+  test.skip(REAL_BASE !== '', MOCK_ONLY);
+  const mock = await startMock({ theme: 'dark', freeze: true });
+  const ctx = await browser.newContext({ javaScriptEnabled: false, colorScheme: 'light' });
+  try {
+    const page = await ctx.newPage();
+    await page.goto(mock.base);
+    // The palette is keyed off `<html data-mode>`, so the theme has to be rendered onto the
+    // element and not only into a meta tag app.js reads.
+    expect(await page.getAttribute('html', 'data-mode')).toBe('dark');
+    expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(0, 0, 0)');
+    // …and the installed PWA's toolbar has a dark answer available at first paint too.
+    expect(await page.locator('meta[name="theme-color"]').count()).toBe(2);
+    expect(await page.getAttribute('meta[name="theme-color"][media*="dark"]', 'content')).toBe('#000000');
+  } finally {
+    await ctx.close();
+    mock.stop();
+  }
+});
+
+test('DEFAULT_THEME=auto still lets the OS preference decide', async ({ browser }) => {
+  test.skip(REAL_BASE !== '', MOCK_ONLY);
+  const mock = await startMock({ theme: 'auto', freeze: true });
+  const ctx = await browser.newContext({ javaScriptEnabled: false, colorScheme: 'dark' });
+  try {
+    const page = await ctx.newPage();
+    await page.goto(mock.base);
+    expect(await page.getAttribute('html', 'data-mode')).toBe('auto');
+    expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(0, 0, 0)');
+  } finally {
+    await ctx.close();
+    mock.stop();
+  }
+});
 
 /* ------------------------------------------------------------ screenshots */
 

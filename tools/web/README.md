@@ -24,9 +24,20 @@ every path in the UI.
 | `--theme light\|dark\|auto` | `auto` | the value substituted for `{{THEME}}` |
 | `--token SECRET` | off | 401 on every API route and on the WS upgrade until the bearer is presented |
 | `--freeze` | off | stops the 250 ms delta ticker, for byte-stable screenshots |
+| `--big-group` | off | adds a 480-child group with `children_inline: false`, so the page must fetch its children |
+| `--flap` | off | accepts every upgrade and closes it at once with `1013`, to exercise §5.1's back-off |
 
-Two routes exist only for the smoke and are not part of the contract: `GET <p>__test/log`
-returns every mutating request the mock received, and `GET <p>__test/reset` reseeds it.
+The socket implements §6.2/§6.3 resume: an upgrade carrying `?since=&boot=` inside the 512-frame
+replay ring is answered with a `resume` frame plus the folded `added`/`completed`/`removed`/`delta`,
+and anything else — a stale `boot`, a cursor above the head — falls back to a `snapshot`. The
+scripted queue also performs §5.5's in-place group promotion: two seconds in, the `resolving` row
+becomes a `kind: "group"` with the **same id and the same `ord`** and no `removed` frame.
+
+Three routes exist only for the smoke and are not part of the contract: `GET <p>__test/log`
+returns every mutating request the mock received, `GET <p>__test/reset` reseeds it, and
+`GET <p>__test/kick[?reboot=1]` drops every socket without stopping the server — with `reboot=1`
+rotating `boot_id` first — then makes a change during the gap, so both resume outcomes and the
+fold can be asserted.
 
 ## Running the smoke against a real `aulos-server`
 
@@ -63,7 +74,8 @@ integration check that the two halves of the contract meet on the real binary.
 ## What the server side owes the page
 
 - `index.html` is a template with exactly two substitutions, `{{PREFIX}}` (six occurrences) and
-  `{{THEME}}` (one). Nothing else in the file is templated and no user data enters it.
+  `{{THEME}}` (two: the `<html data-mode>` attribute the CSS keys the palette off, and the meta
+  tag `app.js` reads). Nothing else in the file is templated and no user data enters it.
 - `manifest.webmanifest`, `app.css`, `app.js`, `icon.svg` and `icon-180.png` are served
   **verbatim** — the manifest uses relative URLs (`./`, `assets/icon.svg`) so it is already
   prefix-independent and needs no substitution.
