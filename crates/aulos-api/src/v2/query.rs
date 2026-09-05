@@ -56,37 +56,92 @@ pub async fn state(
     headers: HeaderMap,
     Q(query): Q<StateQuery>,
 ) -> Result<Response, ApiError> {
-    let etag = state_etag(&state);
+    // What the response will carry is decided **before** the ETag is derived, because PROTOCOL
+    // §4.3 defines the ETag as `W/"<boot_id>-<seq>"` where `seq` is *this body's own cursor*.
+    //
+    // Deriving it from `hub.head()` instead would be wrong for the length of every flush: the
+    // aggregator publishes a flush's frames first and republishes the generation last, so
+    // `published.seq < hub.head()` while the delta diff runs. A response that paired a
+    // generation-500 body with `ETag: W/"…-501"` would answer `304` to every later poll and pin
+    // the client to that stale snapshot for good.
+    let plan = Plan::decide(&state, &query);
+    let etag = state_etag(state.hub.boot_id(), plan.seq());
     if if_none_match(&headers, &etag) {
         return Ok(not_modified(&etag));
     }
 
-    let body = match query.since {
-        None => snapshot(&state, query.done.unwrap_or(true), None).await,
-        Some(since) => {
-            let boot = query.boot.as_deref().and_then(|raw| raw.parse().ok());
-            match state.hub.resume(Seq(since), boot) {
-                Resume::Snapshot => snapshot(&state, query.done.unwrap_or(true), None).await,
-                Resume::UpToDate => json!({
-                    "mode": "up_to_date",
-                    "seq": state.hub.head().0,
-                    "boot_id": state.hub.boot_id(),
-                }),
-                Resume::Merged {
-                    from, to, frames, ..
-                } => delta_body(&state, from, to, &frames),
-            }
-        }
-    };
+    let body = plan.body(&state, query.done.unwrap_or(true)).await;
 
     let mut response = Json(body).into_response();
     response.headers_mut().insert(header::ETAG, etag);
     Ok(response)
 }
 
-/// `W/"<boot_id>-<seq>"` (PROTOCOL §4.3).
-fn state_etag(state: &ApiState) -> HeaderValue {
-    let raw = format!("W/\"{}-{}\"", state.hub.boot_id(), state.hub.head().0);
+/// What one `GET api/v2/state` will answer with, resolved before anything is serialised.
+///
+/// It exists so the cursor is read **once**: the ETag and the body are two views of the same
+/// decision, never two independent reads of a moving hub.
+enum Plan {
+    /// The full state of this exact generation.
+    Snapshot(Arc<Published>),
+    /// `mode: "up_to_date"` at the cursor the client already holds.
+    UpToDate(Seq),
+    /// `mode: "delta"`, folded out of the replay window.
+    Merged {
+        /// The cursor the client sent.
+        from: Seq,
+        /// The cursor it holds afterwards.
+        to: Seq,
+        /// The folded frames.
+        frames: Vec<Arc<aulos_queue::WireFrame>>,
+    },
+}
+
+impl Plan {
+    /// Reads the hub once and decides.
+    fn decide(state: &ApiState, query: &StateQuery) -> Self {
+        let Some(since) = query.since else {
+            return Self::Snapshot(state.state.snapshot());
+        };
+        let boot = query.boot.as_deref().and_then(|raw| raw.parse().ok());
+        match state.hub.resume(Seq(since), boot) {
+            Resume::Snapshot => Self::Snapshot(state.state.snapshot()),
+            // `resume` returned `UpToDate` because `since == head` at that moment, so the cursor
+            // the body reports is `since` itself — re-reading `head()` here could name a frame
+            // published in between, which is exactly the drift this type exists to prevent.
+            Resume::UpToDate => Self::UpToDate(Seq(since)),
+            Resume::Merged {
+                from, to, frames, ..
+            } => Self::Merged { from, to, frames },
+        }
+    }
+
+    /// The cursor the body will report as `seq`.
+    fn seq(&self) -> Seq {
+        match self {
+            Self::Snapshot(published) => published.seq,
+            Self::UpToDate(seq) => *seq,
+            Self::Merged { to, .. } => *to,
+        }
+    }
+
+    /// The body itself.
+    async fn body(self, state: &ApiState, done: bool) -> Value {
+        match self {
+            Self::Snapshot(published) => snapshot_of(state, &published, done, None).await,
+            Self::UpToDate(seq) => json!({
+                "mode": "up_to_date",
+                "seq": seq.0,
+                "boot_id": state.hub.boot_id(),
+            }),
+            Self::Merged { from, to, frames } => delta_body(state, from, to, &frames),
+        }
+    }
+}
+
+/// `W/"<boot_id>-<seq>"`, where `seq` is the cursor the body carries (PROTOCOL §4.3).
+fn state_etag(boot_id: aulos_core::BootId, seq: Seq) -> HeaderValue {
+    let raw = format!("W/\"{boot_id}-{}\"", seq.0);
     HeaderValue::from_str(&raw).unwrap_or(HeaderValue::from_static("W/\"0-0\""))
 }
 

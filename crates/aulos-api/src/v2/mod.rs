@@ -139,18 +139,30 @@ pub fn json_body(headers: &HeaderMap, body: &Bytes) -> Result<Map<String, Value>
     }
 }
 
-/// Reads an **optional** JSON object body: an empty body is `{}`.
+/// Reads an **optional** JSON object body: an empty body with no `Content-Type` at all is `{}`.
 ///
 /// This is what the four "just do it" routes take — `plugins/reload`, `ytdl-options/reload`,
 /// `subscriptions/{id}/check` and `items/clear` — because a POST with nothing to say should not
 /// have to carry `Content-Type: application/json` and two bytes of body.
 ///
+/// The shortcut is conditioned on the header being **absent**, not on the body being empty, and
+/// that distinction is the CSRF gate this module's header comment promises. A browser can send a
+/// cross-origin form POST with an empty body and `application/x-www-form-urlencoded` without a
+/// preflight; skipping the content-type check on an empty body would have let such a page reach
+/// `POST api/v2/items/clear` — which deletes every terminal record, and the files on disk when
+/// `DELETE_FILE_ON_TRASHCAN=true`. `curl -X POST`, which sends no `Content-Type`, still works.
+///
 /// # Errors
-/// `400 bad_request` when a **non-empty** body is not a JSON object.
+/// `400 bad_request` for a present-but-wrong `Content-Type`, or when a **non-empty** body is not
+/// a JSON object.
 pub fn optional_json_body(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Result<Map<String, Value>, ApiError> {
+    if body.is_empty() && headers.get(header::CONTENT_TYPE).is_none() {
+        return Ok(Map::new());
+    }
+    require_json_content_type(headers)?;
     if body.is_empty() {
         return Ok(Map::new());
     }
@@ -291,10 +303,32 @@ mod tests {
         let empty = Bytes::new();
         assert!(
             optional_json_body(&headers(None), &empty)
-                .expect("ok")
+                .expect("`curl -X POST` sends no content type")
+                .is_empty()
+        );
+        assert!(
+            optional_json_body(&headers(Some("application/json")), &empty)
+                .expect("an explicit JSON content type is fine too")
                 .is_empty()
         );
         assert!(json_body(&headers(Some("application/json")), &empty).is_err());
+    }
+
+    /// The CSRF gate: a browser can send `application/x-www-form-urlencoded` with an empty body
+    /// cross-origin without a preflight, so the empty-body shortcut must not skip the check when
+    /// a `Content-Type` is actually present (DESIGN §16.6, CSRF row).
+    #[test]
+    fn a_cross_origin_form_post_cannot_reach_an_optional_body_route() {
+        let empty = Bytes::new();
+        for raw in [
+            "application/x-www-form-urlencoded",
+            "multipart/form-data; boundary=x",
+            "text/plain",
+        ] {
+            let err = optional_json_body(&headers(Some(raw)), &empty).expect_err(raw);
+            assert_eq!(err.code, ErrorCode::BadRequest, "{raw}");
+            assert_eq!(err.field.as_deref(), Some("Content-Type"), "{raw}");
+        }
     }
 
     #[test]

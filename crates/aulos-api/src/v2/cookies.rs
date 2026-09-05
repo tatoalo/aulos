@@ -167,19 +167,64 @@ fn set_cookiefile(state: &ApiState, file: Option<&std::path::Path>) {
     state.ytdl.store(Arc::new(next));
 }
 
-/// Writes `content` to `target` through a temporary file, mode `0600`.
+/// Writes `content` to `target` through a temporary file that is **created** mode `0600`.
+///
+/// The mode is part of the `open`, not a `chmod` afterwards: STATE_DIR is `/downloads/.metube` in
+/// the shipped layout, i.e. on the media volume that is typically also exported to Jellyfin and
+/// Samba, and a jar that exists at the umask's 0644 even for a millisecond is a jar another uid
+/// on that volume can read. DESIGN §16.6 says "written atomically … mode 0600"; this is the only
+/// spelling that is true the whole time.
+///
+/// The temporary file is removed on every failure, so a readable stub is never left behind.
 async fn write_atomically(target: &std::path::Path, content: Vec<u8>) -> std::io::Result<()> {
     let tmp = target.with_extension("txt.tmp");
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&tmp, &content).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await?;
+    match write_private(&tmp, content).await {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
     }
-    tokio::fs::rename(&tmp, target).await
+    if let Err(e) = tokio::fs::rename(&tmp, target).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Creates `path` owner-only and writes `content` into it.
+#[cfg(unix)]
+async fn write_private(path: &std::path::Path, content: Vec<u8>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // `create_new` would fail on a leftover `.tmp` from a crashed write, so the file is
+        // truncated instead — the mode is still applied at creation for the normal path, and an
+        // existing `.tmp` is one this process wrote at 0600 already.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        // A pre-existing file keeps its old mode through `open`, so it is narrowed explicitly.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(&content)?;
+        file.sync_all()
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+/// The non-unix fallback: no mode bits to set.
+#[cfg(not(unix))]
+async fn write_private(path: &std::path::Path, content: Vec<u8>) -> std::io::Result<()> {
+    tokio::fs::write(path, &content).await
 }
 
 /// A file's mtime in unix milliseconds.

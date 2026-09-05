@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use aulos_core::DownloadType;
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
@@ -70,6 +70,10 @@ async fn serve(
         .canonicalize()
         .unwrap_or_else(|_| configured.to_path_buf());
     let resolved = resolve(&root, raw).ok_or_else(not_found)?;
+    let private = private_roots(state);
+    if is_private(&resolved, &private) {
+        return Err(not_found());
+    }
 
     let meta = tokio::fs::metadata(&resolved)
         .await
@@ -78,9 +82,40 @@ async fn serve(
         if !state.cfg.download_dirs_indexable {
             return Err(not_found());
         }
-        return listing(state, download_type, &root, &resolved).await;
+        return listing(state, download_type, &root, &resolved, &private).await;
     }
     file(&resolved, &meta, headers).await
+}
+
+/// The directories this route must never serve out of, canonicalised.
+///
+/// The shipped image sets `DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube`, so the whole
+/// state directory — `cookies.txt` (the operator's live site sessions) and `aulos.db` (the queue,
+/// the history, the subscriptions, every per-chat Telegram config) — sits *inside* the served
+/// root. Containment cannot help: those paths really are inside. They are excluded by name
+/// instead, with the same `404` every other refusal gets (DESIGN §16.6).
+fn private_roots(state: &ApiState) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(2);
+    let mut push = |path: &Path| {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    };
+    push(&state.cfg.paths.state);
+    // `AULOS_DB_PATH` defaults inside STATE_DIR but can be pointed anywhere, including at a second
+    // directory under the download root.
+    if let Some(parent) = state.cfg.db_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        push(parent);
+    }
+    roots
+}
+
+/// Whether a resolved path is inside one of [`private_roots`].
+fn is_private(path: &Path, private: &[PathBuf]) -> bool {
+    private.iter().any(|root| path.starts_with(root))
 }
 
 /// Resolves a request path inside `root`, rejecting every escape.
@@ -113,6 +148,7 @@ async fn listing(
     download_type: DownloadType,
     root: &Path,
     dir: &Path,
+    private: &[PathBuf],
 ) -> Result<Response, ApiError> {
     let mut entries = tokio::fs::read_dir(dir).await.map_err(|_| not_found())?;
     let mut files = Vec::new();
@@ -121,6 +157,13 @@ async fn listing(
         let Ok(meta) = entry.metadata().await else {
             continue;
         };
+        // An excluded directory must not even be advertised: a listing naming `.metube` tells a
+        // prober exactly where to look next.
+        let path = entry.path();
+        let canonical = path.canonicalize().unwrap_or(path);
+        if is_private(&canonical, private) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         let relative = entry
             .path()
@@ -157,14 +200,34 @@ async fn file(
     let len = meta.len();
     let etag = etag_for(meta);
     let last_modified = modified_ms(meta).map(http_date);
-    let mime = mime_guess::from_path(path)
+    let guessed = mime_guess::from_path(path)
         .first_or_octet_stream()
         .to_string();
+    let inline = is_inlineable(&guessed);
+    let mime = if inline {
+        guessed
+    } else {
+        "application/octet-stream".to_owned()
+    };
 
     let mut base = HeaderMap::new();
     base.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    // The download tree is served from the same origin as the API and the WebSocket, and in the
+    // intended deployment that origin carries the reverse proxy's session cookie. A file named
+    // `*.html` or `*.svg` — planted through the Samba/Jellyfin share the volume is exported over,
+    // or produced by a `command` plugin — would otherwise execute script on the API origin and be
+    // able to drive every authenticated route with the viewer's session. Media keeps its real type
+    // (so `<video>` and `Range` are unaffected); everything else is an opaque attachment, and
+    // `nosniff` stops the browser from second-guessing either.
+    base.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
     if let Ok(value) = HeaderValue::from_str(&mime) {
         base.insert(header::CONTENT_TYPE, value);
+    }
+    if !inline && let Some(value) = content_disposition(path) {
+        base.insert(header::CONTENT_DISPOSITION, value);
     }
     if let Ok(value) = HeaderValue::from_str(&etag) {
         base.insert(header::ETAG, value);
@@ -187,11 +250,18 @@ async fn file(
         value == etag.as_str() || last_modified.as_deref() == value.to_str().ok()
     });
 
+    // `Ok(None)` from `parse_range` and "no `Range` at all" are the same answer — serve the whole
+    // file — so they collapse into one `None` here; only `Err(())` reaches the `416` arm.
     let requested = if range_allowed {
-        headers
+        match headers
             .get(header::RANGE)
             .and_then(|v| v.to_str().ok())
             .map(|raw| parse_range(raw, len))
+        {
+            None | Some(Ok(None)) => None,
+            Some(Ok(Some(range))) => Some(Ok(range)),
+            Some(Err(())) => Some(Err(())),
+        }
     } else {
         None
     };
@@ -238,6 +308,37 @@ async fn file(
     }
 }
 
+/// Whether a guessed media type may be served with its real `Content-Type` and rendered inline.
+///
+/// The allow-list is the set an iOS client actually plays or shows: audio, video, raster images,
+/// and the two subtitle types. `image/svg+xml` is deliberately **not** on it — an SVG is a script
+/// container, not a picture, as far as a browser is concerned.
+fn is_inlineable(mime: &str) -> bool {
+    let base = mime.split(';').next().unwrap_or_default().trim();
+    if base.eq_ignore_ascii_case("image/svg+xml") {
+        return false;
+    }
+    let lower = base.to_ascii_lowercase();
+    lower.starts_with("audio/")
+        || lower.starts_with("video/")
+        || lower.starts_with("image/")
+        || matches!(
+            lower.as_str(),
+            "text/vtt" | "application/x-subrip" | "application/mp4"
+        )
+}
+
+/// `Content-Disposition: attachment; filename*=UTF-8''<name>` for a file served opaquely.
+fn content_disposition(path: &Path) -> Option<HeaderValue> {
+    let name = path.file_name()?.to_string_lossy();
+    // RFC 5987: percent-encode everything outside the attr-char set, so a quote or a newline in a
+    // downloaded title cannot break out of the header.
+    let encoded: String =
+        percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC)
+            .to_string();
+    HeaderValue::from_str(&format!("attachment; filename*=UTF-8''{encoded}")).ok()
+}
+
 /// `404` — the same answer for a traversal attempt, a symlink escape and a missing file.
 fn not_found() -> ApiError {
     ApiError::not_found("no such file")
@@ -268,31 +369,56 @@ fn modified_ms(meta: &std::fs::Metadata) -> Option<i64> {
 
 /// Parses a single-range `Range: bytes=…` header.
 ///
-/// `Err(())` is "unsatisfiable" — a `416`. A multi-range request, or anything unparseable, is
-/// `Ok(None)`-shaped by the caller (it serves the whole file), which is always a legal answer.
+/// The two failures are **not** the same answer, and RFC 9110 §14.2 is explicit about it:
+///
+/// | Outcome | Meaning | Answer |
+/// |---|---|---|
+/// | `Ok(Some((start, end)))` | a satisfiable byte range | `206` |
+/// | `Ok(None)` | a header this server does not understand — an unknown unit, an unparseable spec, or a multi-range set | **ignore it** and serve `200` |
+/// | `Err(())` | syntactically valid but unsatisfiable — `start >= len`, `end < start`, a suffix of an empty file | `416` |
+///
+/// The old shape answered `416` to `bytes=0-1023,2048-3071`, a perfectly legal multi-range that
+/// every other server serves whole, and a downloader that sends one treats the `416` as "this
+/// file cannot be fetched".
 #[allow(clippy::result_unit_err)] // the error carries no information: it is exactly "416"
-fn parse_range(raw: &str, len: u64) -> Result<(u64, u64), ()> {
-    let spec = raw.trim().strip_prefix("bytes=").ok_or(())?;
+fn parse_range(raw: &str, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+        return Ok(None); // a unit this server does not implement
+    };
     if spec.contains(',') {
-        return Err(()); // multi-range: answered as unsatisfiable rather than mis-served
+        return Ok(None); // multi-range: legal, and serving the whole file is a legal answer
     }
-    let (from, to) = spec.split_once('-').ok_or(())?;
+    let Some((from, to)) = spec.split_once('-') else {
+        return Ok(None);
+    };
     let (start, end) = match (from.trim(), to.trim()) {
-        ("", "") => return Err(()),
+        ("", "") => return Ok(None), // `bytes=-` is not a byte-range-spec at all
         ("", suffix) => {
-            let n: u64 = suffix.parse().map_err(|_| ())?;
+            let Ok(n) = suffix.parse::<u64>() else {
+                return Ok(None);
+            };
             if n == 0 || len == 0 {
-                return Err(());
+                return Err(()); // a well-formed suffix that cannot be satisfied
             }
             (len.saturating_sub(n), len - 1)
         }
-        (start, "") => (start.parse().map_err(|_| ())?, len.saturating_sub(1)),
-        (start, end) => (start.parse().map_err(|_| ())?, end.parse().map_err(|_| ())?),
+        (start, "") => {
+            let Ok(start) = start.parse::<u64>() else {
+                return Ok(None);
+            };
+            (start, len.saturating_sub(1))
+        }
+        (start, end) => {
+            let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) else {
+                return Ok(None);
+            };
+            (start, end)
+        }
     };
     if len == 0 || start >= len || end < start {
         return Err(());
     }
-    Ok((start, end.min(len - 1)))
+    Ok(Some((start, end.min(len - 1))))
 }
 
 /// An IMF-fixdate, for `Last-Modified`.
@@ -345,20 +471,42 @@ mod tests {
 
     #[test]
     fn ranges_parse_the_three_documented_forms() {
-        assert_eq!(parse_range("bytes=0-9", 100), Ok((0, 9)));
-        assert_eq!(parse_range("bytes=90-", 100), Ok((90, 99)));
-        assert_eq!(parse_range("bytes=-10", 100), Ok((90, 99)));
-        assert_eq!(parse_range("bytes=0-1000", 100), Ok((0, 99)), "clamped");
+        assert_eq!(parse_range("bytes=0-9", 100), Ok(Some((0, 9))));
+        assert_eq!(parse_range("bytes=90-", 100), Ok(Some((90, 99))));
+        assert_eq!(parse_range("bytes=-10", 100), Ok(Some((90, 99))));
+        assert_eq!(
+            parse_range("bytes=0-1000", 100),
+            Ok(Some((0, 99))),
+            "clamped"
+        );
     }
 
     #[test]
     fn an_unsatisfiable_range_is_an_error() {
-        assert!(parse_range("bytes=100-200", 100).is_err());
-        assert!(parse_range("bytes=-", 100).is_err());
-        assert!(parse_range("items=0-1", 100).is_err());
-        assert!(parse_range("bytes=0-9,20-29", 100).is_err(), "multi-range");
-        assert!(parse_range("bytes=0-0", 0).is_err(), "an empty file");
-        assert!(parse_range("bytes=5-1", 100).is_err(), "inverted");
+        // Syntactically valid, cannot be met: RFC 9110 §14.2's `416`.
+        assert_eq!(parse_range("bytes=100-200", 100), Err(()));
+        assert_eq!(parse_range("bytes=0-0", 0), Err(()), "an empty file");
+        assert_eq!(parse_range("bytes=-5", 0), Err(()), "a suffix of nothing");
+        assert_eq!(parse_range("bytes=5-1", 100), Err(()), "inverted");
+    }
+
+    /// RFC 9110 §14.2: "An origin server MUST ignore a Range header field that contains a range
+    /// unit it does not understand" — and a syntactically invalid set is likewise ignored, never
+    /// a `416`. A multi-range set is legal, and serving the whole file answers it.
+    #[test]
+    fn an_unparseable_or_multi_range_header_is_ignored_not_416() {
+        for raw in [
+            "bytes=-",
+            "items=0-1",
+            "bytes=abc",
+            "bytes=0-9,20-29",
+            "bytes=x-9",
+            "bytes=0-y",
+            "bytes=-z",
+            "bytes",
+        ] {
+            assert_eq!(parse_range(raw, 100), Ok(None), "{raw}");
+        }
     }
 
     #[test]

@@ -319,7 +319,31 @@ pub fn router(state: ApiState) -> Router {
     if state.cfg.v1_enabled {
         router = router.merge(v1::router(state.clone()));
     }
+    // PROTOCOL §1.5: "every non-2xx response, without exception" is the error envelope, and §1.2
+    // types every body as JSON. Without these two, axum answers a typo'd path and a wrong method
+    // with a zero-length body and no `Content-Type`, and §1.4 then tells the client to blame its
+    // reverse proxy for what is a plain routing miss. Registered after every merge, because
+    // `method_not_allowed_fallback` attaches to the method routers registered so far.
+    router = router
+        .fallback(no_such_route)
+        .method_not_allowed_fallback(wrong_method);
     router.layer(axum::middleware::from_fn_with_state(state, trace::headers))
+}
+
+/// The catch-all `404`, in the §1.5 envelope. `trace::headers` fills in its `request_id`.
+async fn no_such_route(method: axum::http::Method, uri: axum::http::Uri) -> error::ApiError {
+    error::ApiError::not_found(format!("no route for {method} {}", uri.path()))
+}
+
+/// The catch-all `405`, in the §1.5 envelope.
+///
+/// axum's own answer carries `Allow` and an empty body; this keeps the header (it is added by the
+/// method router around us) and gives the body a shape a client can decode.
+async fn wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> error::ApiError {
+    error::ApiError::of(
+        aulos_core::ErrorCode::MethodNotAllowed,
+        format!("{method} is not allowed on {}", uri.path()),
+    )
 }
 
 /// Every method on `socket.io/*` answers the same 501 (DESIGN §11.1).

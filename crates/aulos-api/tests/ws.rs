@@ -368,6 +368,58 @@ async fn a_mutation_racing_the_snapshot_is_never_lost_and_never_doubled() {
     .await;
 }
 
+/// "Subscribe first, snapshot second" only covers a frame published *between* the two. A frame
+/// published **before** `subscribe` that the generation has not absorbed yet is in neither place,
+/// and that window is open for the whole of every flush — the aggregator publishes a tick's frames
+/// and republishes the generation last.
+///
+/// The window is reproduced exactly by publishing onto the hub without republishing, and the frame
+/// stands in for the case that never repairs itself: an item's **last** frame, after which no
+/// later full object is ever sent.
+#[tokio::test]
+async fn a_frame_published_before_the_connection_but_after_the_generation_is_replayed() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let id = rig.add("https://fake.test/gap").await;
+        rig.until_status(&id, "finished").await;
+        rig.settle().await;
+
+        let published = rig.state.state.load().seq;
+        rig.hub.publish(
+            FrameKind::Notice,
+            json!({ "level": "warning", "code": "plugin_note", "id": null, "message": "the gap" }),
+        );
+        assert!(rig.hub.head() > published, "the flush window is open");
+
+        // The connection happens strictly after that publish, so the frame is not on this
+        // client's bus — only the replay ring still has it.
+        let mut socket = connect(&rig, "ws").await;
+        let snapshot = next_frame(&mut socket).await;
+        assert_eq!(snapshot["t"], "snapshot");
+        assert_eq!(
+            snapshot["seq"].as_u64(),
+            Some(published.0),
+            "the snapshot is the generation, which is behind the head"
+        );
+
+        let mut seen = false;
+        for _ in 0..10 {
+            let Some(frame) = try_next_frame(&mut socket, Duration::from_millis(500)).await else {
+                break;
+            };
+            if frame["t"] == "notice" && frame["message"] == "the gap" {
+                seen = true;
+                break;
+            }
+        }
+        assert!(
+            seen,
+            "the frame the generation had not absorbed was never delivered"
+        );
+    })
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // resume
 // ---------------------------------------------------------------------------

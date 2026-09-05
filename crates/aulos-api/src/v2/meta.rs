@@ -282,7 +282,13 @@ pub async fn catalog(
             }
         }
     };
-    Ok(etagged(&headers, &body))
+    // PROTOCOL §4.6: the body's `etag` *is* the header, so the header is read back off the body
+    // rather than recomputed over a payload that now contains it.
+    let hash = body
+        .get("etag")
+        .and_then(Value::as_str)
+        .map_or_else(|| hash_of(&body), ToOwned::to_owned);
+    Ok(etagged_with(&headers, &body, &hash))
 }
 
 /// Assembles one catalog response, `etag` included in the body as PROTOCOL §4.6 shows.
@@ -300,6 +306,9 @@ fn catalog_body(
         "naming": naming,
         "download_types": download_types,
     });
+    // Hashed **before** `etag` is inserted, and that same hash is what the header carries — see
+    // `etagged_with`. A client may therefore cache on the body's `etag` and send it back as
+    // `If-None-Match`, which is what PROTOCOL §4.6 tells it to do.
     let etag = hash_of(&body);
     if let Some(object) = body.as_object_mut() {
         object.insert("etag".to_owned(), json!(etag));
@@ -390,7 +399,14 @@ pub async fn providers(State(state): State<ApiState>) -> Json<Value> {
 ///
 /// The report is broadcast as a `providers` frame as well as returned, because a client that is
 /// holding a cached `capabilities`/`catalog` needs to know to refetch (PROTOCOL §5.9).
-pub async fn plugins_reload(State(state): State<ApiState>) -> Json<ReloadReport> {
+pub async fn plugins_reload(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<ReloadReport>, ApiError> {
+    // Nothing in the body is read, but the content-type gate is what DESIGN §16.6 relies on to
+    // keep a cross-origin form POST off every mutating v2 route — a reload is cheap, not free.
+    super::optional_json_body(&headers, &body)?;
     let dir = state.cfg.plugins_dir.clone();
     let report = {
         let mut registry = match state.registry.write() {
@@ -402,7 +418,7 @@ pub async fn plugins_reload(State(state): State<ApiState>) -> Json<ReloadReport>
     if !report.is_empty() {
         state.hub.publish(FrameKind::Providers, &report);
     }
-    Json(report)
+    Ok(Json(report))
 }
 
 /// `GET api/v2/resolve-preview?url=` (PROTOCOL §4.7).
@@ -561,7 +577,12 @@ pub async fn ytdl_options(State(state): State<ApiState>) -> Json<Value> {
 /// Always `200`: a broken options file is reported as `{"ok": false, "msg": …}` with the legacy
 /// error string, exactly as the `ytdl_options` frame does, and the last-good options stay in
 /// force. Runtime overrides (today only `cookiefile`) are re-applied, as in legacy.
-pub async fn ytdl_options_reload(State(state): State<ApiState>) -> Json<Value> {
+pub async fn ytdl_options_reload(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    super::optional_json_body(&headers, &body)?;
     let cfg = Arc::clone(&state.cfg);
     let loaded = tokio::task::spawn_blocking(move || {
         YtdlOptions::load(
@@ -597,7 +618,7 @@ pub async fn ytdl_options_reload(State(state): State<ApiState>) -> Json<Value> {
     }
     let body = json!({ "ok": ok, "msg": msg, "update_time": update_time });
     state.hub.publish(FrameKind::YtdlOptions, &body);
-    Json(body)
+    Ok(Json(body))
 }
 
 /// `?item_id=` on `debug/options`.
@@ -790,7 +811,17 @@ fn hash_of(body: &Value) -> String {
 
 /// Serves a payload with a content hash as its `ETag`, answering `304` when the client has it.
 fn etagged(headers: &HeaderMap, body: &Value) -> Response {
-    let tag = format!("\"{}\"", hash_of(body));
+    etagged_with(headers, body, &hash_of(body))
+}
+
+/// [`etagged`] with the hash supplied.
+///
+/// The catalog needs this: PROTOCOL §4.6 says its body's `etag` field is "also sent as the `ETag`
+/// header", and the field is part of the payload, so hashing the payload a second time here would
+/// hash the field too and the two could never be equal. One hash, taken over the etag-less body,
+/// serves both.
+fn etagged_with(headers: &HeaderMap, body: &Value, hash: &str) -> Response {
+    let tag = format!("\"{hash}\"");
     let value = HeaderValue::from_str(&tag).unwrap_or(HeaderValue::from_static("\"0\""));
     let matched = headers
         .get_all(header::IF_NONE_MATCH)

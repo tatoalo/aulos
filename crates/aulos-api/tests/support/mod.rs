@@ -88,6 +88,10 @@ pub struct RigBuilder {
 
 impl RigBuilder {
     /// Overrides or adds an environment variable.
+    ///
+    /// The token `{dir}` in `value` is replaced with the rig's temporary directory, which is how a
+    /// test reproduces a layout the shipped image has and the rig's defaults do not — most of all
+    /// `STATE_DIR` *inside* `DOWNLOAD_DIR`, which is exactly what `docker/Dockerfile` sets.
     #[must_use]
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.to_owned(), value.to_owned()));
@@ -138,7 +142,18 @@ impl RigBuilder {
             ("METUBE_VERSION".into(), "2026.09.04".into()),
             ("URL_PREFIX".into(), self.prefix.to_owned()),
         ];
-        env.extend(self.env);
+        let root = dir.path().to_string_lossy().into_owned();
+        env.extend(
+            self.env
+                .into_iter()
+                .map(|(k, v)| (k, v.replace("{dir}", &root))),
+        );
+        // A `{dir}`-built path may not exist yet (`STATE_DIR` moved under the download root, say).
+        for (key, value) in &env {
+            if key.ends_with("_DIR") && value.starts_with(&root) {
+                std::fs::create_dir_all(value).unwrap();
+            }
+        }
         let cfg = Arc::new(load(&RawEnv::from_pairs(env)).expect("the rig config must load"));
 
         let store = Store::open(

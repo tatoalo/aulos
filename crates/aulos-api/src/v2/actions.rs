@@ -112,7 +112,21 @@ pub async fn clear(
 ) -> Result<Json<Value>, ApiError> {
     let root = optional_json_body(&headers, &body)?;
     let mut warnings: Vec<String> = Vec::new();
-    unknown_fields(&root, &["delete_file"], &mut warnings);
+    unknown_fields(&root, &CLEAR_FIELDS, &mut warnings);
+    // PROTOCOL §4.7 documents the body as `{"where":"done"}` or `{}`, and both mean the same
+    // thing — every terminal row. Knowing the key is what stops the *documented* request from
+    // coming back with `warnings: ["unknown field \"where\" ignored"]`, which a client that
+    // surfaces warnings reports as a malformed request.
+    match root.get("where") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(scope)) if scope == "done" => {}
+        Some(_) => {
+            return Err(ApiError::invalid(
+                "where",
+                "where must be \"done\", the only scope this route clears",
+            ));
+        }
+    }
     let delete_file = match root.get("delete_file") {
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_bool("delete_file", value)?),
@@ -124,6 +138,12 @@ pub async fn clear(
         "warnings": warnings,
     })))
 }
+
+/// The two keys `POST api/v2/items/clear` accepts (PROTOCOL §4.7).
+///
+/// `where` is documented and `delete_file` is the shim's addition, recorded in
+/// `docs/INTEGRATION-NOTES.md` along with the route itself.
+pub const CLEAR_FIELDS: [&str; 2] = ["where", "delete_file"];
 
 /// The five documented actions, and nothing else.
 fn parse_action(raw: &str) -> Result<Action, ApiError> {
@@ -161,6 +181,16 @@ mod tests {
         let err = parse_action("explode").expect_err("unknown");
         assert_eq!(err.field.as_deref(), Some("action"));
         assert!(err.message.contains("start, pause, cancel, retry, delete"));
+    }
+
+    #[test]
+    fn the_clear_body_knows_its_own_documented_key() {
+        // PROTOCOL §4.7 documents `{"where":"done"}`; sending exactly that must not warn.
+        let body: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{"where":"done"}"#).expect("an object");
+        let mut warnings = Vec::new();
+        unknown_fields(&body, &CLEAR_FIELDS, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

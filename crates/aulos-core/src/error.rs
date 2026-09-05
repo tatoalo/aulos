@@ -30,6 +30,9 @@ pub enum ErrorCode {
     Unauthorized,
     /// 404 — unknown item / group / subscription id.
     NotFound,
+    /// 405 — the path exists but not under this method (PROTOCOL §1.5's envelope on the
+    /// router's method fallback). The response also carries `Allow`.
+    MethodNotAllowed,
     /// 409 — duplicate subscription URL; `AULOS_DEDUPE_MODE=strict` duplicate.
     Conflict,
     /// 413 — cookie upload over 1 000 000 bytes; batch add over `AULOS_MAX_BATCH_URLS`.
@@ -86,6 +89,7 @@ impl ErrorCode {
             | Self::FolderInvalid => Some(400),
             Self::Unauthorized => Some(401),
             Self::NotFound => Some(404),
+            Self::MethodNotAllowed => Some(405),
             Self::Conflict => Some(409),
             Self::PayloadTooLarge => Some(413),
             Self::SocketioRemoved => Some(501),
@@ -142,6 +146,7 @@ impl ErrorCode {
             Self::FolderInvalid => "folder_invalid",
             Self::Unauthorized => "unauthorized",
             Self::NotFound => "not_found",
+            Self::MethodNotAllowed => "method_not_allowed",
             Self::Conflict => "conflict",
             Self::PayloadTooLarge => "payload_too_large",
             Self::AuthRequired => "auth_required",
@@ -166,7 +171,7 @@ impl ErrorCode {
     }
 
     /// Every code, in DESIGN §5 table order. The label set of `aulos_http_errors_total{code}`.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::BadRequest,
         Self::ValidationFailed,
         Self::UnsupportedUrl,
@@ -175,6 +180,7 @@ impl ErrorCode {
         Self::FolderInvalid,
         Self::Unauthorized,
         Self::NotFound,
+        Self::MethodNotAllowed,
         Self::Conflict,
         Self::PayloadTooLarge,
         Self::AuthRequired,

@@ -137,7 +137,8 @@ HTTP errors:
 | `unknown_preset` | 400 | a named preset does not exist |
 | `folder_invalid` | 400 | `folder` escapes the base dir, does not exist, or custom dirs are off |
 | `unauthorized` | 401 | auth failure |
-| `not_found` | 404 | unknown item / group / subscription id |
+| `not_found` | 404 | unknown item / group / subscription id, or no route matched the path |
+| `method_not_allowed` | 405 | the path exists but not under this method; the response also carries `Allow` |
 | `conflict` | 409 | duplicate subscription URL, or a strict-mode duplicate add |
 | `payload_too_large` | 413 | cookie upload over **1 000 000 bytes** (decimal, not 1 MiB — the legacy cap, preserved byte-for-byte along with its message `Cookie file too large (max 1MB)`), or a batch add over the server's cap |
 | `internal` | 500 | a bug. `message` is a request id; details are in the server logs. |
@@ -616,14 +617,16 @@ Response `202`:
 
 | Key | Type | Notes |
 |---|---|---|
-| `id` | `string` | equals `ids[0]`; present for convenience |
+| `id` | `string` | equals `ids[0]`, or the first `duplicates[].existing_id` when every URL deduped; present for convenience |
 | `ids` | `[string]` | one id per accepted URL, in request order. Batch callers use this. |
 | `generation` | `integer` | an opaque counter identifying **this add's** resolution work. Keep it if you want to be able to abort the add: `POST api/v2/downloads/cancel-resolve` with `{"generation": <this value>}` cancels the in-flight resolution and the not-yet-created children of this add only (§4.7). Two concurrent adds have different generations. |
 | `seq` | `integer` | the frame sequence at or before which the corresponding `added` frame arrives (§6.4) |
 | `duplicates` | `[{url, existing_id}]` | see below |
 | `warnings` | `[string]` | see below |
 
-- `id` is present for convenience and equals `ids[0]`. Batch callers should use `ids`.
+- `id` is present for convenience and equals `ids[0]`. When **every** URL deduped, `ids` is
+  empty and `id` is the first `duplicates[].existing_id` instead, so it is always a string and
+  always something you can poll. Batch callers should use `ids`.
 - `duplicates` lists URLs that already have a non-terminal item with the same selection; the
   existing id is returned instead of creating a second item. This is not an error.
 - `warnings` is an array of strings, one per **unknown request field**. Unknown fields are ignored,
@@ -742,8 +745,9 @@ step never creates a record from a `delta`.
 `since` is **greater** than the server's current `seq` (which happens after a restore). You get
 `"up_to_date"` — with no arrays at all — when `since == seq`.
 
-`ETag` is `W/"<boot_id>-<seq>"`. Send it back as `If-None-Match` and an unchanged server answers
-`304` with an empty body, which makes pull-to-refresh nearly free.
+`ETag` is `W/"<boot_id>-<seq>"`, where `seq` is **this response's own** `seq` — the one in the
+body, never a newer one the body does not reflect. Send it back as `If-None-Match` and an
+unchanged server answers `304` with an empty body, which makes pull-to-refresh nearly free.
 
 Query parameters: `since` (integer), `boot` (string), `done` (boolean, default `true` — set
 `false` to omit the completed window entirely and get a very small snapshot).
@@ -1035,12 +1039,12 @@ always correct because every option has a server-side default.
 | GET | `api/v2/ytdl-options` | — | `200 {"ok":true,"msg":"","update_time":1757000200.412,"keys":[…],"presets":[…]}` (values are redacted) | — |
 | POST | `api/v2/ytdl-options/reload` | — | `200 {"ok":true,"msg":"","update_time":…}` | — |
 | GET | `api/v2/import-report` | — | `200` the importer's report (DESIGN §7.6.6) | 404 when nothing was imported |
-| POST | `api/v2/items/clear` | `{"where":"done"}` or `{}` | `200 {"removed":[ids],"seq":…}` | 400 |
+| POST | `api/v2/items/clear` | `{"where":"done"}` or `{}`, optionally `{"delete_file": bool}` | `200 {"removed":[ids],"seq":…,"warnings":[…]}` | 400 |
 | GET | `api/v2/providers` | — | `200 {"providers":[{id,state,reason,version,capabilities,limits,argv}],"warnings":[…]}` | — |
 | POST | `api/v2/plugins/reload` | — | `200 {"added":[],"updated":[],"removed":[],"failed":[],"warnings":[]}` | — |
 | GET | `api/v2/resolve-preview` | `?url=` | `200 {"provider":…,"score":…,"reason":…,"runner_up":{…}}` | 400 |
 | GET | `api/v2/debug/options` | `?item_id=` or an add body | `200` the merged yt-dlp option dict, each key annotated with the layer it came from | 404 |
-| GET | `<p>download/*`, `<p>audio_download/*` | — | the file, with `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `Content-Type` | 404 |
+| GET | `<p>download/*`, `<p>audio_download/*` | — | the file, with `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `Content-Type`, `X-Content-Type-Options: nosniff` | 404 |
 | GET | `<p>robots.txt` | — | text | — |
 | GET | `<p>` | — | `200 {"name":"aulos-server","version":…,"url_prefix":…,"protocol":"v2"}` | — |
 | GET | `<p>metrics` | — | Prometheus text, when enabled | 404 |
@@ -1056,8 +1060,11 @@ follow it with a `delete` if you want them gone. Whether it is available is adve
 
 `POST api/v2/items/clear` is how a v2 client clears history in one call — the counterpart of the
 v1 `POST <p>delete {"where":"done"}`. Without it a v2-only deployment would have to delete rows one
-id at a time. `{"where":"done"}` and `{}` both mean "every terminal row"; the response lists the
-ids that went, and each one also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
+id at a time. `{"where":"done"}` and `{}` both mean "every terminal row" — `"done"` is the only accepted
+scope, and any other value is a `400 validation_failed` naming `where`. The optional
+`delete_file` (boolean) overrides `DELETE_FILE_ON_TRASHCAN` for this call; omitted or `null`
+means "follow the server configuration". The response lists the ids that went, and each one
+also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
 
 `api/v2/debug/options` is worth knowing about: it answers "why did my `YTDL_OPTIONS` not take
 effect?" by showing the fully merged dict with a per-key `source` label
@@ -1069,8 +1076,17 @@ plugin scan, as `<dir>: <key>: <message>` — a clamped `limits.max_concurrent`,
 directory that produced nothing at all is in `failed`, and a manifest that produced only a matcher
 is a `degraded` entry in `providers`. `healthz` carries the same list as `plugin_warnings`.
 
-The file routes support `Range` and `If-Range`, so a client can stream or resume. They are behind
-the same auth as everything else.
+The file routes support `Range` and `If-Range`, so a client can stream or resume. A single byte
+range that cannot be satisfied is `416` with `Content-Range: bytes */<len>`; a `Range` header
+the server cannot parse, whose unit it does not know, or that asks for **several** ranges is
+ignored and the whole file comes back `200` (RFC 9110 §14.2). They are behind the same auth as
+everything else.
+
+Every file is served with `X-Content-Type-Options: nosniff`. Audio, video, images and the two
+subtitle types keep their real `Content-Type` and render inline; **anything else** — an
+`.html`, an `.svg`, a stray text file — is served as `application/octet-stream` with
+`Content-Disposition: attachment`, because the download tree shares an origin with this API.
+Media playback and `Range` are unaffected.
 
 ---
 

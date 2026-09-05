@@ -1225,3 +1225,189 @@ fn urlencoding(raw: &str) -> String {
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// the envelope on every non-2xx, and the CSRF gate
+// ---------------------------------------------------------------------------
+
+/// PROTOCOL §1.5: "every non-2xx response, without exception" carries the envelope, and §1.2 types
+/// every body as JSON. axum's bare defaults answer an unrouted path and a wrong method with a
+/// zero-length body and no `Content-Type`, which §1.4 then tells a client to read as a proxy fault
+/// rather than the routing miss it is.
+#[tokio::test]
+async fn an_unknown_path_and_a_wrong_method_both_carry_the_error_envelope() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+
+        let response = rig.get_raw("api/v2/itemss").await;
+        assert_eq!(response.status().as_u16(), 404);
+        assert_envelope(response, "not_found").await;
+
+        // `api/v2/state` is GET-only; `<p>add` (v1) is POST-only.
+        let response = rig
+            .http
+            .post(rig.url("api/v2/state"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 405);
+        assert!(
+            response.headers().contains_key("allow"),
+            "the method router still names the allowed set"
+        );
+        assert_envelope(response, "method_not_allowed").await;
+
+        let response = rig.get_raw("add").await;
+        assert_eq!(response.status().as_u16(), 405);
+        assert_envelope(response, "method_not_allowed").await;
+    })
+    .await;
+}
+
+/// Asserts the §1.5 shape, including the `request_id` `trace::headers` stamps in.
+async fn assert_envelope(response: reqwest::Response, code: &str) {
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    let text = response.text().await.unwrap();
+    assert!(
+        content_type.starts_with("application/json"),
+        "content type was {content_type:?} for {text}"
+    );
+    let body: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+    assert_eq!(body["error"]["code"], code, "{body}");
+    assert!(body["error"]["message"].as_str().is_some(), "{body}");
+    for key in ["field", "provider", "provider_code"] {
+        assert!(body["error"].get(key).is_some(), "{key} missing: {body}");
+    }
+    assert_eq!(body["error"]["request_id"], request_id.as_str(), "{body}");
+}
+
+/// DESIGN §16.6's CSRF row: "every mutating v2 route requires `Content-Type: application/json`, so
+/// a cross-origin form POST cannot reach it". A browser sends `application/x-www-form-urlencoded`
+/// with an empty body and no preflight, and `items/clear` deletes every terminal record (and the
+/// files, when `DELETE_FILE_ON_TRASHCAN=true`).
+#[tokio::test]
+async fn a_cross_origin_form_post_cannot_reach_the_optional_body_routes() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let id = rig.add("https://fake.test/csrf").await;
+        rig.until_status(&id, "finished").await;
+        let (status, sub) = rig
+            .post(
+                "api/v2/subscriptions",
+                &json!({ "url": "https://fake.test/feed" }),
+            )
+            .await;
+        assert_eq!(status, 201, "{sub}");
+        let sub_id = sub["id"].as_str().unwrap().to_owned();
+
+        for route in [
+            "api/v2/items/clear".to_owned(),
+            "api/v2/plugins/reload".to_owned(),
+            "api/v2/ytdl-options/reload".to_owned(),
+            format!("api/v2/subscriptions/{sub_id}/check"),
+        ] {
+            let response = rig
+                .http
+                .post(rig.url(&route))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("origin", "https://evil.test")
+                .body("")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 400, "{route}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "bad_request", "{route}");
+        }
+
+        // The record the form POST tried to clear is still there.
+        let (status, item) = rig.get(&format!("api/v2/items/{id}")).await;
+        assert_eq!(status, 200, "{item}");
+
+        // And a bodyless `curl -X POST`, which sends no `Content-Type` at all, still works.
+        let response = rig
+            .http
+            .post(rig.url("api/v2/ytdl-options/reload"))
+            .body("")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+    })
+    .await;
+}
+
+/// PROTOCOL §4.7 documents `POST api/v2/items/clear` with `{"where":"done"}`; sending exactly the
+/// documented body must not come back as a `warnings` entry calling it unknown (PROTOCOL §4.1
+/// defines `warnings` as "one per unknown request field").
+#[tokio::test]
+async fn the_documented_clear_body_produces_no_warning() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let id = rig.add("https://fake.test/clear-where").await;
+        rig.until_status(&id, "finished").await;
+        rig.settle().await;
+
+        let (status, body) = rig
+            .post("api/v2/items/clear", &json!({ "where": "done" }))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body["warnings"].as_array().unwrap().is_empty(),
+            "the documented body warns: {body}"
+        );
+        assert_eq!(body["removed"].as_array().unwrap().len(), 1, "{body}");
+
+        // Any other scope is an honest 400 naming the field, not a silent full clear.
+        let (status, body) = rig
+            .post("api/v2/items/clear", &json!({ "where": "everything" }))
+            .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"]["code"], "validation_failed");
+        assert_eq!(body["error"]["field"], "where");
+    })
+    .await;
+}
+
+/// PROTOCOL §4.6: `Catalog.etag` is "also sent as the `ETag` header", so a client that caches on
+/// the body's field and sends it back as `If-None-Match` must get a `304`.
+#[tokio::test]
+async fn the_catalog_body_etag_is_the_etag_header() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let route = format!("api/v2/catalog?url={}", urlencoding(YT));
+        let response = rig.get_raw(&route).await;
+        let header = response
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body: Value = response.json().await.unwrap();
+        let field = body["etag"].as_str().unwrap();
+        assert_eq!(header, format!("\"{field}\""), "{body}");
+
+        let response = rig
+            .http
+            .get(rig.url(&route))
+            .header("if-none-match", format!("\"{field}\""))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 304);
+        assert!(response.text().await.unwrap().is_empty());
+    })
+    .await;
+}

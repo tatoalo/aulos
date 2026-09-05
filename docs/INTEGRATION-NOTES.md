@@ -2251,3 +2251,28 @@ and the dev commands — the four gates and the e2e. 204 lines, under the 250-li
 it was checked against the code rather than against the design: the `POST api/v2/downloads` body is
 the one `tests/e2e/run.sh` actually sends, and the `plugin.toml` fragment uses the placeholder
 vocabulary of the shipped `plugins/examples/bandcamp/plugin.toml`.
+
+## Review fixes — `aulos-api`
+
+Recorded because three of them changed the wire contract or reached outside the crate.
+
+- **`ErrorCode::MethodNotAllowed` (405) was added to `aulos-core`.** PROTOCOL §1.5 says "every
+  non-2xx response, without exception" is the envelope, but the router had no `fallback` and no
+  `method_not_allowed_fallback`, so an unrouted path and a wrong method were axum's bare
+  zero-length bodies. Both now answer the envelope, and 405 needed a code the closed §1.6 list did
+  not have. The list is `#[non_exhaustive]` and PROTOCOL §1.6 says to treat it as an enum with an
+  `unknown` fallback, so this is an additive change; §1.6 gained the row.
+- **`aulos_core::urls` is a new module** carrying the SSRF classifier (`validate`, `check`,
+  `is_blocked*`, `Reject`), lifted so the v1/v2 add paths can run the guard DESIGN §16.6/§17.3
+  promised without `aulos-api` depending on the bot crate — `AULOS_ALLOW_PRIVATE_TARGETS` was a
+  parsed-but-never-read config key. **`aulos_telegram::urls` still holds its own copy** of the same
+  table; it was left untouched to keep this pass inside its crate, and the follow-up is to make
+  that module a re-export of `aulos_core::urls` (its `extract` port stays where it is). Until then
+  the two tables must be changed together.
+- **`POST api/v2/downloads` no longer answers `"id": null`.** When every URL deduped it falls back
+  to the first `duplicates[].existing_id`, so `id` is always a string as PROTOCOL §4.1 types it.
+  §4.1 was amended to say so; `id` is therefore no longer *strictly* `ids[0]`.
+- **`plugins/reload`, `ytdl-options/reload` and `subscriptions/{id}/check` now read their (optional)
+  body** purely to run the `Content-Type` gate. They took no body argument at all before, so
+  DESIGN §16.6's "every mutating v2 route requires `Content-Type: application/json`" was not true
+  of them. Their success shapes are unchanged.

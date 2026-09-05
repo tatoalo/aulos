@@ -117,7 +117,7 @@ pub fn parse_download_options(
     if !truthy(&url_value) || !truthy(&quality_value) || !truthy(&dt_value) {
         return Err(invalid("url", legacy::MISSING_REQUIRED));
     }
-    let url = parse_url(py_str(&url_value).trim())?;
+    let url = parse_url(cfg, py_str(&url_value).trim())?;
 
     // --- 2. custom_name_prefix, before anything else legacy checked ---------------------------
     let custom_name_prefix = match body.get("custom_name_prefix") {
@@ -418,7 +418,7 @@ fn has_path_escape(v: &str) -> bool {
 /// `Unsupported URL`. The shim needs a real [`Url`] to build a [`DownloadRequest`], so a string
 /// that is not one is `unsupported_url` with the same sentence §11.7 pins for an unmappable
 /// resource.
-fn parse_url(raw: &str) -> Result<Url, ApiError> {
+fn parse_url(cfg: &Config, raw: &str) -> Result<Url, ApiError> {
     let url = Url::parse(raw).map_err(|_| {
         ApiError::new(
             ErrorCode::UnsupportedUrl,
@@ -433,6 +433,10 @@ fn parse_url(raw: &str) -> Result<Url, ApiError> {
             Some("url"),
         ));
     }
+    // The same SSRF guard the v2 add runs, gated on the same knob (DESIGN §16.6, §17.3). Legacy
+    // had none here, but `AULOS_ALLOW_PRIVATE_TARGETS=false` is the operator asking for one on
+    // *every* surface, and the v1 shim is a surface.
+    crate::v2::downloads::ssrf_guard(cfg, &url)?;
     Ok(url)
 }
 

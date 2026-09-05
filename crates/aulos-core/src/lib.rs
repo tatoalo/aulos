@@ -56,6 +56,7 @@ pub mod source;
 pub mod status;
 pub mod subscription;
 pub mod telegram;
+pub mod urls;
 pub mod ytdl_options;
 
 // ---------------------------------------------------------------------------
@@ -101,4 +102,5 @@ pub use subscription::{
     SubscriptionsHandle,
 };
 pub use telegram::{ChatConfig, normalize_download_selection};
+pub use urls::Reject as UrlReject;
 pub use ytdl_options::{YtdlOptions, YtdlOptionsError};

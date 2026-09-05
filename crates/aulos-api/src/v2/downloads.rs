@@ -79,8 +79,20 @@ pub async fn add(
         .map(|d| json!({ "url": d.url, "existing_id": d.existing_id }))
         .collect();
 
+    // PROTOCOL §4.1 types `id` as a non-nullable string, and §0 rule 2 tells client authors to
+    // declare it non-optional. With the default `AULOS_DEDUPE_MODE=active` an add whose every URL
+    // matched a live item mints no ids at all, so `ids.first()` alone would serialise `null` and
+    // make the documented "a duplicate is not an error" path a decode failure on the client. The
+    // existing item's id is the useful answer there — it is what DESIGN §8.3 means by "202 with
+    // the existing id", and it gives the caller something to poll.
+    let id = outcome
+        .ids
+        .first()
+        .copied()
+        .or_else(|| outcome.duplicates.first().map(|d| d.existing_id));
+
     let payload = json!({
-        "id": outcome.ids.first(),
+        "id": id,
         "ids": outcome.ids,
         "generation": outcome.generation,
         "seq": state.seq(),
@@ -215,7 +227,7 @@ fn parse_request(
     let cfg = &state.cfg;
     let raw_url =
         field(entry, defaults, "url").ok_or_else(|| ApiError::invalid("url", "url is required"))?;
-    let url = parse_url(parse_str("url", raw_url)?)?;
+    let url = parse_url(cfg, parse_str("url", raw_url)?)?;
 
     let download_type = match field(entry, defaults, "download_type") {
         Some(value) => DownloadType::from_str_exact(parse_str("download_type", value)?)
@@ -368,11 +380,15 @@ fn parse_request(
     })
 }
 
-/// A URL, trimmed, with a usable scheme.
+/// A URL, trimmed, with a usable scheme, and — when the operator has locked the deployment down —
+/// a routable target.
 ///
 /// `unsupported_url` rather than `validation_failed` for a scheme no provider could ever take, so
 /// a client can tell "you typed this wrong" from "this server cannot download that".
-fn parse_url(raw: &str) -> Result<Url, ApiError> {
+///
+/// The SSRF guard is [`ssrf_guard`]: DESIGN §16.6 and §17.3 promise that the v1/v2 adds run the
+/// same validator the Telegram bot does, with `allow_private = AULOS_ALLOW_PRIVATE_TARGETS`.
+fn parse_url(cfg: &Config, raw: &str) -> Result<Url, ApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(ApiError::invalid("url", "url is required"));
@@ -386,7 +402,24 @@ fn parse_url(raw: &str) -> Result<Url, ApiError> {
             Some("url"),
         ));
     }
+    ssrf_guard(cfg, &url)?;
     Ok(url)
+}
+
+/// Runs [`aulos_core::urls::check`] unless `AULOS_ALLOW_PRIVATE_TARGETS` says the operator wants
+/// private targets reachable (the default, because a home deployment legitimately downloads from
+/// its own LAN).
+///
+/// The reason string is the bot's, byte-for-byte, so the two surfaces refuse the same URL with the
+/// same sentence.
+///
+/// # Errors
+/// `400 validation_failed` naming `url`.
+pub fn ssrf_guard(cfg: &Config, url: &Url) -> Result<(), ApiError> {
+    if cfg.allow_private_targets {
+        return Ok(());
+    }
+    aulos_core::urls::check(url).map_err(|reject| ApiError::invalid("url", reject.to_string()))
 }
 
 fn parse_id(field_name: &str, raw: &str) -> Result<FormatId, ApiError> {
@@ -498,18 +531,76 @@ pub fn default_chapter_template(cfg: &Config) -> Arc<str> {
 mod tests {
     use super::*;
 
+    fn cfg(pairs: &[(&str, &str)]) -> Config {
+        aulos_core::config::load(&aulos_core::config::RawEnv::from_pairs(pairs.to_vec()))
+            .expect("the test config must load")
+    }
+
     #[test]
     fn a_scheme_no_provider_can_take_is_unsupported_not_invalid() {
-        let err = parse_url("magnet:?xt=urn:btih:deadbeef").expect_err("magnet");
+        let c = cfg(&[]);
+        let err = parse_url(&c, "magnet:?xt=urn:btih:deadbeef").expect_err("magnet");
         assert_eq!(err.code, ErrorCode::UnsupportedUrl);
         assert_eq!(
             &*err.message,
             "Unsupported resource \"magnet:?xt=urn:btih:deadbeef\""
         );
-        let err = parse_url("  ").expect_err("blank");
+        let err = parse_url(&c, "  ").expect_err("blank");
         assert_eq!(err.code, ErrorCode::ValidationFailed);
         assert_eq!(err.field.as_deref(), Some("url"));
-        assert!(parse_url(" https://a.test/x ").is_ok(), "trimmed");
+        assert!(parse_url(&c, " https://a.test/x ").is_ok(), "trimmed");
+    }
+
+    /// DESIGN §16.6 (SSRF) and §17.3: the API adds run the bot's validator, gated on
+    /// `AULOS_ALLOW_PRIVATE_TARGETS` — which defaults to `true`, because a home deployment
+    /// legitimately downloads from its own LAN.
+    #[test]
+    fn the_ssrf_guard_follows_allow_private_targets() {
+        let permissive = cfg(&[]);
+        assert!(
+            permissive.allow_private_targets,
+            "the API default is permissive"
+        );
+        for raw in [
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            "http://127.0.0.1:8081/x",
+            "http://[::1]/x",
+            "http://localhost/x",
+        ] {
+            assert!(parse_url(&permissive, raw).is_ok(), "{raw}");
+        }
+
+        let locked = cfg(&[("AULOS_ALLOW_PRIVATE_TARGETS", "false")]);
+        for (raw, reason) in [
+            (
+                "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+                "private/local IP targets are not allowed",
+            ),
+            (
+                "http://10.0.0.5/x",
+                "private/local IP targets are not allowed",
+            ),
+            (
+                "http://[::ffff:127.0.0.1]/x",
+                "private/local IP targets are not allowed",
+            ),
+            ("http://localhost/x", "local network hosts are not allowed"),
+            ("http://nas.local/x", "local network hosts are not allowed"),
+        ] {
+            let err = parse_url(&locked, raw).expect_err(raw);
+            assert_eq!(err.code, ErrorCode::ValidationFailed, "{raw}");
+            assert_eq!(err.field.as_deref(), Some("url"), "{raw}");
+            assert_eq!(&*err.message, reason, "{raw}");
+        }
+        // A public target is still fine, and an unusable scheme is still `unsupported_url` rather
+        // than the guard's `validation_failed`.
+        assert!(parse_url(&locked, "https://www.youtube.com/watch?v=x").is_ok());
+        assert_eq!(
+            parse_url(&locked, "magnet:?xt=urn:btih:deadbeef")
+                .expect_err("magnet")
+                .code,
+            ErrorCode::UnsupportedUrl
+        );
     }
 
     #[test]

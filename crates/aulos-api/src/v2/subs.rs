@@ -155,7 +155,12 @@ pub async fn check_many(
 pub async fn check_one(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
+    // Same gate as every other mutating v2 route (DESIGN §16.6): a present-but-wrong
+    // `Content-Type` is a `400`, an absent one with an empty body is the bodyless `curl` case.
+    optional_json_body(&headers, &body)?;
     let sub = parse_id(&id)?;
     accepted(&state, vec![sub]).await
 }

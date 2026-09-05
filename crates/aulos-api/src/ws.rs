@@ -296,7 +296,8 @@ async fn session(state: ApiState, query: WsQuery, mut socket: WebSocket) {
     }
 }
 
-/// Builds and sends a `snapshot`, returning the cursor it establishes.
+/// Builds and sends a `snapshot`, then replays whatever the generation has not absorbed yet,
+/// returning the cursor the pair establishes.
 ///
 /// The cursor is an `Option` because `seq` is allocated from zero: the boot-time empty generation
 /// reports `seq = 0`, which is the same value the very first frame carries. `None` means "nothing
@@ -326,7 +327,42 @@ async fn send_snapshot(
     );
     let body = crate::v2::query::snapshot_of(state, &published, done, Some(extra)).await;
     send(state, socket, text(&body)).await?;
-    Ok(cursor)
+    catch_up(state, socket, cursor).await
+}
+
+/// Replays the frames that are newer than the snapshot but older than this subscription.
+///
+/// "Subscribe first, snapshot second" covers a frame published *between* the two — it is buffered
+/// in `rx` and filtered against the snapshot's cursor. It does **not** cover a frame published
+/// *before* `subscribe` that the published generation has not absorbed yet, and that window is
+/// open on every flush: [`aulos_queue::Aggregator::flush`] publishes all of a tick's frames and
+/// republishes the generation last, so `hub.head() > published.seq` for the length of the delta
+/// diff. Such a frame is in neither place, and when it is an item's last frame — a `completed` —
+/// nothing later repairs the row.
+///
+/// The replay ring already holds it, and `?since=` already knows how to fold a window out of it,
+/// so this is the same machinery pointed at the snapshot's own cursor.
+async fn catch_up(
+    state: &ApiState,
+    socket: &mut WebSocket,
+    cursor: Option<Seq>,
+) -> Result<Option<Seq>, ()> {
+    let seen = cursor.unwrap_or(Seq(0));
+    if state.hub.head() <= seen {
+        return Ok(cursor);
+    }
+    match state.hub.resume(seen, Some(state.hub.boot_id())) {
+        Resume::Merged { to, frames, .. } => {
+            for frame in &frames {
+                forward(state, socket, frame).await?;
+            }
+            Ok(Some(to))
+        }
+        // `UpToDate` is the race closing under us; `Snapshot` means the gap is older than the
+        // ring floor, which can only happen if the generation is `AULOS_REPLAY_FRAMES` behind —
+        // there is nothing left to replay, and re-snapshotting would only loop.
+        Resume::UpToDate | Resume::Snapshot => Ok(cursor),
+    }
 }
 
 /// Answers a `?since=` cursor: a `resume` envelope plus the folded frames, or a fresh snapshot.

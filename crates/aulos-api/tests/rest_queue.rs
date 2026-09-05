@@ -242,6 +242,14 @@ async fn a_duplicate_is_reported_not_rejected() {
         let (status, second) = rig.post("api/v2/downloads", &body).await;
         assert_eq!(status, 202, "a duplicate is not an error: {second}");
         assert!(second["ids"].as_array().unwrap().is_empty());
+        // PROTOCOL §4.1 types `id` as a non-nullable string and §0 rule 2 tells a Swift client to
+        // declare it non-optional, so the all-deduped case falls back to the existing item's id —
+        // never `null`, which would make the documented "not an error" path a decode failure.
+        assert_eq!(
+            second["id"],
+            id.as_str(),
+            "id falls back to the first duplicate's existing_id: {second}"
+        );
         let duplicates = second["duplicates"].as_array().unwrap();
         assert_eq!(duplicates.len(), 1);
         assert_eq!(duplicates[0]["existing_id"], id.as_str());
@@ -662,6 +670,7 @@ async fn the_state_etag_makes_a_refresh_free() {
             .unwrap()
             .to_owned();
         assert!(etag.starts_with("W/\""), "{etag}");
+        assert_eq!(etag_seq(&etag), body_of(response).await["seq"].as_u64());
 
         let response = rig
             .http
@@ -674,6 +683,67 @@ async fn the_state_etag_makes_a_refresh_free() {
         assert!(response.text().await.unwrap().is_empty(), "an empty body");
     })
     .await;
+}
+
+/// PROTOCOL §4.3 defines the ETag as `W/"<boot_id>-<seq>"` where `seq` is the response's **own**
+/// cursor. During a flush the hub's head runs ahead of the published generation the body is built
+/// from (the aggregator republishes last), and an ETag taken from the head would name a cursor the
+/// body does not carry — so the next poll would `304` forever against a snapshot that never
+/// contained the finished item.
+///
+/// The window is reproduced exactly by publishing a frame onto the hub without republishing.
+#[tokio::test]
+async fn the_state_etag_never_names_a_cursor_the_body_does_not_carry() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let id = rig.add("https://fake.test/etag").await;
+        rig.until_status(&id, "finished").await;
+        rig.settle().await;
+
+        let (_, before) = rig.get("api/v2/state").await;
+        let published = before["seq"].as_u64().unwrap();
+
+        // Head moves; the published generation does not. This is the shape of a flush's interior.
+        rig.hub.publish(
+            aulos_queue::FrameKind::Notice,
+            json!({ "level": "info", "code": "plugin_note", "id": null, "message": "gap" }),
+        );
+        assert!(rig.hub.head().0 > published, "the window is open");
+
+        let response = rig.get_raw("api/v2/state").await;
+        let etag = response
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = body_of(response).await;
+        assert_eq!(
+            etag_seq(&etag),
+            body["seq"].as_u64(),
+            "the ETag names the body's cursor, not the hub head: {etag} vs {body}"
+        );
+
+        // And the conditional refresh that follows must not hide the generation that lands next.
+        let (_, item) = rig.get(&format!("api/v2/items/{id}")).await;
+        assert_eq!(item["status"], "finished");
+    })
+    .await;
+}
+
+/// The `seq` inside a `W/"<boot_id>-<seq>"` ETag.
+fn etag_seq(etag: &str) -> Option<u64> {
+    etag.trim_start_matches("W/")
+        .trim_matches('"')
+        .rsplit_once('-')
+        .and_then(|(_, seq)| seq.parse().ok())
+}
+
+/// The JSON body of a response a test already holds for its headers.
+async fn body_of(response: reqwest::Response) -> Value {
+    let text = response.text().await.unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 #[tokio::test]
@@ -972,6 +1042,59 @@ async fn one_item_and_its_file_redirect() {
         let (status, body) = rig.get("api/v2/items/01JBQ7Z5T9K3M2R8V4XW6Y0AAA").await;
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["error"]["code"], "not_found");
+    })
+    .await;
+}
+
+/// DESIGN §16.6 (SSRF row) and §17.3: "the v1/v2 API adds run the same validator with
+/// `allow_private = AULOS_ALLOW_PRIVATE_TARGETS`". The knob defaults to `true`, so the LAN adds a
+/// home deployment relies on keep working; `false` is the operator locking the deployment down,
+/// and it must actually reach both add paths.
+#[tokio::test]
+async fn allow_private_targets_gates_the_ssrf_guard_on_both_add_paths() {
+    for_each_prefix(|prefix| async move {
+        const METADATA: &str = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
+
+        // The default posture: private targets are reachable, exactly as before.
+        let open = Rig::start(prefix).await;
+        let (status, body) = open
+            .post("api/v2/downloads", &json!({ "url": METADATA }))
+            .await;
+        assert_eq!(status, 202, "the default is permissive: {body}");
+
+        let locked = Rig::builder(prefix)
+            .env("AULOS_ALLOW_PRIVATE_TARGETS", "false")
+            .start()
+            .await;
+        for url in [
+            METADATA,
+            "http://127.0.0.1:8081/x",
+            "http://10.0.0.5/x",
+            "http://localhost/x",
+        ] {
+            let (status, body) = locked
+                .post("api/v2/downloads", &json!({ "url": url }))
+                .await;
+            assert_eq!(status, 400, "{url} was accepted: {body}");
+            assert_eq!(body["error"]["code"], "validation_failed", "{url}");
+            assert_eq!(body["error"]["field"], "url", "{url}");
+        }
+
+        // The v1 shim is a surface too.
+        let response = locked
+            .http
+            .post(locked.url("add"))
+            .json(&json!({ "url": METADATA, "quality": "best", "format": "any" }))
+            .send()
+            .await
+            .unwrap();
+        let (status, body) = support::status_and_body(response).await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"]["code"], "validation_failed", "{body}");
+
+        // A public URL is untouched by the guard.
+        let (status, body) = locked.post("api/v2/downloads", &json!({ "url": YT })).await;
+        assert_eq!(status, 202, "{body}");
     })
     .await;
 }

@@ -243,3 +243,162 @@ async fn a_finished_items_download_url_actually_resolves() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// what the route must never serve
+// ---------------------------------------------------------------------------
+
+/// The shipped image sets `DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube`, so STATE_DIR is
+/// *inside* the served root and containment cannot exclude it. `cookies.txt` is the operator's
+/// live site sessions and `aulos.db` is the whole queue, history and Telegram config; neither is
+/// reachable through a route whose stock posture has no auth at all (DESIGN §16.6).
+#[tokio::test]
+async fn the_state_directory_is_never_served_even_when_it_is_inside_the_download_root() {
+    for_each_prefix(|prefix| async move {
+        // The shipped layout, in shape: `STATE_DIR` (and the database) inside `DOWNLOAD_DIR`
+        // — `docker/Dockerfile` sets `DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube`. It
+        // is nested one level deeper here only so the enclosing directory can be listed, since the
+        // `download/{*path}` route has no spelling for the root itself.
+        let rig = Rig::builder(prefix)
+            .env("DOWNLOAD_DIRS_INDEXABLE", "true")
+            .env("STATE_DIR", "{dir}/downloads/Media/.metube")
+            .env("AULOS_DB_PATH", "{dir}/downloads/Media/.metube/aulos.db")
+            .start()
+            .await;
+        let state_dir = rig.cfg.paths.state.clone();
+        assert!(
+            state_dir.starts_with(rig.download_dir()),
+            "the test must reproduce the shipped layout: {state_dir:?}"
+        );
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("cookies.txt"),
+            b"# Netscape HTTP Cookie File\nSECRET",
+        )
+        .unwrap();
+        std::fs::write(state_dir.join("aulos.db"), b"SQLite format 3\0").unwrap();
+        rig.write_download("Media/ok.mp4", BODY);
+
+        for path in [
+            "download/Media/.metube/cookies.txt",
+            "download/Media/.metube/aulos.db",
+            "download/Media/.metube",
+        ] {
+            let response = rig.get_raw(path).await;
+            assert_eq!(response.status().as_u16(), 404, "{path}");
+            let text = response.text().await.unwrap();
+            assert!(!text.contains("SECRET"), "{path} leaked the cookie jar");
+            assert!(!text.contains("SQLite"), "{path} leaked the database");
+        }
+
+        // Nor is it advertised in the listing a prober would read first.
+        let (status, body) = rig.get("download/Media").await;
+        assert_eq!(status, 200, "{body}");
+        let names: Vec<&str> = body["dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(body["files"].as_array().unwrap())
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(names.contains(&"ok.mp4"), "{names:?}");
+        assert!(!names.contains(&".metube"), "{names:?}");
+    })
+    .await;
+}
+
+/// The download tree shares an origin with the API and the WebSocket, and in the intended VPS
+/// deployment that origin carries the reverse proxy's session cookie. An `*.html` or `*.svg` that
+/// lands in the tree — through the share the volume is exported over, or a `command` plugin — must
+/// not execute script there.
+#[tokio::test]
+async fn a_scriptable_file_is_served_as_an_opaque_attachment() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        rig.write_download(
+            "evil.html",
+            b"<script>fetch('/api/v2/items/clear')</script>",
+        );
+        rig.write_download("evil.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+        rig.write_download("notes.txt", b"hello");
+
+        for name in ["evil.html", "evil.svg", "notes.txt"] {
+            let response = rig.get_raw(&format!("download/{name}")).await;
+            assert_eq!(response.status().as_u16(), 200, "{name}");
+            let headers = response.headers().clone();
+            assert_eq!(
+                headers.get("x-content-type-options").unwrap(),
+                "nosniff",
+                "{name}"
+            );
+            assert_eq!(
+                headers.get("content-type").unwrap(),
+                "application/octet-stream",
+                "{name}"
+            );
+            let disposition = headers
+                .get("content-disposition")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(
+                disposition.starts_with("attachment;"),
+                "{name}: {disposition}"
+            );
+        }
+
+        // Media keeps its real type and stays inline, so playback and `Range` are unaffected.
+        rig.write_download("clip.mp4", BODY);
+        let response = rig.get_raw("download/clip.mp4").await;
+        assert_eq!(response.headers().get("content-type").unwrap(), "video/mp4");
+        assert_eq!(
+            response.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert!(response.headers().get("content-disposition").is_none());
+    })
+    .await;
+}
+
+/// RFC 9110 §14.2: a `Range` header the server cannot parse, or whose unit it does not know, is
+/// **ignored** — `416` is reserved for a valid-but-unsatisfiable byte-range-set. A multi-range set
+/// is legal, and a downloader that sends one must not be told the file is unfetchable.
+#[tokio::test]
+async fn an_unparseable_or_multi_range_header_serves_the_whole_file() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        rig.write_download("clip.mp4", BODY);
+
+        for header in [
+            "bytes=0-9,20-29",
+            "bytes=abc",
+            "bytes=-",
+            "items=0-1",
+            "bytes",
+        ] {
+            let response = rig
+                .http
+                .get(rig.url("download/clip.mp4"))
+                .header("range", header)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200, "{header}");
+            assert_eq!(response.bytes().await.unwrap().as_ref(), BODY, "{header}");
+        }
+
+        // A satisfiable one still ranges, and an unsatisfiable one is still a 416.
+        for (header, status) in [("bytes=0-4", 206), ("bytes=900-999", 416)] {
+            let response = rig
+                .http
+                .get(rig.url("download/clip.mp4"))
+                .header("range", header)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{header}");
+        }
+    })
+    .await;
+}
