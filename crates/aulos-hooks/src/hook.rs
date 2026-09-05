@@ -7,8 +7,11 @@
 //! | `HookCtx.item: &Item` | [`HookCtx::item`]`: &ItemView` | The dispatcher's only event source is an [`aulos_core::event::EventInbox`], and `DomainEvent::Finishing` / `DomainEvent::Completed` carry `Arc<ItemView>` (DESIGN §8.1). An `Item` is not obtainable in this crate: [`aulos_core::ports::HookStore`] deliberately exposes no item read, and adding one would put the whole row behind the port the design narrowed to three methods. Every field the four built-ins and a community `[[hook]]` read — `status`, `provider`, `filename`, `size`, `folder`, `selection`, `error`, `title`, `url` — is on `ItemView`. |
 //! | `applies(&self, item: &Item)` | [`Hook::applies`]`(&self, item, outcome)` | DESIGN §13 says a `PreTerminal` hook's `applies()` reads "the prospective outcome carried by `HookCtx.batch[0].status`", which a one-argument `applies(&item)` cannot see: on `Finishing` the row is still `postprocessing`. Passing the outcome explicitly makes the pre- and post-terminal cases one signature instead of two, and it is the same value the dispatcher puts in [`BatchEntry::status`]. |
 //!
-//! Both are recorded in `docs/INTEGRATION-NOTES.md` under WP-11.
+//! | `applies(..) -> bool` alone | [`Hook::applies`] plus [`Hook::skip_reason`] | A `false` says a hook did not run; it does not say why, and the dispatcher then has nothing to log or count. `runs_total: 0, failures_total: 0, status: "ok"` is what the built-in NFO hook reported for a whole production cutover while it was gated out by a provider check nobody could see. `skip_reason` is what the dispatcher gates on; `applies` stays as the cheap predicate, defined as `skip_reason(..).is_none()` by every built-in, and out-of-tree hooks that implement only `applies` still get counted (with a generic reason) through the default. |
+//!
+//! All three are recorded in `docs/INTEGRATION-NOTES.md` under WP-11.
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,6 +113,54 @@ impl Debounce {
         !self.window.is_zero()
     }
 }
+
+/// Why a hook did **not** run for one event (DESIGN §13, §16.3).
+///
+/// A hook that never runs and never fails is otherwise indistinguishable from a healthy idle one:
+/// `runs_total: 0, failures_total: 0, status: "ok"` is what the production report of the built-in
+/// NFO hook looked like while it was silently gated out. Every gate a hook applies therefore names
+/// itself, the dispatcher logs it at DEBUG and counts it, and `healthz` reports `skipped_total`
+/// with the `last_skip_reason`.
+///
+/// The text is a short lowercase phrase completing "skipped because …", so it reads the same in a
+/// log line and in a health payload.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SkipReason(Cow<'static, str>);
+
+impl SkipReason {
+    /// A reason known at compile time.
+    #[must_use]
+    pub const fn new(reason: &'static str) -> Self {
+        Self(Cow::Borrowed(reason))
+    }
+
+    /// A reason that has to name a runtime value (a provider id, an outcome).
+    #[must_use]
+    pub fn owned(reason: impl Into<String>) -> Self {
+        Self(Cow::Owned(reason.into()))
+    }
+
+    /// The reason text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<SkipReason> for String {
+    fn from(r: SkipReason) -> Self {
+        r.0.into_owned()
+    }
+}
+
+/// The reason a hook that only implements [`Hook::applies`] gives, since it has none of its own.
+pub const NOT_APPLICABLE: SkipReason = SkipReason::new("it does not apply to this item");
 
 /// A hook's own contribution to its `healthz` component (DESIGN §16.3).
 ///
@@ -259,7 +310,26 @@ pub trait Hook: Send + Sync {
     ///
     /// Must be cheap and side-effect free: the dispatcher calls it once per event, before
     /// enqueueing anything.
+    ///
+    /// A built-in implements this as `self.skip_reason(item, outcome).is_none()` and puts the
+    /// gates in [`Hook::skip_reason`], so a skip can say *why*.
     fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool;
+
+    /// Why this hook does not run for `item`, or `None` when it does.
+    ///
+    /// This is the method the dispatcher gates on; [`Hook::applies`] stays as the cheap predicate
+    /// a caller outside the dispatcher (a test, `doctor`) asks. The default derives the answer
+    /// from `applies` with the generic [`NOT_APPLICABLE`] reason, so an out-of-tree hook keeps
+    /// compiling and is still counted as skipped — it just cannot be specific about it.
+    ///
+    /// Must be cheap and side-effect free, for the same reason `applies` must be.
+    fn skip_reason(&self, item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        if self.applies(item, outcome) {
+            None
+        } else {
+            Some(NOT_APPLICABLE)
+        }
+    }
 
     /// The hook's own view of its health. See [`HookHealth`].
     fn health(&self) -> HookHealth {
@@ -293,6 +363,19 @@ mod tests {
     fn a_cap_below_the_window_is_raised_to_it() {
         let d = Debounce::capped(Duration::from_secs(30), Duration::from_secs(5));
         assert_eq!(d.max_wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_skip_reason_carries_its_text_either_way_it_was_built() {
+        assert_eq!(SkipReason::new("it is disabled").as_str(), "it is disabled");
+        assert_eq!(
+            SkipReason::owned(format!("the outcome is {}", TerminalStatus::Error)).to_string(),
+            "the outcome is error"
+        );
+        assert_eq!(
+            String::from(NOT_APPLICABLE),
+            "it does not apply to this item"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use aulos_core::status::TerminalStatus;
 use aulos_hooks::hook::{BatchEntry, Hook};
 use aulos_hooks::nfo::{self, NfoHook};
 use aulos_hooks::{HookRunner, HookStore};
-use common::{Call, FakeStore, ItemBuilder, config_rooted, sink};
+use common::{Call, FakeStore, ItemBuilder, config, config_rooted, sink};
 
 /// Loads a checked-in blob fixture.
 fn fixture(name: &str) -> EntryBlob {
@@ -322,9 +322,10 @@ async fn the_hook_can_be_disabled() {
     assert!(store.writes().is_empty(), "and it wrote nothing");
 }
 
-/// `applies` is narrow on purpose: only a finished StreamingCommunity item with a file.
+/// The regression this hook exists for: it applies to a finished item of **any** provider, not
+/// only StreamingCommunity, because legacy wrote an NFO for every finished download.
 #[test]
-fn applies_is_limited_to_finished_streamingcommunity_items() {
+fn applies_to_a_finished_item_of_every_provider() {
     let hook = NfoHook::new();
     let sc = ItemBuilder::finished("Clip")
         .provider("streamingcommunity")
@@ -333,14 +334,276 @@ fn applies_is_limited_to_finished_streamingcommunity_items() {
     assert!(!hook.applies(&sc, TerminalStatus::Error));
     assert!(!hook.applies(&sc, TerminalStatus::Canceled));
 
-    let ytdlp = ItemBuilder::finished("Clip").view();
-    assert!(!hook.applies(&ytdlp, TerminalStatus::Finished));
+    let ytdlp = ItemBuilder::finished("Clip").provider("ytdlp").view();
+    assert!(
+        hook.applies(&ytdlp, TerminalStatus::Finished),
+        "a YouTube download gets an NFO too"
+    );
+
+    let plugin = ItemBuilder::finished("Clip").provider("command:x").view();
+    assert!(hook.applies(&plugin, TerminalStatus::Finished));
 
     let no_file = ItemBuilder::finished("Clip")
         .provider("streamingcommunity")
         .no_file()
         .view();
     assert!(!hook.applies(&no_file, TerminalStatus::Finished));
+}
+
+/// Every gate names itself, so a skipped hook is never mistaken for an idle one.
+#[test]
+fn every_gate_names_itself_as_a_skip_reason() {
+    let hook = NfoHook::new();
+    let view = ItemBuilder::finished("Clip").provider("ytdlp").view();
+    assert_eq!(hook.skip_reason(&view, TerminalStatus::Finished), None);
+    assert_eq!(
+        hook.skip_reason(&view, TerminalStatus::Error)
+            .map(|r| r.as_str().to_owned()),
+        Some("the outcome is error, not finished".to_owned())
+    );
+
+    let no_file = ItemBuilder::finished("Clip").no_file().view();
+    assert_eq!(
+        hook.skip_reason(&no_file, TerminalStatus::Finished)
+            .map(|r| r.as_str().to_owned()),
+        Some("the item produced no file".to_owned())
+    );
+
+    let cfg = config(&[("AULOS_NFO_ENABLED", "false")]);
+    assert_eq!(
+        NfoHook::from_config(&cfg)
+            .skip_reason(&view, TerminalStatus::Finished)
+            .map(|r| r.as_str().to_owned()),
+        Some("AULOS_NFO_ENABLED is false".to_owned())
+    );
+}
+
+/// `AULOS_NFO_PROVIDERS` restores the old narrowing for anyone who wants it, and says so when it
+/// gates an item out.
+#[test]
+fn the_provider_allow_list_is_opt_in_and_explains_itself() {
+    let cfg = config(&[("AULOS_NFO_PROVIDERS", "streamingcommunity")]);
+    let hook = NfoHook::from_config(&cfg);
+    let sc = ItemBuilder::finished("Clip")
+        .provider("streamingcommunity")
+        .view();
+    let ytdlp = ItemBuilder::finished("Clip").provider("ytdlp").view();
+    assert!(hook.applies(&sc, TerminalStatus::Finished));
+    assert!(!hook.applies(&ytdlp, TerminalStatus::Finished));
+    assert_eq!(
+        hook.skip_reason(&ytdlp, TerminalStatus::Finished)
+            .map(|r| r.as_str().to_owned()),
+        Some("AULOS_NFO_PROVIDERS does not list ytdlp".to_owned())
+    );
+
+    // Several ids, and whitespace around them, are accepted.
+    let two = NfoHook::from_config(&config(&[(
+        "AULOS_NFO_PROVIDERS",
+        "streamingcommunity, ytdlp",
+    )]));
+    assert!(two.applies(&sc, TerminalStatus::Finished));
+    assert!(two.applies(&ytdlp, TerminalStatus::Finished));
+
+    // The default admits everything.
+    assert!(NfoHook::from_config(&config(&[])).applies(&ytdlp, TerminalStatus::Finished));
+}
+
+/// A yt-dlp item has no entry blob by the time hooks run (DESIGN §7.5 drops it at the terminal
+/// write), so the `.info.json` legacy read is the source, and the NFO lands next to the file.
+#[tokio::test]
+async fn a_ytdlp_item_renders_from_the_info_json_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Le incredibili elezioni del 2000")
+        .provider("ytdlp")
+        .filename("Le incredibili elezioni del 2000 [8Xrcn5B04u4].mp4");
+    let view = item.view();
+
+    std::fs::write(
+        dir.path()
+            .join("Le incredibili elezioni del 2000 [8Xrcn5B04u4].mp4"),
+        b"video",
+    )
+    .expect("media");
+    std::fs::write(
+        dir.path()
+            .join("Le incredibili elezioni del 2000 [8Xrcn5B04u4].info.json"),
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/youtube_info.json"),
+        )
+        .expect("fixture"),
+    )
+    .expect("sidecar");
+
+    // No blob at all, which is what the engine leaves behind for a plain yt-dlp row.
+    let store = FakeStore::new();
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    runner
+        .run(
+            &NfoHook::new(),
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("the hook writes");
+
+    let written = std::fs::read_to_string(
+        dir.path()
+            .join("Le incredibili elezioni del 2000 [8Xrcn5B04u4].nfo"),
+    )
+    .expect("the nfo exists");
+    assert!(
+        written.contains("<uniqueid type=\"youtube\">8Xrcn5B04u4</uniqueid>"),
+        "{written}"
+    );
+    assert!(
+        written.contains("<studio>Il Post</studio>"),
+        "the uploader becomes the studio: {written}"
+    );
+    assert!(
+        written.contains("<premiered>2026-08-30</premiered>"),
+        "{written}"
+    );
+    assert!(
+        dir.path()
+            .join("Le incredibili elezioni del 2000 [8Xrcn5B04u4].info.json")
+            .exists(),
+        "the sidecar survives by default"
+    );
+    assert!(
+        store.writes().is_empty(),
+        "a row with no blob is not charged an engine round trip: {:?}",
+        store.writes()
+    );
+}
+
+/// A blob that carries no element — a yt-dlp playlist child keeps only its `outtmpl` hints
+/// (DESIGN §7.5) — must not shadow a sidecar that carries the whole info dict.
+#[tokio::test]
+async fn a_hints_only_blob_does_not_shadow_the_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Clip")
+        .provider("ytdlp")
+        .filename("Clip.mp4");
+    let id = item.id();
+    let view = item.view();
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    std::fs::write(
+        dir.path().join("Clip.info.json"),
+        br#"{"id":"abc","title":"Dal sidecar","extractor":"youtube"}"#,
+    )
+    .expect("sidecar");
+
+    let hints = EntryBlob::new(serde_json::json!({
+        "hints": { "playlist_index": 3 },
+        "state": { "playlist": "Una playlist", "n_entries": 9 },
+    }));
+    let store = FakeStore::with_blob(id, hints);
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    runner
+        .run(
+            &NfoHook::new(),
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("the hook writes");
+    let written = std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("the nfo exists");
+    assert!(written.contains("<title>Dal sidecar</title>"), "{written}");
+    assert!(
+        written.contains("<uniqueid type=\"youtube\">abc</uniqueid>"),
+        "{written}"
+    );
+}
+
+/// A StreamingCommunity blob still wins over any sidecar: it is the richer source and the sidecar
+/// is not written for that provider at all.
+#[tokio::test]
+async fn a_streamingcommunity_blob_wins_over_a_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Il Grande Film")
+        .provider("streamingcommunity")
+        .filename("Clip.mp4");
+    let id = item.id();
+    let view = item.view();
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    std::fs::write(
+        dir.path().join("Clip.info.json"),
+        br#"{"id":"wrong","title":"Non usare questo","extractor":"youtube"}"#,
+    )
+    .expect("sidecar");
+
+    let store = FakeStore::with_blob(id, fixture("sc_movie_state.json"));
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    runner
+        .run(
+            &NfoHook::new(),
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("the hook writes");
+    let written = std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("the nfo exists");
+    assert!(
+        written.contains("<uniqueid type=\"streamingcommunity\">sc_1234</uniqueid>"),
+        "{written}"
+    );
+    assert!(!written.contains("Non usare questo"), "{written}");
+}
+
+/// A sidecar that is not JSON, or is not there at all, still produces a valid document.
+#[tokio::test]
+async fn a_broken_sidecar_is_not_a_hook_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = config_rooted(dir.path(), &[]);
+    let item = ItemBuilder::finished("Titolo dalla riga")
+        .provider("ytdlp")
+        .filename("Clip.mp4");
+    let view = item.view();
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    std::fs::write(dir.path().join("Clip.info.json"), b"{not json").expect("sidecar");
+
+    let store = FakeStore::new();
+    let (factory, _rx) = sink();
+    let runner = HookRunner::new(
+        Arc::clone(&cfg),
+        Arc::new(FakeClock::default()),
+        Arc::clone(&store) as Arc<dyn HookStore>,
+        factory,
+    );
+    runner
+        .run(
+            &NfoHook::new(),
+            &view,
+            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
+        )
+        .await
+        .expect("a broken sidecar is not an error");
+    let written = std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("the nfo exists");
+    assert!(
+        written.contains("<title>Titolo dalla riga</title>"),
+        "{written}"
+    );
 }
 
 /// A store that refuses the blob drop is a hook failure, not a lost NFO: the file is already on

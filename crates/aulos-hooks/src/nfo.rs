@@ -1,15 +1,39 @@
 //! NFO generation, now actually wired (DESIGN §13.2).
 //!
-//! A port of legacy `jellyfin_nfo_generator.py`, which existed but was **never referenced by any
-//! code path** — the CLI was in the image and nothing ever called it. Two things move:
+//! A port of legacy `jellyfin_nfo_generator.py`, which the legacy image ran as an `Exec`
+//! postprocessor on **every** finished download. Two things move:
 //!
-//! - The input is the item's `entry_json`, read through [`aulos_core::ports::HookStore`], **not**
-//!   the on-disk `.info.json`. So there is nothing to delete and no race with a user's own `Exec`
+//! - The input is preferably the item's `entry_json`, read through
+//!   [`aulos_core::ports::HookStore`], and only otherwise the on-disk `.info.json`. So for a
+//!   StreamingCommunity item there is nothing to read back and no race with a user's own `Exec`
 //!   postprocessor, and the sidecar survives by default (`AULOS_NFO_DELETE_INFO_JSON`, default
 //!   `false`). The legacy CLI always deleted it; making that opt-in avoids breaking anyone's
 //!   pipeline on the wrong side of a cutover.
 //! - After a successful write the blob is dropped through the port, because DESIGN §7.5 keeps SC
 //!   entries alive past the terminal transition **only** until this hook has run.
+//!
+//! # Every provider, not just StreamingCommunity
+//!
+//! DESIGN §13 originally scoped this hook to `provider == "streamingcommunity"`, on the reasoning
+//! that YouTube NFOs came out of the user's own `Exec` postprocessor. In production they did not:
+//! aulos downloads into a per-job temp dir and only `MoveFiles` at the end, so an `Exec` command
+//! resolving `<file>.info.json` next to `%(filepath)q` looks in the temp dir while `writeinfojson`
+//! has already written the sidecar to the final one, and the legacy generator exits having found
+//! nothing. The result was a cutover with **no `.nfo` at all** — the built-in hook gated out and
+//! the user hook broken. So the gate is now the outcome, the file and `AULOS_NFO_ENABLED`, with
+//! `AULOS_NFO_PROVIDERS` as an opt-in allow-list for anyone who wants the old narrowing back.
+//!
+//! # Where the metadata comes from, per provider
+//!
+//! | Provider | Blob at hook time (DESIGN §7.5) | Source used |
+//! |---|---|---|
+//! | `streamingcommunity` | the whole `state` object, kept alive for this hook | the blob |
+//! | `command:<name>` | `state` + `media_id`/`title`/`url` | the blob, sidecar if it carries nothing |
+//! | `ytdlp` | nothing (a playlist child keeps only `outtmpl` hints) | the `<file>.info.json` sidecar |
+//!
+//! The sidecar is exactly what the legacy generator read, so a yt-dlp download renders the XML
+//! legacy rendered for the same input — which is what `tests/nfo_legacy_parity.rs` pins against
+//! output captured from `jellyfin_nfo_generator.py` itself.
 //!
 //! # The three blob shapes this must read
 //!
@@ -39,7 +63,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use serde_json::{Map, Value};
 
 use crate::error::HookError;
-use crate::hook::{Hook, HookCtx, HookHealth};
+use crate::hook::{Hook, HookCtx, HookHealth, SkipReason};
 
 /// `ordering` — after `audio_sync` (which rewrites the file) and before the Jellyfin scan
 /// (which reads the NFO) (DESIGN §13).
@@ -48,8 +72,39 @@ pub const ORDERING: i16 = 20;
 /// The `healthz` component key and the hook id.
 pub const ID: &str = "nfo";
 
-/// The provider whose items get an NFO (DESIGN §13).
+/// The provider whose `uniqueid` carries its own `type` (DESIGN §13, legacy `create_nfo_xml`).
+///
+/// It is no longer a gate: the hook applies to every provider unless `AULOS_NFO_PROVIDERS` names
+/// a narrower set.
 pub const PROVIDER: &str = "streamingcommunity";
+
+/// The largest `.info.json` the sidecar fallback will read.
+///
+/// yt-dlp sidecars are routinely half a megabyte (601 KB for the download in the report that
+/// prompted this) and occasionally much larger on a channel entry, but a hook must not read an
+/// arbitrary file into memory just because it sits next to the media.
+pub const MAX_INFO_JSON_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The keys whose presence makes a blob worth rendering from.
+///
+/// A StreamingCommunity `state` has no `title` (DESIGN §10.3 splits the identity into
+/// `title_id`/`episode_id`), while a plain yt-dlp row keeps nothing but `outtmpl` hints — so
+/// "is there a blob?" is the wrong question and "does the blob carry any element?" is the right
+/// one.
+const METADATA_KEYS: [&str; 12] = [
+    "title",
+    "id",
+    "title_id",
+    "description",
+    "plot",
+    "upload_date",
+    "uploader",
+    "channel",
+    "tags",
+    "duration",
+    "webpage_url",
+    "original_url",
+];
 
 /// The maximum number of `<tag>` elements, from legacy's `tags[:20]`.
 pub const MAX_TAGS: usize = 20;
@@ -136,6 +191,13 @@ impl<'a> Meta<'a> {
             Value::String(s) => s.trim().parse::<i64>().ok(),
             _ => None,
         }
+    }
+
+    /// Whether any element-bearing key is reachable, i.e. whether rendering from this blob would
+    /// produce more than the row alone already gives.
+    #[must_use]
+    pub fn carries_metadata(&self) -> bool {
+        METADATA_KEYS.iter().any(|k| self.get(k).is_some())
     }
 
     /// `key` as a float.
@@ -419,10 +481,52 @@ fn write_xml(root: &'static str, els: &[El]) -> Result<String, HookError> {
     Ok(out)
 }
 
+/// Reads a `.info.json` sidecar, the way the legacy generator did.
+///
+/// A missing sidecar is `None`, not an error: legacy logged a warning and exited 0, because
+/// `writeinfojson` is optional. So is an oversized or malformed one — an NFO rendered from the row
+/// alone is better than a failed hook, and the reason is logged either way.
+async fn read_info_json(path: &Path) -> Option<EntryBlob> {
+    match tokio::fs::metadata(path).await {
+        Ok(m) if m.len() > MAX_INFO_JSON_BYTES => {
+            tracing::warn!(
+                path = %path.display(), bytes = m.len(), cap = MAX_INFO_JSON_BYTES,
+                "info.json is too large to render an NFO from"
+            );
+            return None;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "no info.json sidecar next to the file");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not stat info.json");
+            return None;
+        }
+    }
+    let text = match tokio::fs::read_to_string(path).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not read info.json");
+            return None;
+        }
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => Some(EntryBlob::new(v)),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "info.json is not valid JSON");
+            None
+        }
+    }
+}
+
 /// The NFO writer (DESIGN §13.2).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct NfoHook {
     enabled: bool,
+    /// `AULOS_NFO_PROVIDERS`. Empty means every provider.
+    providers: Arc<[Box<str>]>,
 }
 
 impl Default for NfoHook {
@@ -432,18 +536,33 @@ impl Default for NfoHook {
 }
 
 impl NfoHook {
-    /// The hook, enabled.
+    /// The hook, enabled for every provider.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { enabled: true }
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            providers: Arc::from([]),
+        }
     }
 
-    /// The hook, armed from `AULOS_NFO_ENABLED`.
+    /// The hook, armed from `AULOS_NFO_ENABLED` and `AULOS_NFO_PROVIDERS`.
     #[must_use]
-    pub const fn from_config(cfg: &aulos_core::config::Config) -> Self {
+    pub fn from_config(cfg: &aulos_core::config::Config) -> Self {
         Self {
             enabled: cfg.nfo_enabled,
+            providers: cfg.nfo_providers.iter().cloned().collect(),
         }
+    }
+
+    /// Whether `provider` is in the allow-list. An empty list admits everything, which is the
+    /// default and the legacy behaviour.
+    #[must_use]
+    pub fn allows(&self, provider: Option<&str>) -> bool {
+        if self.providers.is_empty() {
+            return true;
+        }
+        let provider = provider.unwrap_or_default();
+        self.providers.iter().any(|p| &**p == provider)
     }
 }
 
@@ -461,12 +580,30 @@ impl Hook for NfoHook {
         true
     }
 
-    /// `finished && provider == "streamingcommunity" && AULOS_NFO_ENABLED` (DESIGN §13).
+    /// `finished && AULOS_NFO_ENABLED && the item produced a file` (DESIGN §13.2).
     fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
-        self.enabled
-            && outcome == TerminalStatus::Finished
-            && item.provider.as_deref() == Some(PROVIDER)
-            && item.filename.is_some()
+        self.skip_reason(item, outcome).is_none()
+    }
+
+    fn skip_reason(&self, item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        if !self.enabled {
+            return Some(SkipReason::new("AULOS_NFO_ENABLED is false"));
+        }
+        if outcome != TerminalStatus::Finished {
+            return Some(SkipReason::owned(format!(
+                "the outcome is {outcome}, not finished"
+            )));
+        }
+        if item.filename.is_none() {
+            return Some(SkipReason::new("the item produced no file"));
+        }
+        if !self.allows(item.provider.as_deref()) {
+            return Some(SkipReason::owned(format!(
+                "AULOS_NFO_PROVIDERS does not list {}",
+                item.provider.as_deref().unwrap_or("(no provider)")
+            )));
+        }
+        None
     }
 
     fn health(&self) -> HookHealth {
@@ -484,7 +621,23 @@ impl Hook for NfoHook {
         let Some(file) = ctx.file else {
             return Ok(());
         };
-        let xml = render(ctx.item, ctx.entry, ctx.clock.now_ms())?;
+
+        // The stored blob first, the sidecar second. For a StreamingCommunity item the blob is the
+        // whole `state` object and there is no sidecar to read; for a yt-dlp one DESIGN §7.5 keeps
+        // nothing but the `outtmpl` hints, so the `.info.json` legacy read is the only source of
+        // title, plot and tags.
+        let sidecar_path = info_json_path(file);
+        let from_disk: Option<EntryBlob> = if ctx
+            .entry
+            .is_some_and(|e| Meta::new(Some(e)).carries_metadata())
+        {
+            None
+        } else {
+            read_info_json(&sidecar_path).await
+        };
+        let entry: Option<&EntryBlob> = from_disk.as_ref().or(ctx.entry);
+
+        let xml = render(ctx.item, entry, ctx.clock.now_ms())?;
         let path = nfo_path(file);
         tokio::fs::write(&path, xml.as_bytes())
             .await
@@ -492,18 +645,24 @@ impl Hook for NfoHook {
         tracing::info!(path = %path.display(), "created NFO");
 
         if ctx.cfg.nfo_delete_info_json {
-            let sidecar = info_json_path(file);
-            match tokio::fs::remove_file(&sidecar).await {
-                Ok(()) => tracing::info!(path = %sidecar.display(), "deleted info.json"),
+            match tokio::fs::remove_file(&sidecar_path).await {
+                Ok(()) => tracing::info!(path = %sidecar_path.display(), "deleted info.json"),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    tracing::warn!(path = %sidecar.display(), error = %e, "could not delete info.json");
+                    tracing::warn!(path = %sidecar_path.display(), error = %e, "could not delete info.json");
                 }
             }
         }
 
-        // DESIGN §7.5: the SC blob is kept past the terminal transition only until this ran.
-        ctx.store.drop_entry_blob(ctx.item.id).await?;
+        // DESIGN §7.5: the SC blob is kept past the terminal transition only until this ran, so a
+        // StreamingCommunity row is always told to drop it — including when the blob failed to
+        // load, since a failed read is not proof there is nothing to drop, and the retryable error
+        // it raises is how that gets another try. Every other provider's row either carries a blob
+        // (a `command` plugin) or had it dropped by the engine at the terminal write (plain
+        // yt-dlp), and the latter is not charged an engine round trip per download.
+        if ctx.item.provider.as_deref() == Some(PROVIDER) || ctx.entry.is_some() {
+            ctx.store.drop_entry_blob(ctx.item.id).await?;
+        }
         Ok(())
     }
 }

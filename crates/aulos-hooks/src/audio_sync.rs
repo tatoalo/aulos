@@ -28,7 +28,7 @@ use aulos_provider::sink::Stage;
 
 use crate::error::HookError;
 use crate::ffprobe::{self, FFMPEG, MediaTools};
-use crate::hook::{Hook, HookCtx, HookHealth};
+use crate::hook::{Hook, HookCtx, HookHealth, SkipReason};
 
 /// `ordering` — first, because it rewrites the file the NFO and the Jellyfin scan describe
 /// (DESIGN §13).
@@ -202,11 +202,28 @@ impl Hook for AudioSyncHook {
     /// `outcome` is the *prospective* status: the row still reads `postprocessing` when this is
     /// called, because the engine has not written the terminal status yet.
     fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
-        outcome == TerminalStatus::Finished
-            && item.selection.download_type == DownloadType::Video
-            && &*item.selection.format == FORMAT
-            && &*item.selection.quality == QUALITY
-            && item.filename.is_some()
+        self.skip_reason(item, outcome).is_none()
+    }
+
+    fn skip_reason(&self, item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        if outcome != TerminalStatus::Finished {
+            return Some(SkipReason::owned(format!(
+                "the outcome is {outcome}, not finished"
+            )));
+        }
+        if item.selection.download_type != DownloadType::Video {
+            return Some(SkipReason::new("it is not a video download"));
+        }
+        if &*item.selection.format != FORMAT || &*item.selection.quality != QUALITY {
+            return Some(SkipReason::owned(format!(
+                "the selection is {}/{}, not {FORMAT}/{QUALITY}",
+                item.selection.format, item.selection.quality
+            )));
+        }
+        if item.filename.is_none() {
+            return Some(SkipReason::new("the item produced no file"));
+        }
+        None
     }
 
     fn health(&self) -> HookHealth {

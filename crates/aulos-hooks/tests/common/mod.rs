@@ -24,7 +24,7 @@ use aulos_core::request::DownloadRequest;
 use aulos_core::selection::{Codec, DownloadType, FormatId, ProviderId, QualityId, Selection};
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::{Status, TerminalStatus};
-use aulos_hooks::hook::{Debounce, Hook, HookCtx, HookHealth};
+use aulos_hooks::hook::{Debounce, Hook, HookCtx, HookHealth, SkipReason};
 use aulos_hooks::{HookError, HookPhase};
 use aulos_provider::sink::{ProgressMsg, ProgressSinkFactory};
 use tokio::sync::mpsc;
@@ -360,6 +360,7 @@ pub struct ScriptHook {
     debounce: Debounce,
     timeout: Duration,
     behaviour: Behaviour,
+    skip: Option<SkipReason>,
     log: Arc<Mutex<Vec<String>>>,
     batches: Arc<Mutex<Vec<Vec<String>>>>,
 }
@@ -375,6 +376,7 @@ impl ScriptHook {
             debounce: Debounce::NONE,
             timeout: Duration::from_secs(30),
             behaviour: Behaviour::Ok,
+            skip: None,
             log,
             batches: Arc::new(Mutex::new(Vec::new())),
         }
@@ -398,6 +400,14 @@ impl ScriptHook {
     #[must_use]
     pub fn behaving(mut self, behaviour: Behaviour) -> Self {
         self.behaviour = behaviour;
+        self
+    }
+
+    /// Makes it decline every event, naming `reason` — the shape of a hook whose gate never
+    /// opens, which is what `runs_total: 0` alone cannot express.
+    #[must_use]
+    pub fn skipping(mut self, reason: &'static str) -> Self {
+        self.skip = Some(SkipReason::new(reason));
         self
     }
 
@@ -446,8 +456,12 @@ impl Hook for ScriptHook {
         self.timeout
     }
 
-    fn applies(&self, _item: &ItemView, _outcome: TerminalStatus) -> bool {
-        true
+    fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
+        self.skip_reason(item, outcome).is_none()
+    }
+
+    fn skip_reason(&self, _item: &ItemView, _outcome: TerminalStatus) -> Option<SkipReason> {
+        self.skip.clone()
     }
 
     async fn run(&self, ctx: HookCtx<'_>) -> Result<(), HookError> {
@@ -515,6 +529,11 @@ impl Hook for RecordingHook {
 
     fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
         self.inner.applies(item, outcome)
+    }
+
+    fn skip_reason(&self, item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        // Forwarded, or the wrapper would flatten every wrapped hook's reason to the generic one.
+        self.inner.skip_reason(item, outcome)
     }
 
     fn health(&self) -> HookHealth {

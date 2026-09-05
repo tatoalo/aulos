@@ -231,3 +231,102 @@ printf 'RE-ENCODED' > "$out""#,
     assert_eq!(h.failures_total(), 0);
     assert_eq!(h.events_dropped, 0);
 }
+
+/// The production scenario of the bug report, end to end over the real hooks: a **yt-dlp**
+/// download with a `.info.json` sidecar and no entry blob. The NFO must be written, and it must be
+/// written *before* the Jellyfin scan, or the library refresh reads a directory with no `.nfo` in
+/// it and the metadata is missed until the next scan.
+#[tokio::test]
+async fn a_ytdlp_download_gets_its_nfo_before_the_jellyfin_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/youtube_info.json"),
+        dir.path().join("Clip.info.json"),
+    )
+    .expect("sidecar");
+
+    let jellyfin = MockServer::start().await;
+    // The refresh only counts as correct if the NFO is already on disk when it arrives.
+    let seen_nfo = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let seen = Arc::clone(&seen_nfo);
+        let nfo_path = dir.path().join("Clip.nfo");
+        Mock::given(method("POST"))
+            .and(path("/Library/Refresh"))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.store(nfo_path.exists(), std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(204)
+            })
+            .expect(1)
+            .mount(&jellyfin)
+            .await;
+    }
+
+    let cfg = config_rooted(
+        dir.path(),
+        &[
+            ("JELLYFIN_SYNC_ENABLED", "true"),
+            ("JELLYFIN_URL", &jellyfin.uri()),
+            ("JELLYFIN_API_KEY", "secret"),
+            ("AULOS_JELLYFIN_DEBOUNCE_SECS", "0"),
+        ],
+    );
+
+    let seq = log();
+    let hooks: Vec<Arc<dyn Hook>> = vec![
+        RecordingHook::new(Arc::new(NfoHook::from_config(&cfg)), Arc::clone(&seq)),
+        RecordingHook::new(Arc::new(JellyfinHook::new(&cfg)), Arc::clone(&seq)),
+    ];
+    let dispatcher = HookDispatcher::with_hooks(
+        Arc::clone(&cfg),
+        hooks,
+        Arc::new(FakeClock::default()) as Arc<_>,
+    );
+    let health = dispatcher.health_handle();
+
+    let item = ItemBuilder::finished("Le incredibili elezioni del 2000")
+        .provider("ytdlp")
+        .filename("Clip.mp4");
+    // No blob: DESIGN §7.5 drops a plain yt-dlp entry at the terminal write.
+    let store = FakeStore::new();
+
+    let mut ev = events();
+    let (factory, _rx) = sink();
+    let task = dispatcher.spawn(ev.inbox(), factory, Arc::clone(&store) as Arc<_>);
+    ev.completed(&item.view()).await;
+    assert!(
+        until(|| read_log(&seq).len() == 2).await,
+        "{:?}",
+        read_log(&seq)
+    );
+    assert_eq!(
+        read_log(&seq),
+        ["nfo", "jellyfin"],
+        "nfo (20) before jellyfin (90)"
+    );
+
+    drop(ev.tx);
+    task.await.expect("clean stop");
+
+    let nfo = std::fs::read_to_string(dir.path().join("Clip.nfo")).expect("the NFO exists");
+    assert!(
+        nfo.contains("<uniqueid type=\"youtube\">8Xrcn5B04u4</uniqueid>"),
+        "rendered from the sidecar: {nfo}"
+    );
+    assert!(
+        seen_nfo.load(std::sync::atomic::Ordering::SeqCst),
+        "the library scan must see the .nfo"
+    );
+    assert!(
+        store.writes().is_empty(),
+        "a row with no blob makes no engine write: {:?}",
+        store.writes()
+    );
+    jellyfin.verify().await;
+
+    let h = health.health();
+    let stat = h.stat("nfo").expect("nfo");
+    assert_eq!(stat.runs_total, 1);
+    assert_eq!(stat.skipped_total, 0, "nothing was declined");
+}

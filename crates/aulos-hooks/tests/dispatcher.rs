@@ -379,3 +379,120 @@ async fn the_drop_counter_is_surfaced_in_health() {
     task.await.expect("clean stop");
     router_task.await.expect("the router stops");
 }
+
+/// The bug this was written for: `runs_total: 0, failures_total: 0, status: "ok"` is what a hook
+/// that silently declines every completion looked like, and it is indistinguishable from a hook
+/// that has simply had nothing to do. A skip is now counted, carries its reason, and says so in
+/// the component detail — while staying `ok`, because declining is not a failure.
+#[tokio::test]
+async fn a_hook_that_declines_every_event_is_visible_in_health() {
+    let seq = log();
+    let hooks: Vec<Arc<dyn Hook>> = vec![
+        Arc::new(
+            ScriptHook::new("nfo", 20, Arc::clone(&seq)).skipping("AULOS_NFO_ENABLED is false"),
+        ),
+        Arc::new(ScriptHook::new("jellyfin", 90, Arc::clone(&seq))),
+    ];
+    let dispatcher = HookDispatcher::with_hooks(
+        config(&[]),
+        hooks,
+        Arc::new(aulos_core::clock::FakeClock::default()),
+    );
+    let health = dispatcher.health_handle();
+
+    let mut ev = events();
+    let (factory, _rx) = sink();
+    let task = dispatcher.spawn(ev.inbox(), factory, FakeStore::new());
+    ev.completed(&ItemBuilder::finished("Clip").view()).await;
+    ev.completed(&ItemBuilder::finished("Altro").view()).await;
+
+    assert!(
+        until(|| health
+            .health()
+            .stat("jellyfin")
+            .is_some_and(|s| s.runs_total == 2))
+        .await,
+        "the rest of the chain ran, so the completion path itself worked"
+    );
+    assert!(
+        until(|| health
+            .health()
+            .stat("nfo")
+            .is_some_and(|s| s.skipped_total == 2))
+        .await
+    );
+
+    let view = health.health();
+    let nfo = view.stat("nfo").expect("nfo");
+    assert_eq!(nfo.runs_total, 0);
+    assert_eq!(nfo.failures_total, 0);
+    assert_eq!(nfo.skipped_total, 2);
+    assert_eq!(
+        nfo.last_skip_reason.as_deref(),
+        Some("AULOS_NFO_ENABLED is false")
+    );
+
+    let component = view.component("nfo").expect("the nfo component");
+    assert_eq!(
+        component.status,
+        aulos_core::health::ComponentStatus::Ok,
+        "a skip is not a failure"
+    );
+    assert_eq!(component.detail["runs_total"], 0);
+    assert_eq!(component.detail["skipped_total"], 2);
+    assert_eq!(
+        component.detail["last_skip_reason"],
+        "AULOS_NFO_ENABLED is false"
+    );
+    assert_eq!(
+        component.detail["detail"],
+        "never ran: 2 event(s) skipped, most recently because AULOS_NFO_ENABLED is false",
+        "the one thing `runs_total: 0` could not say"
+    );
+
+    // A hook that ran carries the counter too, at zero, and no reason.
+    let jellyfin = view.component("jellyfin").expect("the jellyfin component");
+    assert_eq!(jellyfin.detail["skipped_total"], 0);
+    assert!(!jellyfin.detail.contains_key("last_skip_reason"));
+    assert!(!jellyfin.detail.contains_key("detail"));
+
+    drop(ev.tx);
+    task.await.expect("clean stop");
+}
+
+/// A hook of the *other* phase was never offered the event, so it is not counted as a skip — only
+/// a hook that was asked and declined is.
+#[tokio::test]
+async fn the_other_phase_is_not_a_skip() {
+    let seq = log();
+    let hooks: Vec<Arc<dyn Hook>> = vec![
+        Arc::new(ScriptHook::new("audio_sync", 10, Arc::clone(&seq)).pre_terminal()),
+        Arc::new(ScriptHook::new("nfo", 20, Arc::clone(&seq))),
+    ];
+    let dispatcher = HookDispatcher::with_hooks(
+        config(&[]),
+        hooks,
+        Arc::new(aulos_core::clock::FakeClock::default()),
+    );
+    let health = dispatcher.health_handle();
+
+    let mut ev = events();
+    let (factory, _rx) = sink();
+    let task = dispatcher.spawn(ev.inbox(), factory, FakeStore::new());
+    ev.completed(&ItemBuilder::finished("Clip").view()).await;
+    assert!(
+        until(|| health
+            .health()
+            .stat("nfo")
+            .is_some_and(|s| s.runs_total == 1))
+        .await
+    );
+    settle().await;
+    assert_eq!(
+        health.health().stat("audio_sync").map(|s| s.skipped_total),
+        Some(0),
+        "a pre-terminal hook is not skipping the Completed event, it never sees it"
+    );
+    drop(ev.tx);
+    task.await.expect("clean stop");
+}

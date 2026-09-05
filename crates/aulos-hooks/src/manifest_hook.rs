@@ -23,7 +23,7 @@ use url::Url;
 
 use crate::error::HookError;
 use crate::ffprobe;
-use crate::hook::{Debounce, Hook, HookCtx, HookHealth};
+use crate::hook::{Debounce, Hook, HookCtx, HookHealth, SkipReason};
 
 /// The `tool` label a spawned community hook reports as, matching the `command` provider's.
 pub const TOOL: &str = "plugin";
@@ -253,7 +253,19 @@ impl Hook for ManifestHook {
     }
 
     fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
-        self.spec.fires_on(outcome) && self.filter_matches(item)
+        self.skip_reason(item, outcome).is_none()
+    }
+
+    fn skip_reason(&self, item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        if !self.spec.fires_on(outcome) {
+            return Some(SkipReason::owned(format!("`on` does not list {outcome}")));
+        }
+        if !self.filter_matches(item) {
+            return Some(SkipReason::new(
+                "the `when` filter does not match this item",
+            ));
+        }
+        None
     }
 
     async fn run(&self, ctx: HookCtx<'_>) -> Result<(), HookError> {

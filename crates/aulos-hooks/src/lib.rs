@@ -30,6 +30,14 @@
 //!
 //! An item that never finalises is worse than a failed re-encode, which is why
 //! [`dispatcher::HookFinalizer::hooks_finished`] is sent from every path.
+//!
+//! # Skips are observable
+//!
+//! Every gate a hook applies is a [`hook::SkipReason`], not a bare `false`: the dispatcher logs
+//! `hook skipped` at DEBUG with the hook id, the item id and the reason, counts `skipped_total`
+//! per hook, and `healthz` carries that count plus `last_skip_reason`. A hook that is registered,
+//! healthy and never runs is otherwise indistinguishable from one that has simply had nothing to
+//! do.
 
 pub mod audio_sync;
 pub mod dispatcher;
@@ -47,7 +55,10 @@ pub use dispatcher::{
 };
 pub use error::HookError;
 pub use ffprobe::MediaTools;
-pub use hook::{BatchEntry, DEFAULT_HOOK_TIMEOUT, Debounce, Hook, HookCtx, HookHealth};
+pub use hook::{
+    BatchEntry, DEFAULT_HOOK_TIMEOUT, Debounce, Hook, HookCtx, HookHealth, NOT_APPLICABLE,
+    SkipReason,
+};
 pub use jellyfin::JellyfinHook;
 pub use manifest_hook::ManifestHook;
 pub use nfo::NfoHook;

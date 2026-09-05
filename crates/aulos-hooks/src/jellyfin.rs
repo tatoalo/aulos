@@ -21,7 +21,7 @@ use aulos_core::status::TerminalStatus;
 use serde_json::Value;
 
 use crate::error::HookError;
-use crate::hook::{Debounce, Hook, HookCtx, HookHealth};
+use crate::hook::{Debounce, Hook, HookCtx, HookHealth, SkipReason};
 
 /// `ordering` — last, so the scan sees the re-encoded file and the NFO (DESIGN §13).
 pub const ORDERING: i16 = 90;
@@ -261,8 +261,23 @@ impl Hook for JellyfinHook {
 
     /// `finished && JELLYFIN_SYNC_ENABLED`, and false whenever a precondition failed
     /// (DESIGN §13, §13.1).
-    fn applies(&self, _item: &ItemView, outcome: TerminalStatus) -> bool {
-        self.enabled && self.precondition.is_none() && outcome == TerminalStatus::Finished
+    fn applies(&self, item: &ItemView, outcome: TerminalStatus) -> bool {
+        self.skip_reason(item, outcome).is_none()
+    }
+
+    fn skip_reason(&self, _item: &ItemView, outcome: TerminalStatus) -> Option<SkipReason> {
+        if !self.enabled {
+            return Some(SkipReason::new("JELLYFIN_SYNC_ENABLED is false"));
+        }
+        if let Some(message) = self.precondition {
+            return Some(SkipReason::owned(message));
+        }
+        if outcome != TerminalStatus::Finished {
+            return Some(SkipReason::owned(format!(
+                "the outcome is {outcome}, not finished"
+            )));
+        }
+        None
     }
 
     fn health(&self) -> HookHealth {

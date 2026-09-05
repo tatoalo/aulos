@@ -46,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audio_sync::AudioSyncHook;
 use crate::error::HookError;
-use crate::hook::{BatchEntry, Hook, HookCtx};
+use crate::hook::{BatchEntry, Hook, HookCtx, SkipReason};
 use crate::jellyfin::JellyfinHook;
 use crate::manifest_hook::ManifestHook;
 use crate::nfo::NfoHook;
@@ -136,6 +136,14 @@ pub struct HookStat {
     pub runs_total: u64,
     /// Failed invocations, panics and timeouts included.
     pub failures_total: u64,
+    /// Events this hook was offered and declined, with the reason (DESIGN §13, §16.3).
+    ///
+    /// `runs_total: 0, failures_total: 0` alone cannot tell "nothing has finished yet" from
+    /// "every completion was gated out", which is exactly how the NFO hook went unnoticed in
+    /// production.
+    pub skipped_total: u64,
+    /// The most recent [`SkipReason`], kept for the life of the process.
+    pub last_skip_reason: Option<Arc<str>>,
     /// When the last success was, unix ms.
     pub last_success_at: Option<UnixMs>,
     /// The last failure's message, cleared by the next success.
@@ -195,6 +203,8 @@ struct Slot {
     /// `0` means "never".
     last_success_at: AtomicI64,
     last_error: std::sync::Mutex<Option<Arc<str>>>,
+    skipped: AtomicU64,
+    last_skip_reason: std::sync::Mutex<Option<Arc<str>>>,
     pending: AtomicBool,
 }
 
@@ -206,6 +216,19 @@ impl Slot {
             .last_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn record_skip(&self, reason: &SkipReason) {
+        self.skipped.fetch_add(1, Atomic::Relaxed);
+        let mut slot = self
+            .last_skip_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Allocating only when the reason actually changed keeps a 500-item playlist from minting
+        // one `Arc<str>` per skipped item per hook.
+        if slot.as_deref() != Some(reason.as_str()) {
+            *slot = Some(Arc::from(reason.as_str()));
+        }
     }
 
     fn record_failure(&self, message: &str) {
@@ -571,17 +594,38 @@ impl HookDispatcher {
     }
 
     /// The hooks of one phase that apply to `view`, in run order.
+    ///
+    /// A hook of this phase that declines the event is **counted and logged** rather than dropped
+    /// silently: a hook whose gate never opens reports `runs_total: 0, failures_total: 0`, which
+    /// reads exactly like a healthy idle one, and that is how the built-in NFO hook stayed
+    /// invisible through a whole production cutover (`docs/DESIGN.md` §13.2, §16.3). A hook of the
+    /// *other* phase is not a skip — it was never offered this event.
     fn applicable(
         &self,
         phase: HookPhase,
         view: &ItemView,
         outcome: TerminalStatus,
     ) -> Vec<Arc<dyn Hook>> {
-        self.hooks
-            .iter()
-            .filter(|h| h.phase() == phase && h.applies(view, outcome))
-            .map(Arc::clone)
-            .collect()
+        let mut out = Vec::with_capacity(self.hooks.len());
+        for hook in &self.hooks {
+            if hook.phase() != phase {
+                continue;
+            }
+            match hook.skip_reason(view, outcome) {
+                None => out.push(Arc::clone(hook)),
+                Some(reason) => {
+                    let id = hook.id();
+                    if let Some(slot) = self.state.slot(&id) {
+                        slot.record_skip(&reason);
+                    }
+                    tracing::debug!(
+                        hook = %id, item = %view.id, outcome = %outcome, reason = %reason,
+                        "hook skipped"
+                    );
+                }
+            }
+        }
+        out
     }
 }
 
@@ -614,22 +658,28 @@ fn health_of(hooks: &[Arc<dyn Hook>], state: &State, enabled: bool) -> HooksHeal
     for hook in hooks {
         let id = hook.id();
         let own = hook.health();
-        let (runs, failures, last_success_at, last_error, pending) = match state.slot(&id) {
-            Some(s) => (
-                s.runs.load(Atomic::Relaxed),
-                s.failures.load(Atomic::Relaxed),
-                match s.last_success_at.load(Atomic::Relaxed) {
-                    0 => None,
-                    ms => Some(ms),
-                },
-                s.last_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-                s.pending.load(Atomic::Relaxed),
-            ),
-            None => (0, 0, None, None, false),
-        };
+        let (runs, failures, last_success_at, last_error, skipped, last_skip_reason, pending) =
+            match state.slot(&id) {
+                Some(s) => (
+                    s.runs.load(Atomic::Relaxed),
+                    s.failures.load(Atomic::Relaxed),
+                    match s.last_success_at.load(Atomic::Relaxed) {
+                        0 => None,
+                        ms => Some(ms),
+                    },
+                    s.last_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                    s.skipped.load(Atomic::Relaxed),
+                    s.last_skip_reason
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                    s.pending.load(Atomic::Relaxed),
+                ),
+                None => (0, 0, None, None, 0, None, false),
+            };
 
         let status = if !enabled || own.status == ComponentStatus::Disabled {
             ComponentStatus::Disabled
@@ -647,6 +697,25 @@ fn health_of(hooks: &[Arc<dyn Hook>], state: &State, enabled: bool) -> HooksHeal
         health
             .detail
             .insert("failures_total".to_owned(), failures.into());
+        health
+            .detail
+            .insert("skipped_total".to_owned(), skipped.into());
+        if let Some(reason) = &last_skip_reason {
+            health
+                .detail
+                .insert("last_skip_reason".to_owned(), Value::from(&**reason));
+            // The one shape `runs_total: 0, failures_total: 0, status: "ok"` could not express:
+            // the hook is healthy, it was offered work, and it declined all of it. `status` stays
+            // `ok` — declining is not a failure — but the detail may not be silent about it.
+            if runs == 0 && !health.detail.contains_key("detail") {
+                health.detail.insert(
+                    "detail".to_owned(),
+                    Value::from(format!(
+                        "never ran: {skipped} event(s) skipped, most recently because {reason}"
+                    )),
+                );
+            }
+        }
         if let Some(ms) = last_success_at {
             health
                 .detail
@@ -671,6 +740,8 @@ fn health_of(hooks: &[Arc<dyn Hook>], state: &State, enabled: bool) -> HooksHeal
             id,
             runs_total: runs,
             failures_total: failures,
+            skipped_total: skipped,
+            last_skip_reason,
             last_success_at,
             last_error,
             pending,
