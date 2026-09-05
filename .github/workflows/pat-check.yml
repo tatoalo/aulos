@@ -1,0 +1,31 @@
+name: pat-check
+
+# Manual sanity check for the AULOS_REPO_PAT secret used by update-yt-dlp.yml.
+# Prints only HTTP status codes and permission flags, never the token.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  pat-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check AULOS_REPO_PAT
+        env:
+          PAT: ${{ secrets.AULOS_REPO_PAT }}
+        run: |
+          set -u
+          if [ -z "$PAT" ]; then echo "::error::AULOS_REPO_PAT is not set"; exit 1; fi
+          code=$(curl -s -o /tmp/repo.json -w '%{http_code}' -H "Authorization: Bearer $PAT" https://api.github.com/repos/${{ github.repository }})
+          echo "GET /repos/${{ github.repository }} -> HTTP $code"
+          if [ "$code" != "200" ]; then echo "::error::token cannot read the repository"; exit 1; fi
+          python3 - <<'PY'
+          import json; p=json.load(open('/tmp/repo.json')).get('permissions',{})
+          print("permissions:", {k: p.get(k) for k in ('admin','maintain','push','pull')})
+          raise SystemExit(0 if p.get('push') else 1)
+          PY
+          prs=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PAT" "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&per_page=1")
+          echo "GET /pulls -> HTTP $prs"
+          [ "$prs" = "200" ] || { echo "::error::token cannot list pull requests"; exit 1; }
+          echo "AULOS_REPO_PAT OK: read repo, push=true, pull requests readable"
