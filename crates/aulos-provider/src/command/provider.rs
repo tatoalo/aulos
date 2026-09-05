@@ -413,6 +413,7 @@ impl Provider for CommandProvider {
             out_path: PathBuf::from(tctx.out_path()),
             out_dir: ctx.out_dir.clone(),
             started,
+            tctx,
         };
         run.execute(spec, tap_rx, &ctx, &sink).await
     }
@@ -548,13 +549,16 @@ impl CommandProvider {
     }
 }
 
-/// One download run. A struct only so the six values the loop needs are named once.
+/// One download run. A struct only so the values the loop needs are named once.
 struct Run<'a> {
     provider: &'a CommandProvider,
     expect: ExpectOutput,
     out_path: PathBuf,
     out_dir: PathBuf,
     started: SystemTime,
+    /// The very context `argv` was rendered from, so a `stdin = "json"` payload describes the same
+    /// `{out_path}` / `{output_ext}` the command line was given (DESIGN §6.5.1).
+    tctx: TemplateCtx,
 }
 
 impl Run<'_> {
@@ -576,8 +580,7 @@ impl Run<'_> {
         // against a task that may not have been polled yet.
         drop(spec);
         if let Some(mut stdin) = child.take_stdin() {
-            let tctx = self.provider.download_ctx(ctx, "")?;
-            write_stdin_json(&mut stdin, &tctx).await;
+            write_stdin_json(&mut stdin, &self.tctx).await;
         }
         let mut stdout = child.take_stdout();
 

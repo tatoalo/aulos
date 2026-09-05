@@ -18,6 +18,7 @@
 //! reading the same here as in the yt-dlp and StreamingCommunity parsers
 //! (`docs/INTEGRATION-NOTES.md`, WP-02).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -486,12 +487,19 @@ impl ProgressParser {
         }
         let mut chunk_update = ProgressUpdate::default();
         let mut saw_any = false;
-        let lines = self.split(chunk);
+        // The carry is moved out of `self` for the duration of the scan, so the line slices below
+        // borrow a local buffer instead of the parser: no per-line `String`, and `self.spec` and
+        // `self.pending_percent` stay borrowable while the lines are parsed in place.
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.push_str(chunk);
+        let (lines, consumed) = self.split(&buf);
         for line in lines {
-            let line = if self.spec.strip_ansi {
-                strip_ansi(&line)
+            // A frame with no escape and no CR is already what `strip_ansi` would return, so the
+            // common case borrows instead of allocating.
+            let line: Cow<'_, str> = if self.spec.strip_ansi && line.contains(['\u{1b}', '\r']) {
+                Cow::Owned(strip_ansi(line))
             } else {
-                line
+                Cow::Borrowed(line)
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -515,6 +523,9 @@ impl ProgressParser {
                 }
             }
         }
+        // One copy of the unconsumed tail, rather than one per line.
+        buf.drain(..consumed);
+        self.carry = buf;
         if !saw_any {
             return None;
         }
@@ -544,30 +555,36 @@ impl ProgressParser {
         Some(std::mem::take(&mut self.pending))
     }
 
-    /// Splits a chunk into lines, carrying a partial line to the next call.
-    fn split(&mut self, chunk: &str) -> Vec<String> {
-        self.carry.push_str(chunk);
+    /// Splits `buf` into complete lines, returning the slices and how many bytes of `buf` they
+    /// consumed; whatever is left is the partial line the caller carries to the next chunk.
+    ///
+    /// Slices rather than owned lines, and one `consumed` cursor rather than a rebuild per line:
+    /// a repaint-heavy chunk (`cr_as_newline`, ~1000 frames per 64 KiB pipe read) would otherwise
+    /// copy the whole remainder once per frame.
+    fn split<'a>(&self, buf: &'a str) -> (Vec<&'a str>, usize) {
         let mut out = Vec::new();
         let terminators: &[char] = if self.spec.cr_as_newline {
             &['\n', '\r']
         } else {
             &['\n']
         };
-        while let Some(at) = self.carry.find(terminators) {
-            let mut line: String = self.carry[..at].to_owned();
-            if !self.spec.cr_as_newline && line.ends_with('\r') {
-                line.pop();
+        let mut consumed = 0;
+        while let Some(rel) = buf[consumed..].find(terminators) {
+            let at = consumed + rel;
+            let mut line = &buf[consumed..at];
+            if !self.spec.cr_as_newline {
+                line = line.strip_suffix('\r').unwrap_or(line);
             }
             out.push(line);
-            let next = at + self.carry[at..].chars().next().map_or(1, char::len_utf8);
-            self.carry = self.carry[next..].to_owned();
+            consumed = at + buf[at..].chars().next().map_or(1, char::len_utf8);
         }
         // A very long line with no terminator at all must not grow without bound. 64 KiB is far
         // more than any progress frame and far less than a memory problem.
-        if self.carry.len() > 64 * 1024 {
-            out.push(std::mem::take(&mut self.carry));
+        if buf.len() - consumed > 64 * 1024 {
+            out.push(&buf[consumed..]);
+            consumed = buf.len();
         }
-        out
+        (out, consumed)
     }
 }
 
@@ -967,6 +984,81 @@ mod tests {
         // The whole buffered blob matched: last match wins, so 30 %.
         assert_eq!(p.percent(), Some(30.0));
         assert!(u.raw.downloaded_bytes.is_some());
+    }
+
+    /// The splitter must walk a chunk once and hand back borrowed slices: a repaint-heavy chunk
+    /// (`cr_as_newline`, ~1000 CR frames per 64 KiB pipe read) used to rebuild the whole
+    /// remainder per frame — O(frames x chunk_len) memcpy on the progress hot path.
+    #[test]
+    fn split_borrows_the_chunk_and_consumes_it_in_one_pass() {
+        let p = ProgressParser::new(spec("regex", &[r"(?P<percent>[\d.]+)%"]));
+        let buf = "10%\r20%\n30%";
+        let (lines, consumed) = p.split(buf);
+        assert_eq!(lines, ["10%", "20%"]);
+        assert_eq!(consumed, buf.len() - "30%".len());
+        // Zero-copy: every line points into `buf` itself, so k frames cost k slices, not k copies
+        // of the remainder.
+        let base = buf.as_ptr() as usize;
+        for line in &lines {
+            let off = line.as_ptr() as usize - base;
+            assert!(off < buf.len(), "line {line:?} does not borrow the chunk");
+        }
+        // Splitting leaves the parser's carry alone; the caller owns the buffer.
+        assert!(p.carry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_repaint_heavy_chunk_yields_the_last_frame_and_carries_the_partial() {
+        use std::fmt::Write as _;
+        let mut spec = bandcamp_spec();
+        spec.min_interval_ms = 0;
+        let mut p = ProgressParser::new(spec);
+        let mut chunk = String::new();
+        for i in 1..=1000 {
+            let pct = f64::from(i) / 10.0;
+            let mib = f64::from(i) / 100.0;
+            let _ = write!(
+                chunk,
+                "{pct:.1}% {mib:.2}MiB / 10.00MiB 1.0MiB/s ETA 00:07\r"
+            );
+        }
+        // …plus a partial frame with no terminator, which must be carried, not parsed.
+        chunk.push_str("99.9% 9.99Mi");
+        let u = p.feed(&chunk, Instant::now()).expect("an update");
+        assert_eq!(p.percent(), Some(100.0), "last match wins across the chunk");
+        assert_eq!(u.raw.total_bytes, Some(10.0 * 1024.0 * 1024.0));
+        assert_eq!(p.carry, "99.9% 9.99Mi");
+    }
+
+    #[test]
+    fn split_strips_the_cr_of_a_crlf_and_flushes_an_unterminated_giant() {
+        let patterns = vec![r"(?P<percent>[\d.]+)%".to_owned()];
+        let off = ProgressSpec::validate(
+            Some("regex"),
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(0),
+            &patterns,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let p = ProgressParser::new(off);
+        let (lines, consumed) = p.split("a\r\nb\r");
+        assert_eq!(
+            lines,
+            ["a"],
+            "with cr_as_newline off, a bare CR is not a line"
+        );
+        assert_eq!(consumed, 3);
+
+        // A line that never terminates is flushed past 64 KiB rather than growing without bound.
+        let giant = "x".repeat(64 * 1024 + 1);
+        let (lines, consumed) = p.split(&giant);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(consumed, giant.len());
     }
 
     #[test]

@@ -689,6 +689,36 @@ async fn stdin_json_hands_the_whole_request_to_the_plugin() {
     assert_eq!(payload["title"], "A Clip");
     assert_eq!(payload["download_type"], "video");
     assert_eq!(payload["quality"], "best");
+    // The stdin payload describes the same file the argv `{out_path}` named: same extension, same
+    // path. A payload built from a second, extension-less context would say `""` and `A Clip`.
+    assert_eq!(payload["output_ext"], "mp4");
+    assert_eq!(
+        payload["out_path"],
+        p.download.join("A Clip.mp4").to_string_lossy().as_ref()
+    );
+}
+
+/// DESIGN §6.5.4: a plugin that takes the whole request on stdin and writes where the payload's
+/// `out_path` says. The server then looks for that same path, so the two must agree — including
+/// the extension `expect_output = "path_template"` appends.
+#[tokio::test]
+async fn a_plugin_that_writes_the_stdin_out_path_satisfies_path_template() {
+    // No `{out_path}` in argv at all: the only path the plugin knows is the one on stdin.
+    let script = r#"p=$(sed -n 's/.*"out_path":"\([^"]*\)".*/\1/p'); printf 'hi' > "$p""#;
+    let plugin = Plugin::new(
+        "example",
+        &dl_manifest(
+            script,
+            &[],
+            "expect_output = \"path_template\"\nstdin = \"json\"\noutput_ext = \"flac\"\n",
+        ),
+    );
+    let outcome = run_download(&plugin, None).await.expect("a produced file");
+    assert_eq!(
+        outcome.filename.as_ref().map(RelPath::as_str),
+        Some("A Clip.flac")
+    );
+    assert_eq!(outcome.size, Some(2));
 }
 
 // ---------------------------------------------------------------------------
