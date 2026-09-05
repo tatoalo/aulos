@@ -242,6 +242,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("AULOS_JELLYFIN_MAX_WAIT_SECS", "300"),
     ("AULOS_NFO_ENABLED", "true"),
     ("AULOS_NFO_DELETE_INFO_JSON", "false"),
+    ("AULOS_NFO_PROVIDERS", ""),
     // --- AULOS_*: Telegram ---
     ("AULOS_TELEGRAM_BOARD", "board"),
     ("AULOS_TELEGRAM_EDIT_INTERVAL_MS", "3000"),
@@ -257,6 +258,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("AULOS_LOG_FORMAT", "text"),
     // --- AULOS_*: API surface ---
     ("AULOS_V1_ENABLED", "true"),
+    ("AULOS_WEB_UI", "true"),
     ("AULOS_API_TOKEN", ""),
     ("AULOS_TRUSTED_PROXY_AUTH_HEADER", ""),
     ("AULOS_ALLOW_PRIVATE_TARGETS", "true"),
@@ -292,6 +294,7 @@ pub const BOOLEAN_KEYS: &[&str] = &[
     "AULOS_NFO_DELETE_INFO_JSON",
     "AULOS_TELEGRAM_WATCH_ALL",
     "AULOS_V1_ENABLED",
+    "AULOS_WEB_UI",
     "AULOS_ALLOW_PRIVATE_TARGETS",
     "AULOS_METRICS_ENABLED",
 ];
@@ -410,7 +413,10 @@ macro_rules! choice_enum {
 }
 
 choice_enum!(
-    /// `DEFAULT_THEME`. Accepted and echoed in capabilities; no cookie is set (no web UI).
+    /// `DEFAULT_THEME` — the web UI's initial theme, and the value `capabilities` echoes.
+    ///
+    /// It is substituted into the embedded page as `{{THEME}}` at request time (the page then
+    /// lets the viewer override it locally); no cookie is ever set.
     Theme, "DEFAULT_THEME",
     [(Light, "light"), (Dark, "dark"), (Auto, "auto")]
 );
@@ -592,7 +598,8 @@ pub struct Config {
     pub keyfile: Option<PathBuf>,
     /// `BASE_DIR` — now used **only** to resolve `ROBOTS_TXT`.
     pub base_dir: Option<PathBuf>,
-    /// `DEFAULT_THEME`.
+    /// `DEFAULT_THEME` — the initial theme the embedded web UI renders with, and the value
+    /// `capabilities.config.default_theme` echoes.
     pub default_theme: Theme,
     /// `MAX_CONCURRENT_DOWNLOADS`, at least 1. Invalid is fatal.
     pub max_concurrent_downloads: u32,
@@ -740,6 +747,10 @@ pub struct Config {
     pub nfo_enabled: bool,
     /// `AULOS_NFO_DELETE_INFO_JSON`.
     pub nfo_delete_info_json: bool,
+    /// `AULOS_NFO_PROVIDERS` — an optional comma-separated allow-list of provider ids the NFO
+    /// hook writes for. **Empty means every provider**, which is the legacy parity default: the
+    /// legacy `Exec` postprocessor wrote an NFO for every finished download, YouTube included.
+    pub nfo_providers: Vec<Box<str>>,
 
     // --- POT sidecar ---
     /// `AULOS_POT_ENABLED`.
@@ -772,6 +783,12 @@ pub struct Config {
     // --- API surface ---
     /// `AULOS_V1_ENABLED`.
     pub v1_enabled: bool,
+    /// `AULOS_WEB_UI` — serve the embedded web UI at `<prefix>` (and its assets and manifest).
+    ///
+    /// `false` restores the pre-UI surface exactly: `GET <prefix>` is the identity document for
+    /// every `Accept`, and `<prefix>assets/*` and `<prefix>manifest.webmanifest` are ordinary
+    /// `404 not_found` envelopes.
+    pub web_ui: bool,
     /// `AULOS_API_TOKEN`. Empty = disabled.
     pub api_token: Redact<String>,
     /// `AULOS_TRUSTED_PROXY_AUTH_HEADER`. Empty = no proxy-auth requirement.
@@ -1041,6 +1058,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         hooks_enabled: g.bool("AULOS_HOOKS_ENABLED"),
         nfo_enabled: g.bool("AULOS_NFO_ENABLED"),
         nfo_delete_info_json: g.bool("AULOS_NFO_DELETE_INFO_JSON"),
+        nfo_providers: comma_list(g.str("AULOS_NFO_PROVIDERS")),
 
         pot_enabled: g.bool("AULOS_POT_ENABLED"),
         pot_cmd: g
@@ -1061,6 +1079,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         log_format: g.choice("AULOS_LOG_FORMAT", LogFormat::parse, LogFormat::Text),
 
         v1_enabled: g.bool("AULOS_V1_ENABLED"),
+        web_ui: g.bool("AULOS_WEB_UI"),
         api_token: Redact::new(g.str("AULOS_API_TOKEN").to_owned()),
         trusted_proxy_auth_header: g.str("AULOS_TRUSTED_PROXY_AUTH_HEADER").into(),
         allow_private_targets: g.bool("AULOS_ALLOW_PRIVATE_TARGETS"),
