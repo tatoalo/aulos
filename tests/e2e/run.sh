@@ -359,6 +359,20 @@ ok "GET history carries queue, pending and done"
 
 [ "$(code "${BASE}/version")" = "200" ] && ok "GET version → 200" || fail "GET version"
 
+# The web UI (DESIGN §24): a browser gets the page, everything else keeps the identity document.
+ui_hdrs="$(curl -sS -D - -o /dev/null --max-time 30 -H 'Accept: text/html' "${BASE}/")"
+printf '%s' "$ui_hdrs" | grep -qi '^content-type: text/html' \
+  && ok "GET / with Accept: text/html → the web UI" \
+  || fail "GET / with Accept: text/html did not answer text/html"
+printf '%s' "$ui_hdrs" | grep -qi '^content-security-policy: ' \
+  && ok "the page carries a Content-Security-Policy" \
+  || fail "the page has no Content-Security-Policy header"
+[ "$(req -H 'Accept: application/json' "${BASE}/" | jget name)" = "aulos-server" ] \
+  && ok "GET / with Accept: application/json → the identity document" \
+  || fail "GET / with Accept: application/json is not the identity document"
+[ "$(code "${BASE}/assets/app.js")" = "200" ] && ok "GET assets/app.js → 200" || fail "GET assets/app.js"
+[ "$(code "${BASE}/manifest.webmanifest")" = "200" ] && ok "GET manifest.webmanifest → 200" || fail "GET manifest.webmanifest"
+
 # --- 6. socket.io is honestly gone ------------------------------------------------------------
 
 log "socket.io"
