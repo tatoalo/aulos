@@ -59,7 +59,14 @@ impl RawEnv {
     /// The effective string map — `DEFAULTS` overlaid with this environment, `%%` resolved — with
     /// every secret-bearing value replaced by `«redacted»`.
     ///
-    /// This is what `aulos-server check-config` prints.
+    /// A [`SECRET_KEYS`] entry is redacted whole. A [`JSON_OPTION_KEYS`] entry is a JSON object of
+    /// yt-dlp options, so it is redacted *per entry*: only the values whose key matches
+    /// [`crate::error::SECRET_KEY_PATTERN`] (`password`, `proxy`, `cookiefile`, …) are replaced,
+    /// which keeps the table useful without leaking the site password or the proxy credentials
+    /// (DESIGN §16.5). A value that does not parse as JSON is redacted whole rather than printed
+    /// blind.
+    ///
+    /// This is what `aulos-server check-config` prints, and what the boot log dumps.
     ///
     /// # Errors
     /// The same errors [`load`] reports for steps 1–2 (indirection).
@@ -71,6 +78,8 @@ impl RawEnv {
             .map(|(k, v)| {
                 let value = if SECRET_KEYS.contains(&k.as_str()) {
                     crate::error::REDACTED.to_owned()
+                } else if JSON_OPTION_KEYS.contains(&k.as_str()) {
+                    redact_json_options(&v)
                 } else {
                     v
                 };
@@ -305,6 +314,51 @@ pub const ACCEPTED_IGNORED_PREFIXES: &[&str] = &["AULOS_E2E_"];
 
 /// Keys whose value is a secret and is redacted everywhere (DESIGN §16.5).
 pub const SECRET_KEYS: &[&str] = &["TELEGRAM_BOT_TOKEN", "JELLYFIN_API_KEY", "AULOS_API_TOKEN"];
+
+/// Keys whose value is a JSON object of yt-dlp options, redacted entry by entry (DESIGN §16.5).
+///
+/// The value itself is not a secret — `format`, `username` and friends are exactly what an
+/// operator wants to see in `check-config` — but individual entries (`password`, `proxy`,
+/// `cookiefile`, …) are.
+pub const JSON_OPTION_KEYS: &[&str] = &["YTDL_OPTIONS", "YTDL_OPTIONS_PRESETS"];
+
+/// Redacts the secret-bearing entries of a JSON option object, leaving the rest legible.
+///
+/// `YTDL_OPTIONS_PRESETS` is a map of preset name → option object, so the walk recurses; the
+/// key test is [`crate::error::is_secret_key`], the same one `GET /api/v2/debug/options` uses.
+/// A value that is not valid JSON is redacted whole: `check-config` would otherwise print a
+/// half-written options blob — the case most likely to still contain a password — verbatim.
+fn redact_json_options(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return raw.to_owned();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return crate::error::REDACTED.to_owned();
+    };
+    redact_secret_entries(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| crate::error::REDACTED.to_owned())
+}
+
+/// Replaces every object value under a secret-looking key with [`crate::error::REDACTED`].
+fn redact_secret_entries(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                if crate::error::is_secret_key(key) {
+                    *v = serde_json::Value::String(crate::error::REDACTED.to_owned());
+                } else {
+                    redact_secret_entries(v);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_secret_entries(item);
+            }
+        }
+        _ => {}
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Small typed enums
@@ -822,10 +876,10 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         warnings: &mut warnings,
     };
 
-    // Step 3: booleans, validated against the exact token set.
-    for key in BOOLEAN_KEYS {
-        g.bool(key);
-    }
+    // Step 3 (booleans, validated against the exact token set) happens inline below: every key in
+    // `BOOLEAN_KEYS` is read exactly once by `g.bool` while the struct is built, and `Getter::bool`
+    // reports `InvalidBoolean` there. A separate validation pre-pass would report one typo twice —
+    // `every_boolean_key_is_reported_exactly_once` pins both halves of that.
 
     // Step 4.
     let (url_prefix, fixups) = Prefix::normalize(g.str("URL_PREFIX"));
@@ -1502,6 +1556,12 @@ mod tests {
         for k in SECRET_KEYS {
             assert!(seen.contains(k), "{k} is secret but not in DEFAULTS");
         }
+        for k in JSON_OPTION_KEYS {
+            assert!(
+                seen.contains(k),
+                "{k} is a JSON option map but not in DEFAULTS"
+            );
+        }
     }
 
     #[test]
@@ -1836,6 +1896,74 @@ mod tests {
         assert_eq!(table["AULOS_API_TOKEN"], crate::error::REDACTED);
         assert_eq!(table["PORT"], "8081");
         assert_eq!(table["AUDIO_DOWNLOAD_DIR"], ".", "%% is resolved");
+    }
+
+    #[test]
+    fn ytdl_options_secrets_are_redacted_entry_by_entry() {
+        let e = env(&[
+            (
+                "YTDL_OPTIONS",
+                r#"{"username":"me","password":"hunter2","proxy":"http://u:p@proxy:3128","cookiefile":"/etc/cookies.txt","format":"bv+ba"}"#,
+            ),
+            (
+                "YTDL_OPTIONS_PRESETS",
+                r#"{"private":{"username":"me","password":"hunter2","format":"best"}}"#,
+            ),
+        ]);
+        let table = e.effective_redacted().unwrap();
+        let dump = format!("{table:?}");
+        for secret in ["hunter2", "u:p@proxy", "/etc/cookies.txt"] {
+            assert!(
+                !dump.contains(secret),
+                "{secret} leaked into the effective table: {dump}"
+            );
+        }
+        // The non-secret options survive: the table exists so the operator can see what resolved.
+        assert!(table["YTDL_OPTIONS"].contains(r#""username":"me""#));
+        assert!(table["YTDL_OPTIONS"].contains("bv+ba"));
+        assert_eq!(
+            table["YTDL_OPTIONS"]
+                .matches(crate::error::REDACTED)
+                .count(),
+            3,
+            "password, proxy and cookiefile"
+        );
+        // Presets are a map of name -> option object, so the walk has to recurse.
+        assert!(table["YTDL_OPTIONS_PRESETS"].contains(r#""private""#));
+        assert!(table["YTDL_OPTIONS_PRESETS"].contains(r#""format":"best""#));
+        assert_eq!(
+            table["YTDL_OPTIONS_PRESETS"]
+                .matches(crate::error::REDACTED)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unparseable_ytdl_options_are_redacted_whole() {
+        // A half-written options blob is the case most likely to still hold a password.
+        let e = env(&[("YTDL_OPTIONS", r#"{"password": "hunter2""#)]);
+        let table = e.effective_redacted().unwrap();
+        assert_eq!(table["YTDL_OPTIONS"], crate::error::REDACTED);
+        // The empty default stays legible rather than becoming a scary «redacted».
+        let default = env(&[]).effective_redacted().unwrap();
+        assert_eq!(default["YTDL_OPTIONS"], "{}");
+        assert_eq!(default["YTDL_OPTIONS_PRESETS"], "{}");
+    }
+
+    #[test]
+    fn every_boolean_key_is_reported_exactly_once() {
+        // One typo must be one error. The loader used to validate `BOOLEAN_KEYS` in a pre-pass and
+        // again while building the struct, so `check-config` printed each bad boolean twice and
+        // `serve` doubled the "(N errors)" count.
+        for key in BOOLEAN_KEYS {
+            let errs = err(&[(key, "yes")]);
+            let reported = errs
+                .iter()
+                .filter(|e| matches!(e, ConfigError::InvalidBoolean { key: k, .. } if k == key))
+                .count();
+            assert_eq!(reported, 1, "{key} reported {reported} times: {errs:?}");
+        }
     }
 
     #[test]
