@@ -108,6 +108,55 @@ async fn a_batch_merges_defaults_under_each_item() {
     .await;
 }
 
+/// A batch body's shared selection goes in `defaults` (PROTOCOL §4.1) and nowhere else. A
+/// top-level `format` is a natural mis-read of that, and the §4.1 rule for a field the server does
+/// not know is that it is ignored **and** named in `warnings` — accepting it silently, applying
+/// nothing, is the one combination that leaves the client believing its selection was honoured.
+#[tokio::test]
+async fn a_top_level_request_field_on_a_batch_body_is_a_warning() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let (status, body) = rig
+            .post(
+                "api/v2/downloads",
+                &json!({
+                    "items": [
+                        { "url": "https://www.youtube.com/watch?v=a" },
+                        { "url": "https://www.youtube.com/watch?v=b" },
+                    ],
+                    "format": "mp4",
+                    "quality": "1080",
+                }),
+            )
+            .await;
+        assert_eq!(status, 202, "{body}");
+        let warnings = body["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for field in ["format", "quality"] {
+            assert!(
+                warnings.iter().any(|w| w.as_str().unwrap().contains(field)),
+                "{field} was dropped without a word: {warnings:?}"
+            );
+        }
+        // And nothing was applied from it — `defaults` is the only shared layer, so both items
+        // carry exactly what a plain add would.
+        // The selection is set at add time and never moves, so neither item has to be caught in
+        // a particular status — only fetched once the row exists.
+        let ids = body["ids"].as_array().unwrap();
+        let has_selection = |item: &Value| item["selection"]["format"].is_string();
+        let batched = rig
+            .until("the batched item", has_selection, ids[0].as_str().unwrap())
+            .await;
+        let control = rig.add("https://www.youtube.com/watch?v=c").await;
+        let control = rig.until("the control item", has_selection, &control).await;
+        assert_eq!(
+            batched["selection"], control["selection"],
+            "a top-level field must not be applied: {batched}"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn an_unknown_field_is_a_warning_and_never_a_400() {
     for_each_prefix(|prefix| async move {

@@ -70,7 +70,7 @@ async fn serve(
         .canonicalize()
         .unwrap_or_else(|_| configured.to_path_buf());
     let resolved = resolve(&root, raw).ok_or_else(not_found)?;
-    let private = private_roots(state);
+    let private = private_paths(state, &root);
     if is_private(&resolved, &private) {
         return Err(not_found());
     }
@@ -87,33 +87,98 @@ async fn serve(
     file(&resolved, &meta, headers).await
 }
 
-/// The directories this route must never serve out of, canonicalised.
+/// The state files this route must never serve, whatever an operator called them.
 ///
-/// The shipped image sets `DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube`, so the whole
-/// state directory — `cookies.txt` (the operator's live site sessions) and `aulos.db` (the queue,
-/// the history, the subscriptions, every per-chat Telegram config) — sits *inside* the served
-/// root. Containment cannot help: those paths really are inside. They are excluded by name
-/// instead, with the same `404` every other refusal gets (DESIGN §16.6).
-fn private_roots(state: &ApiState) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(2);
-    let mut push = |path: &Path| {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if !roots.contains(&canonical) {
-            roots.push(canonical);
-        }
-    };
-    push(&state.cfg.paths.state);
-    // `AULOS_DB_PATH` defaults inside STATE_DIR but can be pointed anywhere, including at a second
-    // directory under the download root.
-    if let Some(parent) = state.cfg.db_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        push(parent);
-    }
-    roots
+/// The database and its sidecars are derived from `AULOS_DB_PATH`, so only the fixed names belong
+/// here: `cookies.txt` (the operator's live site sessions), the import marker, and the four legacy
+/// JSON files a `STATE_DIR` carried before the import — the whole legacy queue, history and
+/// subscription list. They mirror `aulos_store::import`'s layout; the constants there are not
+/// public, and `aulos-api` may not reach into that module for them (DESIGN §3).
+const STATE_FILES: [&str; 6] = [
+    "cookies.txt",
+    ".aulos-imported",
+    "completed.json",
+    "pending.json",
+    "queue.json",
+    "subscriptions.json",
+];
+
+/// The paths this route must never serve out of, canonicalised, for the root being served.
+///
+/// The state directory can sit anywhere relative to the download root, and the two arrangements
+/// need opposite treatment:
+///
+/// | Layout | What is excluded |
+/// |---|---|
+/// | `STATE_DIR` strictly **inside** the root — the shipped image's `DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube` | the whole subtree, so a state file added later is covered too |
+/// | `STATE_DIR` **is** the root, or contains it — `DOWNLOAD_DIR` and `STATE_DIR` both default to `.`, so every non-Docker run lands here, as does an operator who sets `STATE_DIR=/downloads` | the individual state files, by name |
+///
+/// The distinction is the whole point: excluding the subtree in the second layout would make every
+/// path under the root "private" and answer `404` to the entire download tree (and hand back an
+/// empty listing), which is what a plain `starts_with` test did.
+///
+/// Containment cannot help in either case — those paths really are inside — so the exclusion is by
+/// path, with the same `404` every other refusal gets (DESIGN §16.6).
+fn private_paths(state: &ApiState, root: &Path) -> Vec<PathBuf> {
+    private_paths_for(&state.cfg.paths.state, &state.cfg.db_path, root)
 }
 
-/// Whether a resolved path is inside one of [`private_roots`].
+/// [`private_paths`] over its three inputs, so the layout rule is testable without an `ApiState`.
+fn private_paths_for(state_dir: &Path, db_path: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::with_capacity(2);
+    push(&mut dirs, canonical(state_dir));
+    // `AULOS_DB_PATH` defaults inside STATE_DIR but can be pointed anywhere, including at a second
+    // directory under the download root.
+    push(&mut dirs, canonical(&db_dir(db_path)));
+
+    let mut out = Vec::new();
+    for dir in dirs {
+        if dir != root && dir.starts_with(root) {
+            push(&mut out, dir); // a strict descendant: the whole subtree
+            continue;
+        }
+        for name in STATE_FILES {
+            push(&mut out, canonical(&dir.join(name)));
+        }
+    }
+    // The database is named by `AULOS_DB_PATH`, and SQLite writes two sidecars next to it (three
+    // with a rollback journal). They are added unconditionally: when their directory was excluded
+    // wholesale this is a no-op, and when it was not it is the only thing hiding them.
+    if let Some(name) = db_path.file_name() {
+        let parent = canonical(&db_dir(db_path));
+        let name = name.to_string_lossy();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            push(&mut out, canonical(&parent.join(format!("{name}{suffix}"))));
+        }
+    }
+    out
+}
+
+/// The directory `AULOS_DB_PATH` names, with a bare file name meaning the working directory.
+///
+/// `PathBuf::from("aulos.db").parent()` is `Some("")`, and an empty path canonicalises to nothing,
+/// so the database would be excluded under a name that matches no resolved path. `.` canonicalises
+/// to the working directory, which is where SQLite actually opens it.
+fn db_dir(db_path: &Path) -> PathBuf {
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// A path with every symlink resolved, or the path itself when it does not exist yet.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Appends unless the list already holds it.
+fn push(list: &mut Vec<PathBuf>, path: PathBuf) {
+    if !list.contains(&path) {
+        list.push(path);
+    }
+}
+
+/// Whether a resolved path *is*, or is inside, one of [`private_paths`].
 fn is_private(path: &Path, private: &[PathBuf]) -> bool {
     private.iter().any(|root| path.starts_with(root))
 }
@@ -518,6 +583,91 @@ mod tests {
             http_date(1_582_934_400_000),
             "Sat, 29 Feb 2020 00:00:00 GMT"
         );
+    }
+
+    /// The shipped image's layout: the state directory is a strict descendant of the served root,
+    /// so the whole subtree goes — a state file added in a later version is covered too.
+    #[test]
+    fn a_nested_state_directory_is_excluded_whole() {
+        let root = Path::new("/downloads");
+        let private = private_paths_for(
+            Path::new("/downloads/.metube"),
+            Path::new("/downloads/.metube/aulos.db"),
+            root,
+        );
+        assert!(private.contains(&PathBuf::from("/downloads/.metube")));
+        assert!(
+            !private.contains(&PathBuf::from("/downloads")),
+            "{private:?}"
+        );
+        assert!(is_private(
+            Path::new("/downloads/.metube/cookies.txt"),
+            &private
+        ));
+        assert!(is_private(Path::new("/downloads/.metube"), &private));
+        assert!(!is_private(Path::new("/downloads/A video.mp4"), &private));
+        assert!(!is_private(Path::new("/downloads/Media/ok.mp4"), &private));
+    }
+
+    /// `DOWNLOAD_DIR` and `STATE_DIR` both default to `.`, so a bare `cargo run` or a
+    /// bare-binary deployment has the state directory **equal** to the served root. Excluding the
+    /// subtree there would `404` the entire download tree, so the state files go by name.
+    #[test]
+    fn a_state_directory_equal_to_the_root_excludes_files_not_the_tree() {
+        let root = Path::new("/downloads");
+        let private = private_paths_for(
+            Path::new("/downloads"),
+            Path::new("/downloads/aulos.db"),
+            root,
+        );
+        assert!(
+            !private.contains(&PathBuf::from("/downloads")),
+            "{private:?}"
+        );
+        for secret in [
+            "/downloads/cookies.txt",
+            "/downloads/aulos.db",
+            "/downloads/aulos.db-wal",
+            "/downloads/aulos.db-shm",
+            "/downloads/.aulos-imported",
+            "/downloads/queue.json",
+        ] {
+            assert!(is_private(Path::new(secret), &private), "{secret}");
+        }
+        for served in [
+            "/downloads/A video.mp4",
+            "/downloads/Media/ok.mp4",
+            "/downloads/aulos.db.mp4",
+        ] {
+            assert!(!is_private(Path::new(served), &private), "{served}");
+        }
+    }
+
+    /// The mirror image — `STATE_DIR` *contains* the download root (`STATE_DIR=/data`,
+    /// `DOWNLOAD_DIR=/data/downloads`) — is the same trap and gets the same answer.
+    #[test]
+    fn a_state_directory_above_the_root_does_not_hide_the_tree() {
+        let root = Path::new("/data/downloads");
+        let private = private_paths_for(Path::new("/data"), Path::new("/data/aulos.db"), root);
+        assert!(!is_private(Path::new("/data/downloads/clip.mp4"), &private));
+        assert!(is_private(Path::new("/data/aulos.db"), &private));
+    }
+
+    /// `AULOS_DB_PATH` can point at a second directory under the root, on its own.
+    #[test]
+    fn the_database_is_excluded_wherever_it_is_pointed() {
+        let root = Path::new("/downloads");
+        let private = private_paths_for(
+            Path::new("/state"),
+            Path::new("/downloads/db/aulos.db"),
+            root,
+        );
+        assert!(is_private(Path::new("/downloads/db/aulos.db"), &private));
+        assert!(
+            is_private(Path::new("/downloads/db"), &private),
+            "a strict descendant"
+        );
+        assert!(!is_private(Path::new("/downloads/clip.mp4"), &private));
     }
 
     #[test]

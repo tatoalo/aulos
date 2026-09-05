@@ -37,7 +37,8 @@ const V1_STATUSES: [&str; 5] = ["pending", "preparing", "downloading", "finished
 ///
 /// `…/bad` and `…/geo` fail with two *different* codes, so their cleaned messages differ and the
 /// join is observable; `…/slow` parks in `resolving` for ten minutes, which is how the pre-resolve
-/// window's expiry is tested without waiting for it.
+/// window's expiry is tested without waiting for it. A `done-take` URL finishes while the default
+/// timeline hangs, so two rows can share a `media_id` and still be in different states.
 fn scripted() -> FakeProvider {
     FakeProvider::from_toml(
         r#"
@@ -61,6 +62,10 @@ fn scripted() -> FakeProvider {
         [[timeline]]
         url_regex = "twice"
         download  = [{ kind = "finish", filename = "Twice.mp4", size = 1024 }]
+
+        [[timeline]]
+        url_regex = "done-take"
+        download  = [{ kind = "finish", filename = "Take.mp4", size = 1024 }]
 
         [[timeline]]
         download = [
@@ -358,6 +363,77 @@ async fn one_url_matching_two_rows_affects_both() {
         Some(0),
         "both rows are gone"
     );
+}
+
+/// `where` names a collection, and the id ladder does not: the shipped client keys every delete on
+/// the URL (`item.url ?? item.id`, and `clearCompletedItems` sends only urls), so one token can
+/// resolve to a finished row *and* a running one. Legacy could not cross that line — `clear()`
+/// looked only in `self.done` and `cancel()` only in `self.pending`/`self.queue`
+/// (`app/ytdl.py:1697-1731`) — and neither may this: "clear completed" must not kill a re-added
+/// download, and deleting a running item must not destroy the older finished row (and, with
+/// `DELETE_FILE_ON_TRASHCAN`, its file).
+///
+/// The three rows share a `media_id` (`fake:` plus the last path segment) and differ only in the
+/// query, which is how one token names rows in two different states through the real pipeline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_only_touches_the_collection_where_names() {
+    let rig = rig(
+        "/",
+        &[
+            ("AULOS_V1_ADD_RESOLVE_WAIT_MS", "0"),
+            ("AULOS_DEDUPE_MODE", "off"),
+        ],
+    )
+    .await;
+    let token = "fake:re-added";
+
+    // A finished row, and a live one hanging in `preparing`.
+    let first = rig.add("https://fake.test/re-added?take=done-take-a").await;
+    rig.until_status(&first, "finished").await;
+    let live = rig.add("https://fake.test/re-added?take=running").await;
+    rig.until_status(&live, "preparing").await;
+    rig.settle().await;
+    let (_, body) = rig.get("history").await;
+    assert_eq!(body["done"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["queue"].as_array().map(Vec::len), Some(1), "{body}");
+
+    // "Clear completed": the finished row goes, the running download is untouched.
+    let (status, _) = rig
+        .post("delete", &json!({ "ids": [token], "where": "done" }))
+        .await;
+    assert_eq!(status, 200);
+    let body = until_history(&rig, "the finished row to go", |b| {
+        b["done"].as_array().map(Vec::len) == Some(0)
+    })
+    .await;
+    assert_eq!(
+        body["queue"].as_array().map(Vec::len),
+        Some(1),
+        "the running row must survive a clear-completed: {body}"
+    );
+    assert_eq!(rig.status_of(&live).await, "preparing");
+
+    // The other direction: a second finished row, then a `where: "queue"` delete of the same token.
+    let kept = rig.add("https://fake.test/re-added?take=done-take-c").await;
+    rig.until_status(&kept, "finished").await;
+    rig.settle().await;
+
+    let (status, _) = rig
+        .post("delete", &json!({ "ids": [token], "where": "queue" }))
+        .await;
+    assert_eq!(status, 200);
+    let body = until_history(&rig, "the running row to go", |b| {
+        b["queue"].as_array().map(Vec::len) == Some(0)
+    })
+    .await;
+    assert_eq!(
+        body["done"].as_array().map(Vec::len),
+        Some(1),
+        "the finished row must survive a queue delete: {body}"
+    );
+    let (code, item) = rig.get(&format!("api/v2/items/{kept}")).await;
+    assert_eq!(code, 200, "the finished row is still there: {item}");
+    assert_eq!(item["status"], "finished");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1119,6 +1195,23 @@ async fn until_history_lacks(rig: &Rig, needle: &str) {
     }
     let (_, body) = rig.get("history").await;
     panic!("timed out waiting for {needle} to leave v1 history; it is {body}");
+}
+
+/// Waits until `GET history` satisfies `pred`, and returns that body.
+///
+/// `queue`/`pending` come from the **published snapshot**, which the aggregator refreshes on its
+/// own tick, so a row `GET api/v2/items/{id}` already reports as gone can linger there for up to
+/// one tick — the documented ordering, not a bug.
+async fn until_history(rig: &Rig, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..600 {
+        let (_, body) = rig.get("history").await;
+        if pred(&body) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, body) = rig.get("history").await;
+    panic!("timed out waiting for {what}; v1 history is {body}");
 }
 
 /// Inserts `count` `finished` rows straight into the store, titled `Row NNNN` in `ord` order.

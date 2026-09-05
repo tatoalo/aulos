@@ -155,7 +155,8 @@ fn map_add_error(err: AddError) -> ApiError {
 /// Parses either body shape into one request list.
 ///
 /// A body with `items` is the batch form and `defaults` is merged **under** each entry, so a share
-/// sheet can send three URLs with one selection.
+/// sheet can send three URLs with one selection. `defaults` is the *only* shared layer: a request
+/// field at the top level of a batch body is an unknown field there, and is reported as one.
 fn parse_batch(
     state: &ApiState,
     root: &Map<String, Value>,
@@ -164,9 +165,12 @@ fn parse_batch(
     let empty = Map::new();
     match root.get("items") {
         Some(Value::Array(items)) => {
-            let mut known: Vec<&str> = BATCH_FIELDS.to_vec();
-            known.extend(REQUEST_FIELDS); // a batch body may also carry top-level defaults
-            unknown_fields(root, &known, warnings);
+            // PROTOCOL §4.1 gives the batch envelope exactly two keys, and `defaults` is the
+            // only place a shared selection may go. A top-level `format`/`quality`/… is therefore
+            // an unknown field and gets the §4.1 `warnings` entry: it is *not* applied, and the
+            // one thing that rule exists to prevent is dropping the value silently, which is what
+            // adding `REQUEST_FIELDS` to this list did.
+            unknown_fields(root, &BATCH_FIELDS, warnings);
             let defaults = match root.get("defaults") {
                 None | Some(Value::Null) => empty.clone(),
                 Some(Value::Object(map)) => map.clone(),

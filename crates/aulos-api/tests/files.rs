@@ -307,6 +307,60 @@ async fn the_state_directory_is_never_served_even_when_it_is_inside_the_download
     .await;
 }
 
+/// `DOWNLOAD_DIR` and `STATE_DIR` both default to `.` (legacy `app/main.py:44,52` did the same), so
+/// a `cargo run` or a bare-binary deployment has the state directory **equal** to the download
+/// root. The state files must still be refused there — and everything else must still be served:
+/// excluding the whole subtree, as a plain prefix test does, `404`s the entire download tree and
+/// empties the listing.
+#[tokio::test]
+async fn a_state_directory_equal_to_the_download_root_hides_the_files_not_the_tree() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::builder(prefix)
+            .env("DOWNLOAD_DIRS_INDEXABLE", "true")
+            .env("STATE_DIR", "{dir}/downloads")
+            .env("AULOS_DB_PATH", "{dir}/downloads/aulos.db")
+            .start()
+            .await;
+        assert_eq!(
+            rig.cfg.paths.state,
+            rig.download_dir(),
+            "the test must reproduce the collision"
+        );
+        std::fs::write(
+            rig.download_dir().join("cookies.txt"),
+            b"# Netscape HTTP Cookie File\nSECRET",
+        )
+        .unwrap();
+        rig.write_download("clip.mp4", BODY);
+        rig.write_download("Media/ok.mp4", BODY);
+
+        // The tree still serves, which is the regression this test exists for.
+        for path in ["download/clip.mp4", "download/Media/ok.mp4"] {
+            let response = rig.get_raw(path).await;
+            assert_eq!(response.status().as_u16(), 200, "{path}");
+            assert_eq!(response.bytes().await.unwrap().as_ref(), BODY, "{path}");
+        }
+        let (status, body) = rig.get("download/Media").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["files"].as_array().map(Vec::len), Some(1), "{body}");
+
+        // The state files, sharing the directory, do not. `aulos.db-wal` is SQLite's live
+        // write-ahead log, which the open store keeps next to the database — it is not written
+        // here, because writing over it would corrupt the rig's own database.
+        for path in [
+            "download/cookies.txt",
+            "download/aulos.db",
+            "download/aulos.db-wal",
+        ] {
+            let response = rig.get_raw(path).await;
+            assert_eq!(response.status().as_u16(), 404, "{path}");
+            let text = response.text().await.unwrap();
+            assert!(!text.contains("SECRET"), "{path} leaked a state file");
+        }
+    })
+    .await;
+}
+
 /// The download tree shares an origin with the API and the WebSocket, and in the intended VPS
 /// deployment that origin carries the reverse proxy's session cookie. An `*.html` or `*.svg` that
 /// lands in the tree — through the share the volume is exported over, or a `command` plugin — must
