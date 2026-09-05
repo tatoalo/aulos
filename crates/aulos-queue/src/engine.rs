@@ -1127,16 +1127,30 @@ impl Engine {
     }
 
     /// Writes a terminal status, arms `clear_after` and publishes `Completed` (DESIGN §8.10).
+    ///
+    /// **`finished` clears `msg`** (PROTOCOL §2.4, §3.1). `msg` is the *live* status line — the
+    /// stage label a provider last wrote (`"MoveFiles…"`, `"Merging formats"`, DESIGN §9.5) or the
+    /// pre-terminal hook's label (`"Re-encoding audio"`, DESIGN §13) — and a client renders it as
+    /// the row's subtitle. Carrying the last one of those into the terminal row makes a completed
+    /// download read as a job stuck in its final postprocessor forever, which is what it did in
+    /// production. Nothing describes a successful download better than the empty string, so the
+    /// terminal write drops it.
+    ///
+    /// `error` and `canceled` **keep** it: legacy overloaded the field with the failure text, the
+    /// v1 shim still projects it that way (`aulos_api::v1::history`'s `msg`/`error` pair), and on
+    /// those two statuses the last live line is the closest thing to a reason there is.
     pub(crate) async fn terminate(
         &mut self,
         id: ItemId,
         status: Status,
         error: FieldUpdate<aulos_core::WireError>,
     ) -> bool {
-        if !self
-            .write_status(id, status, FieldUpdate::Keep, error, None)
-            .await
-        {
+        let msg = if status == Status::Finished {
+            FieldUpdate::Clear
+        } else {
+            FieldUpdate::Keep
+        };
+        if !self.write_status(id, status, msg, error, None).await {
             return false;
         }
         if let Some(item) = self.cached(id) {

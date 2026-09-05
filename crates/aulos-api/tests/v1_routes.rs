@@ -1364,3 +1364,79 @@ async fn the_advisory_snap_does_not_loosen_a_real_catalog() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"]["field"], "format");
 }
+
+/// The same bug through the legacy surface the shipped clients read: `GET history`'s `done[]`.
+///
+/// v1 overloaded `msg` — the live stage line for a running item, the failure text for a terminal
+/// error (`project_item`) — so a stale `"MoveFiles…"` on a finished row is exactly as visible
+/// there as it is on v2. It is `null` on `done[]`, and the `error` projection is untouched.
+#[tokio::test]
+async fn a_finished_history_entry_carries_no_postprocessor_line() {
+    /// `preparing → downloading → a window this test can act in → finished`.
+    fn slow_finish() -> FakeProvider {
+        FakeProvider::from_toml(
+            r#"
+            id     = "fake"
+            score  = 200
+            strong = true
+            hosts  = ["fake.test"]
+
+            [[timeline]]
+            download = [
+                { kind = "stage", stage = "preparing" },
+                { kind = "stage", stage = "downloading" },
+                { kind = "wait",  ms = 900 },
+                { kind = "finish", filename = "A video.mp4", size = 1024 },
+            ]
+        "#,
+        )
+        .expect("the slow provider must parse")
+    }
+
+    let rig = Rig::builder("/")
+        .without_default_providers()
+        .env("AULOS_RESOLVE_FALLTHROUGH", "false")
+        .provider(Arc::new(ytdlp_like()))
+        .provider(Arc::new(slow_finish()))
+        .start()
+        .await;
+    let id = rig.add("https://fake.test/watch/pp").await;
+    rig.until_status(&id, "downloading").await;
+
+    // The shim's last `pp` frame (DESIGN §9.5), on an item that is still running.
+    rig.state
+        .engine
+        .stage(
+            id.parse::<ItemId>().expect("a ULID"),
+            aulos_provider::Stage::Postprocessing,
+            Some("MoveFiles…".into()),
+        )
+        .await;
+    let running = rig
+        .until(
+            "the postprocessor line",
+            |item| item["msg"] == "MoveFiles…",
+            &id,
+        )
+        .await;
+    assert_eq!(running["status"], "postprocessing", "{running}");
+
+    rig.until_status(&id, "finished").await;
+    rig.settle().await;
+
+    let (status, body) = rig.get("history").await;
+    assert_eq!(status, 200, "{body}");
+    let done = body["done"].as_array().expect("done");
+    assert_eq!(done.len(), 1, "{body}");
+    assert_eq!(done[0]["status"], "finished");
+    assert!(
+        done[0].get("msg").is_some(),
+        "the key is always present: {body}"
+    );
+    assert_eq!(
+        done[0]["msg"],
+        Value::Null,
+        "a finished row's status line is null, not the last postprocessor: {body}"
+    );
+    assert_eq!(done[0]["error"], Value::Null);
+}

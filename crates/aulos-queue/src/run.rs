@@ -121,12 +121,30 @@ impl Engine {
     }
 
     /// [`EngineCmd::Stage`]: a provider's stage transition, persisted (DESIGN §15.1).
+    ///
+    /// Three states refuse the write, and all three are the same rule — *the provider no longer
+    /// owns this row*. `ProgressMsg::Stage` travels provider → aggregator → engine while
+    /// `EngineCmd::Finished` travels provider → engine, so a frame the provider emitted before it
+    /// finished can be handled **after** the outcome was: yt-dlp's last postprocessor line
+    /// (`"MoveFiles…"`, DESIGN §9.5) is the one that races. Refused it is a dropped cosmetic
+    /// frame; accepted it would rewrite `msg` — or `status` — on a row whose outcome is decided.
+    ///
+    /// - **terminal** — the row is finished, errored or cancelled and DESIGN §4.2 has no edge out.
+    /// - **settled** — the engine wrote the outcome itself (a cancel or a pause) and the job is in
+    ///   its `killpg` grace window ([`Engine::release_job`]).
+    /// - **awaiting hooks** — the download is over and the pre-terminal phase owns the row's
+    ///   `msg`, `status` and `phase` until `HooksFinished` (DESIGN §13). Without this arm a late
+    ///   frame overwrites the hook's label mid-run, and a late `downloading` frame would drag a
+    ///   row that is genuinely postprocessing back to `downloading`.
     pub(crate) async fn handle_stage(&mut self, id: ItemId, stage: Stage, msg: Option<Box<str>>) {
         self.beats.frame(id, self.clock.now_ms());
         let Some(item) = self.cached(id) else {
             return;
         };
-        if item.status.is_terminal() || self.running.get(&id).is_some_and(|r| r.settled.is_some()) {
+        if item.status.is_terminal()
+            || self.running.get(&id).is_some_and(|r| r.settled.is_some())
+            || self.pending_hooks.contains_key(&id)
+        {
             return;
         }
         let patch = msg.map_or(FieldUpdate::Keep, FieldUpdate::Set);

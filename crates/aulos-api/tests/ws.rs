@@ -727,3 +727,89 @@ async fn a_lagging_client_gets_one_fresh_snapshot() {
         "and the lag is counted for healthz: {health}"
     );
 }
+
+/// A finished download must not carry the postprocessor line it ran last.
+///
+/// Production shipped one that did: yt-dlp's `MoveFiles` frame stayed in `msg` through the
+/// terminal write, and the shipped client renders `msg` as the row's subtitle, so every completed
+/// item read as a job stuck in "MoveFiles…". The line is legitimate on the live `delta`; the
+/// `completed` frame is where it has to go. PROTOCOL §5.4's absent-key-means-unchanged rule is why
+/// it goes as an explicit `null` rather than a missing key — an absent key would leave every
+/// client showing the stale line forever.
+#[tokio::test]
+async fn a_finished_item_clears_its_postprocessor_line_on_the_wire() {
+    /// `preparing → downloading → a window this test can act in → finished`.
+    fn slow_finish() -> aulos_provider::fake::FakeProvider {
+        aulos_provider::fake::FakeProvider::from_toml(
+            r#"
+            id     = "fake"
+            score  = 200
+            strong = true
+            hosts  = ["fake.test"]
+
+            [[timeline]]
+            download = [
+                { kind = "stage", stage = "preparing" },
+                { kind = "stage", stage = "downloading" },
+                { kind = "wait",  ms = 900 },
+                { kind = "finish", filename = "A video.mp4", size = 1024 },
+            ]
+        "#,
+        )
+        .expect("the slow provider must parse")
+    }
+
+    let rig = Rig::builder("/")
+        .without_default_providers()
+        .provider(Arc::new(ytdlp_like()))
+        .provider(Arc::new(slow_finish()))
+        .start()
+        .await;
+    let id = rig.add("https://fake.test/watch/pp").await;
+    rig.until_status(&id, "downloading").await;
+
+    let mut socket = connect(&rig, "ws").await;
+    next_frame_of(&mut socket, "snapshot").await;
+
+    // Exactly what the shim turns `{"t":"pp","postprocessor":"MoveFiles","status":"started"}`
+    // into (DESIGN §9.5): a stage frame with a human line, on an item that is still running.
+    rig.state
+        .engine
+        .stage(
+            id.parse::<aulos_core::ItemId>().expect("a ULID"),
+            aulos_provider::Stage::Postprocessing,
+            Some("MoveFiles…".into()),
+        )
+        .await;
+
+    let mut live_line: Option<Value> = None;
+    let completed = loop {
+        let frame = next_frame(&mut socket).await;
+        match frame["t"].as_str() {
+            Some("delta") => {
+                if let Some(msg) = frame["items"][0].get("msg") {
+                    live_line = Some(msg.clone());
+                }
+            }
+            Some("completed") => break frame,
+            _ => {}
+        }
+    };
+    assert_eq!(
+        live_line,
+        Some(json!("MoveFiles…")),
+        "the line is on the wire while the postprocessor runs"
+    );
+
+    let item = &completed["items"][0];
+    assert_eq!(item["status"], "finished");
+    assert!(
+        item.get("msg").is_some(),
+        "a full object always carries every key: {item}"
+    );
+    assert_eq!(
+        item["msg"],
+        Value::Null,
+        "and a finished item's status line is null: {item}"
+    );
+}
