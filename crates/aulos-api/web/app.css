@@ -225,7 +225,29 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
   gap: 24px;
 }
 
-.empty { text-align: center; padding: 32px 8px; color: var(--text2); font-size: 15px; }
+/* The empty queue is a composed state, not a leftover line: a disc, a 20px headline and one
+   supporting sentence, sitting where the first row would have been. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  padding: 48px 16px 24px;
+}
+.empty-ico {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  color: var(--text3);
+}
+.empty-hd { margin: 0; font-size: 20px; line-height: 24px; font-weight: 600; color: var(--text); }
+.empty-sub { margin: 0; max-width: 34ch; font-size: 15px; line-height: 20px; color: var(--text2); }
 
 /* ---------- add bar ---------- */
 

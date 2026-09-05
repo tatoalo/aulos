@@ -1036,6 +1036,7 @@ async function loadCapabilities() {
 function wire() {
   $('mark').innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P.logo.replace(/currentColor/g, '#FFFFFF')}</svg>`;
   $('url-ico').innerHTML = icon('link', 18, 1.8);
+  $('empty-ico').innerHTML = icon('download', 26, 1.6);
   $('add-btn').firstElementChild.innerHTML = icon('plus', 18, 2.2);
   $('clear').firstElementChild.innerHTML = icon('trash', 12, 2.2);
   for (const el of document.querySelectorAll('.chevron')) el.innerHTML = icon('chevron', 14, 2);
