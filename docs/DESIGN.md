@@ -1526,8 +1526,16 @@ until the NFO hook has run and are then dropped.
 
 ### 7.6 Legacy JSON importer
 
-Runs from `aulos-server bootstrap` **only when the DB file does not exist**, or on demand via
-`aulos-server import`. It is the single most cutover-critical component.
+Runs from `aulos-server bootstrap` on **every** boot, and on demand via `aulos-server import`. It
+is the single most cutover-critical component.
+
+It does not need an outside "is this a first start?" gate, and must not have one: it opens with its
+own idempotence check — the `.aulos-imported` marker file, `meta.imported_at`, or a non-empty
+`items` table, any one of which yields `already_imported`, which the boot treats as a non-fatal
+skip. Gating on "the DB file does not exist" instead is what made an interrupted cutover
+permanent: `Store::open` creates `aulos.db` *before* the importer's transaction, so a `SIGTERM`
+in between left a file that suppressed the import for good while the legacy JSON still sat in
+`STATE_DIR`, with `healthz.components.importer` reporting `disabled`.
 
 #### 7.6.1 Inputs
 
@@ -3791,12 +3799,13 @@ Legacy sits at 250–400 MB because it forks an interpreter per download.
 ### 16.1 Startup order
 
 ```
+0  install the SIGTERM/SIGINT handler (only the shutdown token is needed)  §16.4
 1  parse env → Config (fatal on error, exit 2)                            §17
 2  init tracing (LOGLEVEL, AULOS_LOG_FORMAT, third-party dampening)       §16.5
 3  log the effective config table (secrets redacted)
 4  mkdir -p DOWNLOAD_DIR, AUDIO_DOWNLOAD_DIR, TEMP_DIR, STATE_DIR, dirname(AULOS_DB_PATH)
 5  open SQLite, PRAGMA quick_check, run migrations, seed the ord/seq allocators
-6  if the DB was just created → run the legacy importer (one txn)          §7.6
+6  run the legacy importer, every boot — it answers "already imported" itself (one txn)  §7.6
 7  load YTDL_OPTIONS + presets (fatal on error); adopt STATE_DIR/cookies.txt if present
 8  discover command plugins and hook manifests; build the provider registry
 9  doctor probes: python3 + yt-dlp are FATAL (the ytdlp provider is the fallback for everything);
@@ -3809,12 +3818,26 @@ Legacy sits at 250–400 MB because it forks an interpreter per download.
 13 spawn HookDispatcher, SubscriptionScheduler, ClearScheduler, ConfigWatcher, PluginWatcher
 14 spawn the Telegram actor (if enabled and configured), then `EventRouter::spawn()` — no
    subscriber may be registered after this point
+14b install the SIGHUP/SIGQUIT handlers (their reload targets now exist)   §16.4
 15 bind HOST:PORT (TLS when HTTPS=true), start axum with graceful shutdown
 16 log "aulos-server <version> listening on <addr><prefix> (v1 shim: on|off)"
 ```
 
 Steps 5–12 complete **before** the listener binds, so the first request already sees a consistent
-snapshot. `SO_REUSEPORT` is set when the platform supports it (parity with legacy's
+snapshot.
+
+Step 0 is first because steps 4–14 are not fast — the importer reads a whole legacy `STATE_DIR`,
+each tool probe allows `AULOS_SHIM_TIMEOUT_SECS`, and step 14 waits for the recovered set to reach
+the published snapshot. Until a handler is installed, `SIGTERM` keeps its **default disposition**
+and kills the process, so a `docker compose down` during the cutover boot left `aulos.db` created
+and empty. Steps 4, 6, 9, 12 and 14 are each followed by a cancellation check that unwinds cleanly
+(closing the store, stopping the sidecar) and exits **0** without ever binding — an operator's stop
+is not a boot failure. Step 6 is the second half of the same fix: gating the importer on "the DB
+file did not exist" is what made that interrupted boot permanent, so the importer is now called
+unconditionally and its own three-way idempotence check (marker file, `meta.imported_at`, a
+non-empty items table — §7.6) decides. Its `already_imported` answer is a non-fatal skip.
+
+`SO_REUSEPORT` is set when the platform supports it (parity with legacy's
 `supports_reuse_port()`), which also makes a blue/green port swap possible on the VPS. Every
 spawned task goes into a `TaskTracker` so shutdown can await it.
 
@@ -3918,7 +3941,7 @@ counter, §16.7 names the `healthz` path so the two can be reconciled.
 
 | Signal | Behaviour |
 |---|---|
-| `SIGTERM` / `SIGINT` | 1. stop accepting HTTP (axum graceful); 2. close WS clients with `1001 "server shutting down"` so they reconnect rather than error; 3. stop the subscription scheduler and the Telegram poller; 4. **let in-flight downloads finish** for up to `AULOS_SHUTDOWN_GRACE_SECS` (20); 5. then `killpg SIGTERM` each job, 5 s, `SIGKILL`; 6. mark still-active items `queued` with `msg="Interrupted by shutdown"` so the next boot resumes them; 7. final aggregator flush; 8. drain the store actor, `wal_checkpoint(TRUNCATE)`, `PRAGMA optimize`, close; 9. `SIGTERM` the POT child; 10. `TaskTracker::wait()` with a 10 s ceiling, then exit 0. |
+| `SIGTERM` / `SIGINT` (installed at §16.1 step 0, before the boot's slow steps) | 1. stop accepting HTTP (axum graceful); 2. close WS clients with `1001 "server shutting down"` so they reconnect rather than error; 3. stop the subscription scheduler and the Telegram poller; 4. **let in-flight downloads finish** for up to `AULOS_SHUTDOWN_GRACE_SECS` (20); 5. then `killpg SIGTERM` each job, 5 s, `SIGKILL`; 6. mark still-active items `queued` with `msg="Interrupted by shutdown"` so the next boot resumes them; 7. final aggregator flush; 8. drain the store actor, `wal_checkpoint(TRUNCATE)`, `PRAGMA optimize`, close; 9. `SIGTERM` the POT child; 10. `TaskTracker::wait()` with a 10 s ceiling, then exit 0. |
 | `SIGHUP` | reload `YTDL_OPTIONS*` and re-scan `AULOS_PLUGINS_DIR` (`docker kill -s HUP` is a nice ops affordance). |
 | `SIGQUIT` | log every task's state at ERROR and continue — a debug aid for a wedged container. |
 | panic in a task | caught by the spawn wrapper, logged with the span; the owning item fails with `internal` and the request id. A panic in the **engine or store actor** is fatal by design: `abort()` after logging, because a corrupted queue is worse than a restart, and boot recovery is designed for exactly the hard-kill case. |

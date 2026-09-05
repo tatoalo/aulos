@@ -6,11 +6,19 @@
 //! | `SIGHUP` | reload `YTDL_OPTIONS*` and re-scan `AULOS_PLUGINS_DIR` — `docker kill -s HUP` is a nice ops affordance |
 //! | `SIGQUIT` | dump what the process is doing at ERROR and **continue**, a debug aid for a wedged container |
 //!
-//! The handlers are installed **after** the listener is up and the announce line has been printed,
-//! but the shutdown token they cancel exists from the start — so a supervisor that signals
-//! immediately cannot race the installation and win. (It used to: the WP-01 skeleton printed its
-//! line before installing the handlers, and the default action for an uninstalled `SIGTERM` kills
-//! the process instead of shutting it down.)
+//! The two installers are deliberately separate, because they belong at different points of the
+//! boot. [`install_shutdown`] is the **first** thing [`crate::wiring::run_with`] does, before the
+//! directories are created and long before the listener binds: until a tokio handler is
+//! registered, `SIGTERM` and `SIGINT` keep their *default disposition* and kill the process
+//! outright, and boot is not short — the tool probes alone allow sixty seconds, and the legacy
+//! importer can spend minutes reading a large `STATE_DIR`. A stop during that window used to hard-
+//! kill the process; now it cancels the token and every boot step between here and the bind checks
+//! it and unwinds cleanly. (Having the token exist from the start was never enough: a token nobody
+//! cancels does not stop a signal whose handler is not installed.)
+//!
+//! [`install_reload`] carries the `SIGHUP`/`SIGQUIT` arms, and cannot move that early: its
+//! [`ReloadTargets`] do not exist until the configuration, the options snapshot and the registry
+//! have been built.
 
 use std::sync::{Arc, RwLock};
 
@@ -50,22 +58,18 @@ impl std::fmt::Debug for ReloadTargets {
     }
 }
 
-/// Installs every handler on `tracker`.
+/// Installs the `SIGTERM`/`SIGINT` arm — the one that must exist before anything slow runs.
+///
+/// Call this at the very top of the boot. It needs nothing but the token, which is exactly why it
+/// can go there: every other handler wants collaborators that boot has not built yet.
 ///
 /// # Errors
 /// When a signal handler cannot be registered — which on Linux means the process is out of file
 /// descriptors, and is worth failing the boot over rather than running a server that cannot be
 /// stopped cleanly.
-pub fn install(
-    shutdown: &CancellationToken,
-    reload: ReloadTargets,
-    tracker: &TaskTracker,
-) -> anyhow::Result<()> {
+pub fn install_shutdown(shutdown: &CancellationToken, tracker: &TaskTracker) -> anyhow::Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
-    let mut hup = signal(SignalKind::hangup())?;
-    let mut quit = signal(SignalKind::quit())?;
-
     {
         let shutdown = shutdown.clone();
         tracker.spawn(async move {
@@ -77,6 +81,22 @@ pub fn install(
             shutdown.cancel();
         });
     }
+    tracing::debug!("SIGTERM and SIGINT handlers installed");
+    Ok(())
+}
+
+/// Installs the `SIGHUP` and `SIGQUIT` arms, which need the boot to have produced [`ReloadTargets`].
+///
+/// # Errors
+/// As [`install_shutdown`].
+pub fn install_reload(
+    shutdown: &CancellationToken,
+    reload: ReloadTargets,
+    tracker: &TaskTracker,
+) -> anyhow::Result<()> {
+    let mut hup = signal(SignalKind::hangup())?;
+    let mut quit = signal(SignalKind::quit())?;
+
     {
         let shutdown = shutdown.clone();
         tracker.spawn(async move {
@@ -110,7 +130,7 @@ pub fn install(
             }
         });
     }
-    tracing::debug!("SIGTERM, SIGINT, SIGHUP and SIGQUIT handlers installed");
+    tracing::debug!("SIGHUP and SIGQUIT handlers installed");
     Ok(())
 }
 
@@ -220,23 +240,16 @@ mod tests {
         );
     }
 
+    /// The regression this guards is the boot-time one: `install_shutdown` must be callable with
+    /// **nothing but the token**, because at the top of `run_with` — before the directories, the
+    /// store, the importer and the sixty-second tool probes — no `ReloadTargets` exist yet. If it
+    /// ever needs more than this, it slides back down the boot and a `docker compose down` during
+    /// the import hard-kills the process again.
     #[tokio::test]
-    async fn sigterm_cancels_the_shutdown_token() {
+    async fn sigterm_cancels_the_shutdown_token_with_no_reload_targets() {
         let token = CancellationToken::new();
         let tracker = TaskTracker::new();
-        let (_router, events) = EventRouter::new(8);
-        install(
-            &token,
-            ReloadTargets {
-                cfg: cfg(&[]),
-                ytdl: Arc::new(ArcSwap::from_pointee(YtdlOptions::empty())),
-                registry: Arc::new(RwLock::new(Registry::new())),
-                events,
-                health: Arc::new(HealthRegistry::new()),
-            },
-            &tracker,
-        )
-        .unwrap();
+        install_shutdown(&token, &tracker).unwrap();
 
         // Signalling ourselves is the only faithful test of a signal handler.
         nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).unwrap();

@@ -8,6 +8,7 @@
 //! # The order, and why the listener is last
 //!
 //! ```text
+//!  0      SIGTERM/SIGINT handlers — before anything that can take minutes
 //!  1..9   bootstrap: config, tracing, dirs, store, importer, options, plugins, tool probes
 //!  10     POT supervisor
 //!  11     EventRouter::new → subscribe(aggregator, hooks, telegram) → EventSender to producers
@@ -22,6 +23,18 @@
 //! Steps 5–12 complete before the bind, so the first request already sees a consistent snapshot
 //! rather than an empty queue that fills in over the next second. `SO_REUSEPORT` is set (parity
 //! with legacy's `supports_reuse_port()`), which also makes a blue/green port swap possible.
+//!
+//! # Why the shutdown handler is step 0
+//!
+//! Steps 4–14 are not fast: the importer reads a whole legacy `STATE_DIR`, each tool probe allows
+//! [`crate::tools::SHIM_TIMEOUT`], and `await_first_publish` adds its own ceiling. Until a tokio
+//! handler is registered, `SIGTERM` keeps its **default disposition** and kills the process — so a
+//! `docker compose down` during the first boot used to leave a created-but-empty `aulos.db`
+//! behind, after which the legacy import was skipped for good. [`signals::install_shutdown`]
+//! therefore runs before step 4, and every long step is followed by an `http_token.is_cancelled()`
+//! check that unwinds cleanly instead of pressing on to the bind. (The importer is hardened
+//! independently: `bootstrap::open_store` now calls it on *every* boot and lets it answer
+//! "already imported" itself.)
 //!
 //! # The three cancellation tokens
 //!
@@ -165,13 +178,27 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     let jobs_token = CancellationToken::new();
     let pot_token = CancellationToken::new();
 
+    // --- 0. the shutdown signals, before anything that can take minutes -------------------
+    //
+    // The `SIGHUP`/`SIGQUIT` arms cannot come this early — they need `cfg`/`ytdl`/`registry` to
+    // exist — but this one needs only the token, and it is the one whose absence is fatal.
+    if install_signals {
+        signals::install_shutdown(&http_token, &tracker)?;
+    }
+
     // --- 4. the directories ---------------------------------------------------------------
     bootstrap::make_dirs(&cfg)?;
+    if http_token.is_cancelled() {
+        return boot_cancelled("dirs", None, &tracker).await;
+    }
 
     let health = Arc::new(HealthRegistry::new());
 
     // --- 5..6. the database, and the legacy importer on a first start ---------------------
     let store = bootstrap::open_store(&cfg, &health).await?;
+    if http_token.is_cancelled() {
+        return boot_cancelled("store", Some(&store), &tracker).await;
+    }
 
     // --- 7. YTDL_OPTIONS and the cookie jar ----------------------------------------------
     let ytdl = bootstrap::load_ytdl_options(&cfg)?;
@@ -185,6 +212,9 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     } else {
         bootstrap::probe_tools(&cfg, &health).await?
     };
+    if http_token.is_cancelled() {
+        return boot_cancelled("tool probes", Some(&store), &tracker).await;
+    }
 
     // --- 10. the POT sidecar ---------------------------------------------------------------
     let (event_router, events) = EventRouter::new(EVENT_CAPACITY);
@@ -267,6 +297,11 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         policy = recovery.policy,
         "boot recovery complete"
     );
+    if http_token.is_cancelled() {
+        // The POT supervisor is the only task spawned so far, and it stops on its own token.
+        pot_token.cancel();
+        return boot_cancelled("recovery", Some(&store), &tracker).await;
+    }
 
     // `with_done_total` is what stops a restart reporting `done_total` as the *window* length,
     // which every client would read as "my history was truncated to 500 rows".
@@ -445,50 +480,9 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         tracker.spawn(health::run(health_probes, health, events, token));
     }
 
-    // --- 15. the listener --------------------------------------------------------------------
-    let mut api_state = ApiState::new(
-        engine_handle.clone(),
-        state.clone(),
-        hub.clone(),
-        store.clone(),
-        Arc::clone(&registry),
-        Arc::clone(&cfg),
-        Arc::clone(&ytdl),
-        Arc::clone(&health),
-        subs_handle.clone(),
-    )
-    .with_clock(Arc::clone(&clock));
-    if let Some(version) = &yt_dlp {
-        // Without this `capabilities.yt_dlp`, `GET <p>version` and `healthz.yt_dlp` all stay
-        // `null` (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
-        api_state = api_state
-            .with_info(ServerInfo::new(&cfg, clock.as_ref()).with_yt_dlp(version.to_string()));
-    }
-    let app = aulos_api::router(api_state);
-
-    let listener = bind(&cfg).await?;
-    let addr = listener.local_addr()?;
-    tracing::info!(
-        version = %cfg.version,
-        %addr,
-        prefix = %cfg.url_prefix,
-        v1_shim = cfg.v1_enabled,
-        "aulos-server listening"
-    );
-    // --- 16. the announce line, on stdout so a supervisor can read it ---------------------
-    println!(
-        "aulos-server {} listening on {}{} (v1 shim: {})",
-        cfg.version,
-        addr,
-        cfg.url_prefix,
-        if cfg.v1_enabled { "on" } else { "off" }
-    );
-    if let Some(tx) = ready {
-        let _ = tx.send(addr);
-    }
-
+    // --- 14b. the reload signals, now that their targets exist ---------------------------
     if install_signals {
-        signals::install(
+        signals::install_reload(
             &http_token,
             signals::ReloadTargets {
                 cfg: Arc::clone(&cfg),
@@ -501,7 +495,64 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         )?;
     }
 
-    let mut served = tokio::spawn(serve(listener, app, Arc::clone(&cfg), http_token.clone()));
+    // A shutdown that arrived while the queue was being recovered must not reach the bind: the
+    // port would open and the announce line would print for a process already on its way out,
+    // which is exactly the line a supervisor reads as "it came up".
+    let mut served = if http_token.is_cancelled() {
+        tracing::info!(
+            step = "first publish",
+            "the shutdown signal arrived during boot; not binding"
+        );
+        None
+    } else {
+        // --- 15. the listener --------------------------------------------------------------------
+        let mut api_state = ApiState::new(
+            engine_handle.clone(),
+            state.clone(),
+            hub.clone(),
+            store.clone(),
+            Arc::clone(&registry),
+            Arc::clone(&cfg),
+            Arc::clone(&ytdl),
+            Arc::clone(&health),
+            subs_handle.clone(),
+        )
+        .with_clock(Arc::clone(&clock));
+        if let Some(version) = &yt_dlp {
+            // Without this `capabilities.yt_dlp`, `GET <p>version` and `healthz.yt_dlp` all stay
+            // `null` (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
+            api_state = api_state
+                .with_info(ServerInfo::new(&cfg, clock.as_ref()).with_yt_dlp(version.to_string()));
+        }
+        let app = aulos_api::router(api_state);
+
+        let listener = bind(&cfg).await?;
+        let addr = listener.local_addr()?;
+        tracing::info!(
+            version = %cfg.version,
+            %addr,
+            prefix = %cfg.url_prefix,
+            v1_shim = cfg.v1_enabled,
+            "aulos-server listening"
+        );
+        // --- 16. the announce line, on stdout so a supervisor can read it ---------------------
+        println!(
+            "aulos-server {} listening on {}{} (v1 shim: {})",
+            cfg.version,
+            addr,
+            cfg.url_prefix,
+            if cfg.v1_enabled { "on" } else { "off" }
+        );
+        if let Some(tx) = ready {
+            let _ = tx.send(addr);
+        }
+        Some(tokio::spawn(serve(
+            listener,
+            app,
+            Arc::clone(&cfg),
+            http_token.clone(),
+        )))
+    };
 
     http_token.cancelled().await;
     tracing::info!("shutting down");
@@ -565,9 +616,10 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     // holds an `EngineHandle` and an `EventHub` — so without the abort the engine can never
     // finish and shutdown always costs the full `TRACKER_CEILING`. Polling a `JoinHandle` that has
     // already yielded its output panics, so the abort is on the timeout branch only.
-    if tokio::time::timeout(WS_CLOSE_GRACE, &mut served)
-        .await
-        .is_err()
+    if let Some(served) = &mut served
+        && tokio::time::timeout(WS_CLOSE_GRACE, &mut *served)
+            .await
+            .is_err()
     {
         tracing::debug!("a WebSocket outlived the close grace; dropping the listener");
         served.abort();
@@ -616,6 +668,37 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
 
     // 10. exit 0.
     tracing::info!("aulos-server stopped");
+    Ok(())
+}
+
+/// Unwinds a boot that was cancelled before the listener existed (DESIGN §16.4, the short path).
+///
+/// The full ten-step shutdown has nothing to do here — there is no listener, no engine task and no
+/// realtime chain yet — so all that is owed is the store, which may hold a WAL from the legacy
+/// import, and whatever the tracker has already spawned. Exiting `Ok` is deliberate: the operator
+/// asked for a stop, and a non-zero exit would make `restart: on-failure` fight them for it.
+async fn boot_cancelled(
+    step: &'static str,
+    store: Option<&Store>,
+    tracker: &TaskTracker,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        step,
+        "the shutdown signal arrived during boot; stopping before the listener"
+    );
+    tracker.close();
+    if tokio::time::timeout(TRACKER_CEILING, tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("some boot tasks did not stop within the ceiling; closing the store anyway");
+    }
+    if let Some(store) = store
+        && let Err(e) = store.close().await
+    {
+        tracing::warn!(error = %e, "the store did not close cleanly");
+    }
+    tracing::info!("aulos-server stopped during boot");
     Ok(())
 }
 
@@ -985,6 +1068,31 @@ mod tests {
 
     fn cfg(pairs: &[(&str, &str)]) -> Arc<Config> {
         Arc::new(aulos_core::config::load(&RawEnv::from_pairs(pairs.iter().copied())).unwrap())
+    }
+
+    /// A stop that lands mid-boot has no listener, no engine and no realtime chain to unwind —
+    /// only the store, which may be holding the legacy import's WAL. Exiting `Ok` matters as much
+    /// as closing it: the operator asked for the stop, and a non-zero exit makes
+    /// `restart: on-failure` bring the container straight back.
+    #[tokio::test]
+    async fn a_boot_cancelled_before_the_listener_closes_the_store_and_exits_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(&[
+            ("DOWNLOAD_DIR", &dir.path().display().to_string()),
+            ("STATE_DIR", &dir.path().join("state").display().to_string()),
+        ]);
+        bootstrap::make_dirs(&c).unwrap();
+        let store = aulos_store::Store::open(aulos_store::StoreOptions::from_config(&c)).unwrap();
+        let tracker = TaskTracker::new();
+
+        boot_cancelled("store", Some(&store), &tracker)
+            .await
+            .expect("a cancelled boot is a clean stop, not a failure");
+
+        assert!(
+            store.close().await.is_err(),
+            "the store must already have been closed by the unwind"
+        );
     }
 
     #[tokio::test]

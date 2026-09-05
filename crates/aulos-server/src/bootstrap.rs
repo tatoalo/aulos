@@ -17,7 +17,7 @@ use aulos_provider::Registry;
 use aulos_provider::command::provider::{CommandPluginLoader, PluginEnv};
 use aulos_provider_sc::ScProvider;
 use aulos_provider_ytdlp::YtdlpProvider;
-use aulos_store::import::{self, ImportOpts, ImportReport, OnError};
+use aulos_store::import::{self, ImportErrorCode, ImportOpts, ImportReport, OnError};
 use aulos_store::{Store, StoreOptions};
 
 /// The exit code for invalid configuration (BRIEF §15, DESIGN §16.1 step 1).
@@ -187,18 +187,24 @@ pub fn make_dirs(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Opens the database and, when this is a first start, runs the legacy importer
-/// (DESIGN §16.1 steps 5–6, §7.6).
+/// Opens the database and runs the legacy importer (DESIGN §16.1 steps 5–6, §7.6).
 ///
-/// The importer runs **only** when the database file did not exist: an existing database means the
-/// import already happened (or was deliberately skipped), and re-running it would resurrect rows
-/// the operator deleted. On a fatal import the database is deleted and the error is returned, so
-/// the next boot retries from a clean slate rather than serving half a queue.
+/// The importer is called on **every** boot and decides for itself whether there is anything to
+/// do: [`import::import`] answers `already_imported` when the marker file exists, when
+/// `meta.imported_at` is set, or when the items table is non-empty, and that answer is treated
+/// here as a non-fatal skip. Gating on "the database file did not exist" instead — which is what
+/// this used to do — loses the import permanently the first time a boot is interrupted between
+/// `Store::open` (which creates `aulos.db`) and the importer's single transaction: the next boot
+/// sees a file, never calls the importer, and `healthz.components.importer` reports `disabled`
+/// while the whole legacy queue still sits unread in `STATE_DIR`. The three-way check is exactly
+/// as strong a guard against resurrecting rows the operator deleted.
+///
+/// On a fatal import the database is deleted and the error is returned, so the next boot retries
+/// from a clean slate rather than serving half a queue.
 ///
 /// # Errors
 /// A store that cannot be opened, or a fatal import.
 pub async fn open_store(cfg: &Config, health: &HealthRegistry) -> anyhow::Result<Store> {
-    let fresh = !cfg.db_path.exists();
     let store = Store::open(StoreOptions::from_config(cfg))
         .map_err(|e| anyhow::anyhow!("could not open {}: {e}", cfg.db_path.display()))?;
     for warning in store.id_warnings() {
@@ -207,30 +213,33 @@ pub async fn open_store(cfg: &Config, health: &HealthRegistry) -> anyhow::Result
         tracing::warn!(target: "aulos_store::alloc", "{warning}");
     }
 
-    if fresh {
-        tracing::info!(
-            state_dir = %cfg.paths.state.display(),
-            "a new database; looking for legacy state to import"
-        );
-        match import::import(&cfg.paths.state, &store, import_opts(cfg)).await {
-            Ok(report) => {
-                tracing::info!("\n{}", report.render_table());
-                health.set(IMPORTER_COMPONENT, importer_component(Some(&report)));
-            }
-            Err(fatal) => {
-                tracing::error!("\n{}", fatal.report.render_table());
-                let _ = store.close().await;
-                if fatal.should_delete_db()
-                    && let Err(e) = import::delete_db_files(&cfg.db_path)
-                {
-                    tracing::warn!("could not remove {}: {e}", cfg.db_path.display());
-                }
-                anyhow::bail!("the legacy import failed: {fatal}");
-            }
+    tracing::debug!(
+        state_dir = %cfg.paths.state.display(),
+        "looking for legacy state to import"
+    );
+    match import::import(&cfg.paths.state, &store, import_opts(cfg)).await {
+        Ok(report) => {
+            tracing::info!("\n{}", report.render_table());
+            health.set(IMPORTER_COMPONENT, importer_component(Some(&report)));
         }
-    } else {
-        let stored = import::stored_report(&store).await.ok().flatten();
-        health.set(IMPORTER_COMPONENT, importer_component(stored.as_ref()));
+        // Not a failure and not even a surprise: it is what every boot after the first says. The
+        // component is then filled from the report the first import stored, so `healthz` keeps
+        // reporting the same `imported_at` for the life of the installation.
+        Err(fatal) if fatal.code == ImportErrorCode::AlreadyImported => {
+            tracing::debug!(reason = %fatal, "the legacy state was already imported");
+            let stored = import::stored_report(&store).await.ok().flatten();
+            health.set(IMPORTER_COMPONENT, importer_component(stored.as_ref()));
+        }
+        Err(fatal) => {
+            tracing::error!("\n{}", fatal.report.render_table());
+            let _ = store.close().await;
+            if fatal.should_delete_db()
+                && let Err(e) = import::delete_db_files(&cfg.db_path)
+            {
+                tracing::warn!("could not remove {}: {e}", cfg.db_path.display());
+            }
+            anyhow::bail!("the legacy import failed: {fatal}");
+        }
     }
     Ok(store)
 }
@@ -446,6 +455,19 @@ mod tests {
         RawEnv::from_pairs(pairs.iter().copied())
     }
 
+    /// Copies one of `aulos-store`'s legacy `STATE_DIR` fixtures into `dest`.
+    fn copy_fixture(name: &str, dest: &Path) {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aulos-store/tests/fixtures/state")
+            .join(name);
+        for entry in std::fs::read_dir(&fixture).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), dest.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn every_config_error_is_reported_at_once() {
         let err = load_config(&env(&[
@@ -613,14 +635,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../aulos-store/tests/fixtures/state/v2");
-        for entry in std::fs::read_dir(&fixture).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().is_file() {
-                std::fs::copy(entry.path(), state.join(entry.file_name())).unwrap();
-            }
-        }
+        copy_fixture("v2", &state);
         let cfg = config::load(&env(&[
             ("STATE_DIR", &state.display().to_string()),
             ("DOWNLOAD_DIR", &root.path().display().to_string()),
@@ -658,19 +673,57 @@ mod tests {
         store2.close().await.unwrap();
     }
 
+    /// The cutover regression: a boot killed between `Store::open` (which *creates* `aulos.db`)
+    /// and the importer's single transaction used to lose the legacy state for good, because the
+    /// next boot only asked "does the file exist?". The importer's own three-way check is what
+    /// decides now, so a half-created database still gets imported.
+    #[tokio::test]
+    async fn a_half_created_database_is_still_imported_on_the_next_boot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        copy_fixture("v2", &state);
+        let cfg = config::load(&env(&[
+            ("STATE_DIR", &state.display().to_string()),
+            ("DOWNLOAD_DIR", &root.path().display().to_string()),
+        ]))
+        .unwrap();
+
+        // Exactly what a `docker compose down` during the import leaves behind: the schema, no
+        // `meta.imported_at`, no marker file, no rows.
+        let half = Store::open(StoreOptions::from_config(&cfg)).unwrap();
+        assert!(
+            import::stored_report(&half).await.unwrap().is_none(),
+            "the interrupted boot must not have recorded an import"
+        );
+        half.close().await.unwrap();
+        assert!(cfg.db_path.exists(), "the database file survives the kill");
+        assert!(!state.join(import::MARKER_FILE).exists());
+
+        let health = HealthRegistry::new();
+        let store = open_store(&cfg, &health).await.unwrap();
+        assert!(
+            import::stored_report(&store).await.unwrap().is_some(),
+            "an existing but never-imported database must still be imported"
+        );
+        assert!(
+            state.join(import::MARKER_FILE).is_file(),
+            "the marker is written by the recovered import"
+        );
+        assert_eq!(
+            health.snapshot().components[IMPORTER_COMPONENT].status,
+            ComponentStatus::Ok,
+            "healthz must not report `disabled` after a recovered import"
+        );
+        store.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_fatal_import_deletes_the_database_and_fails_the_boot() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../aulos-store/tests/fixtures/state/corrupt");
-        for entry in std::fs::read_dir(&fixture).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().is_file() {
-                std::fs::copy(entry.path(), state.join(entry.file_name())).unwrap();
-            }
-        }
+        copy_fixture("corrupt", &state);
         let cfg = config::load(&env(&[
             ("STATE_DIR", &state.display().to_string()),
             ("DOWNLOAD_DIR", &root.path().display().to_string()),

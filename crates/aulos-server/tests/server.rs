@@ -172,6 +172,40 @@ impl Hook for RecordingPreTerminal {
     }
 }
 
+/// A `SIGTERM` that beats the boot must unwind, not hard-kill.
+///
+/// The handler used to be installed at the *end* of `run_with`, after the importer, the sixty-
+/// second tool probes and the queue recovery — so for the whole of that window `SIGTERM` kept its
+/// default disposition and killed the process outright. The visible cost was on the cutover boot:
+/// `aulos.db` was created and left empty, and the legacy import never ran again. Here the token is
+/// cancelled *before* `run_with` is even called, which is the same thing from the boot's point of
+/// view: it must return `Ok`, and it must never bind the port or fire `ready`.
+#[tokio::test]
+async fn a_shutdown_that_beats_the_boot_returns_cleanly_without_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = Arc::new(config(root.path(), &[]));
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let (ready_tx, ready_rx) = oneshot::channel();
+
+    let mut opts = RunOptions::new(Arc::clone(&cfg));
+    opts.providers = vec![Arc::new(FakeProvider::new().with_timeline(fast_timeline()))];
+    opts.shutdown = shutdown;
+    opts.ready = Some(ready_tx);
+    opts.install_signals = false;
+    opts.skip_tool_probes = true;
+
+    tokio::time::timeout(Duration::from_secs(30), run_with(opts))
+        .await
+        .expect("a boot that is cancelled up front must return promptly")
+        .expect("an operator's stop is a clean exit, not a boot failure");
+
+    assert!(
+        ready_rx.await.is_err(),
+        "the listener must never have been bound"
+    );
+}
+
 /// Polls `f` until it answers `Some`, or fails after `secs`.
 async fn until<T, F, Fut>(secs: u64, what: &str, mut f: F) -> T
 where
