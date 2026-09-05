@@ -2464,8 +2464,17 @@ Both sit behind one trait, so the scraping logic is client-agnostic and unit-tes
 pub trait ScHttp: Send + Sync {
     async fn get(&self, req: ScReq) -> Result<ScRes, ScError>;
     fn impersonating(&self) -> bool;
+    // Two additions with default implementations, both for §10.5's `Cookie:` header:
+    fn cookie_header(&self) -> String { String::new() }              // the jar, as a header
+    fn new_session(&self) -> Option<Arc<dyn ScHttp>> { None }        // a client with an empty jar
 }
 ```
+
+`new_session()` is what makes §10.5's "fresh cookie jar" true: the boot client is shared by the
+whole resolve pool and its recorded jar is keyed on the bare cookie name, so two concurrent
+vixcloud extractions would otherwise overwrite each other's session cookie and each download would
+hand the other's to `N_m3u8DL-RE` (a 403). Legacy avoided this by building a new
+`curl_cffi.Session` per download (`streamingcommunity.py:407`).
 
 `AULOS_SC_HTTP ∈ auto | impersonate | plain` (default `auto` = impersonate when compiled in). If
 the feature is off for the target, the provider logs exactly one WARN at boot naming the
@@ -2480,7 +2489,7 @@ unavailable, the provider registers `Degraded("sc-impersonate not compiled in")`
 | S1 site version | `GET {base}/it` | `div#app[data-page]` → JSON → `.version` (the Inertia asset version) | per `base`, TTL 30 min, single-flight |
 | S2 Inertia page | `GET {base}{path}` with `x-inertia: true`, `x-inertia-version: <S1>`, `Accept: application/json` | JSON `props` | title/season pages 60 s |
 | S3 embed page | `GET props.embedUrl` | the first `<iframe src=…>` (vixcloud) | never |
-| S4 stream params | `GET <iframe src>` | scan `<script>` bodies containing `masterPlaylist`: `'token': '<t>'`, `'expires': '<digits>'`, `window.streams = [...]` (JSON — pick `active == true`, else the first, take `url`, unescape `\/`), fallback `url: '<u>'` inside `masterPlaylist`; `window.canPlayFHD = true` ⇒ append `h=1`; **preserve existing query params** (`ub`, `ab`, `b`); append `token` and `expires`; reassemble | never (tokens expire in minutes) |
+| S4 stream params | `GET <iframe src>` | scan `<script>` bodies containing `masterPlaylist`: `'token': '<t>'`, `'expires': '<digits>'`, `window.streams = [...]` (JSON — pick the first entry whose `active` is *truthy* under Python's rules, so `1` and `"1"` count as well as `true`, else the first entry; take `url`, unescape `\/`; when that entry has no usable `url`, fall back to `streams[0]`'s), fallback `url: '<u>'` inside `masterPlaylist`; `window.canPlayFHD = true` ⇒ append `h=1`; **preserve existing query params** (`ub`, `ab`, `b`); append `token` and `expires`; reassemble | never (tokens expire in minutes) |
 
 On a `403`/`404`/`409` from S2 the cached version is invalidated and S1 re-run **once** — the
 Inertia version rotates on every site deploy, and legacy simply failed. HTML parsing uses

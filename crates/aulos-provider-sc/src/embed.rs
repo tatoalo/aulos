@@ -118,7 +118,8 @@ pub async fn stream_for_embed(
 ///
 /// 1. the **first** `<script>` whose text contains `masterPlaylist` wins;
 /// 2. `'token'` and `'expires'` come out of that script;
-/// 3. `window.streams` is parsed as JSON and the `active` entry wins, else the first entry;
+/// 3. `window.streams` is parsed as JSON and the first entry with a *truthy* `active` wins, else
+///    the first entry; when the winner has no usable `url`, `streams[0]`'s is used;
 /// 4. failing that, the bare `url:` inside `masterPlaylist` is the fallback;
 /// 5. the stream URL's own query parameters are preserved, `h=1` is added **only** when
 ///    `window.canPlayFHD` is `true`, and `token`/`expires` are appended.
@@ -184,6 +185,11 @@ pub fn extract_stream(html: &str, iframe: &Url) -> Result<StreamParams, ScError>
 ///
 /// A `window.streams` blob that is not valid JSON is a warning and a fall-through to the `url:`
 /// fallback, exactly as legacy did (`streamingcommunity.py:90-91`).
+///
+/// Legacy's two branches (`streamingcommunity.py:83-89`) are reproduced literally, including the
+/// second one: when the entry chosen by `active` carries no usable `url`, `stream_url` is still
+/// falsey and the `if not stream_url and streams:` branch takes `streams[0]`'s url — it does
+/// **not** drop straight to the `url:` regex.
 fn stream_url_from_window_streams(pats: &Patterns, text: &str) -> Option<String> {
     let raw = pats.streams.captures(text)?.get(1)?.as_str();
     let streams: Vec<serde_json::Value> = match serde_json::from_str(raw) {
@@ -193,13 +199,40 @@ fn stream_url_from_window_streams(pats: &Patterns, text: &str) -> Option<String>
             return None;
         }
     };
-    let pick = streams
+    let first = streams.first()?;
+    let active = streams
         .iter()
-        .find(|s| s.get("active").and_then(serde_json::Value::as_bool) == Some(true))
-        .or_else(|| streams.first())?;
-    let url = pick.get("url").and_then(serde_json::Value::as_str)?;
-    let url = url.replace("\\/", "/");
+        .find(|s| is_truthy(s.get("active")))
+        .unwrap_or(first);
+    stream_url_of(active).or_else(|| stream_url_of(first))
+}
+
+/// One entry's `url`, unescaped — `s.get("url", "").replace("\\/", "/")` plus Python's falsey
+/// empty string.
+fn stream_url_of(stream: &serde_json::Value) -> Option<String> {
+    let url = stream
+        .get("url")
+        .and_then(serde_json::Value::as_str)?
+        .replace("\\/", "/");
     if url.is_empty() { None } else { Some(url) }
+}
+
+/// Python's `if s.get("active"):` — *truthiness*, not `is True`.
+///
+/// The site has been seen to serialise the flag as `1` and as `"1"` as well as `true`, and legacy
+/// selected the server in all three cases; requiring a JSON `true` here silently fell through to
+/// `streams[0]`, which is usually the inactive server and answers 403. Note that Python's
+/// `bool("0")` is `True` — a non-empty string is truthy whatever it says — so a string `"0"` is
+/// truthy here too, deliberately.
+fn is_truthy(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(serde_json::Value::String(s)) => !s.is_empty(),
+        Some(serde_json::Value::Array(a)) => !a.is_empty(),
+        Some(serde_json::Value::Object(o)) => !o.is_empty(),
+    }
 }
 
 /// Python `dict` semantics for a query string: insertion-ordered, assignment replaces in place.
@@ -323,6 +356,66 @@ mod tests {
             "https://vixcloud.co/playlist/98765?b=1&token=tok3n-value&expires=1759000000"
         );
         assert_eq!(got.referer, iframe_url());
+    }
+
+    #[test]
+    fn a_non_boolean_active_flag_still_selects_the_server_python_would_have() {
+        // The site serialises `active` as `1`/`0` as often as `true`/`false`; legacy's
+        // `if s.get("active"):` selected server 2 either way. Requiring a JSON `true` picked
+        // server 1 — the *inactive* one — and vixcloud answers 403 for it.
+        let html = include_str!("../tests/fixtures/sc/vixcloud_streams_active_numeric.html");
+        let got = extract_stream(html, &iframe_url()).expect("a stream");
+        assert_eq!(
+            got.m3u8.as_str(),
+            "https://vixcloud.co/playlist/98765?b=1&token=tok3n-value&expires=1759000000"
+        );
+    }
+
+    #[test]
+    fn python_truthiness_decides_which_entry_is_active() {
+        let pats = PATTERNS.as_ref().expect("patterns");
+        let pick = |active: &str| {
+            let text = format!(
+                "window.streams = [{{\"active\":false,\"url\":\"https://v/first\"}},\
+                 {{\"active\":{active},\"url\":\"https://v/second\"}}];"
+            );
+            stream_url_from_window_streams(pats, &text)
+        };
+        for truthy in ["true", "1", "-1", "2.5", "\"1\"", "\"0\"", "\"yes\"", "[0]"] {
+            assert_eq!(
+                pick(truthy).as_deref(),
+                Some("https://v/second"),
+                "`{truthy}` is truthy in Python"
+            );
+        }
+        for falsey in ["false", "0", "0.0", "null", "\"\"", "[]", "{}"] {
+            assert_eq!(
+                pick(falsey).as_deref(),
+                Some("https://v/first"),
+                "`{falsey}` is falsey in Python, so streams[0] wins"
+            );
+        }
+    }
+
+    #[test]
+    fn an_active_entry_with_no_url_falls_back_to_the_first_server_not_to_the_regex() {
+        // Legacy's `if not stream_url and streams:` branch. The `url:` field of this fixture is
+        // /playlist/00000, so picking it up would be visible.
+        let html = include_str!("../tests/fixtures/sc/vixcloud_streams_active_empty_url.html");
+        let got = extract_stream(html, &iframe_url()).expect("a stream");
+        assert_eq!(
+            got.m3u8.as_str(),
+            "https://vixcloud.co/playlist/98765?ub=1&ab=1&token=tok3n-value&expires=1759000000"
+        );
+    }
+
+    #[test]
+    fn an_empty_streams_array_falls_through_to_the_url_field() {
+        let pats = PATTERNS.as_ref().expect("patterns");
+        assert_eq!(
+            stream_url_from_window_streams(pats, "window.streams = [];"),
+            None
+        );
     }
 
     #[test]

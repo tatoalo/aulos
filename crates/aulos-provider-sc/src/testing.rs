@@ -32,6 +32,10 @@ pub struct MockHttp {
     routes: Mutex<HashMap<String, Scripted>>,
     calls: Mutex<Vec<(String, Recorded)>>,
     cookies: String,
+    /// What [`ScHttp::new_session`] hands out, if anything. `None` (the default) means "no
+    /// separable session", so a caller that forks keeps using this mock and every existing test
+    /// script still applies.
+    session: Mutex<Option<std::sync::Arc<MockHttp>>>,
 }
 
 impl MockHttp {
@@ -45,6 +49,16 @@ impl MockHttp {
     #[must_use]
     pub fn with_cookies(mut self, cookies: &str) -> Self {
         self.cookies = cookies.to_owned();
+        self
+    }
+
+    /// Declares the client this mock hands out from [`ScHttp::new_session`].
+    ///
+    /// Lets a test prove that a caller which claims to run on a fresh cookie jar really does fork
+    /// one: script the routes on the *session* and leave the parent empty.
+    #[must_use]
+    pub fn with_session(self, session: std::sync::Arc<MockHttp>) -> Self {
+        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
         self
     }
 
@@ -163,6 +177,15 @@ impl ScHttp for MockHttp {
 
     fn cookie_header(&self) -> String {
         self.cookies.clone()
+    }
+
+    fn new_session(&self) -> Option<std::sync::Arc<dyn ScHttp>> {
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        Some(session as std::sync::Arc<dyn ScHttp>)
     }
 }
 

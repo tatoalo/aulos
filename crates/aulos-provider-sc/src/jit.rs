@@ -4,8 +4,10 @@
 //! discarded and re-resolved here, immediately before the bytes start moving. Ported from
 //! `streamingcommunity.py:399-477`, with the two changes DESIGN §10.5 calls for:
 //!
-//! - a **fresh site-version cache** per call, matching legacy's fresh extractor instance and its
-//!   fresh cookie jar — a token minted against one deploy's assets must not be reused across one;
+//! - a **fresh site-version cache and a fresh cookie jar** per call, matching legacy's fresh
+//!   extractor instance and its fresh `curl_cffi.Session` — a token minted against one deploy's
+//!   assets must not be reused across one, and the `Cookie:` header handed to the external
+//!   downloader must hold only this extraction's cookies (see [`crate::http`]);
 //! - **no debug `GET` of the m3u8.** Legacy fetched the playlist on every single download purely
 //!   to log its status code and the first 300 bytes, which cost a round trip, burned one use of a
 //!   rate-limited token and logged stream contents at INFO.
@@ -50,8 +52,13 @@ pub async fn fresh_stream(
     base: &Url,
     watch_url: &Url,
 ) -> Result<StreamTarget, ScError> {
-    // Legacy built a brand-new extractor here, so the site version was always refetched. Keeping
-    // that means a deploy between queueing and downloading cannot poison the request.
+    // Legacy built a brand-new extractor here, so the site version was always refetched and the
+    // session jar started empty. Keeping the first means a deploy between queueing and downloading
+    // cannot poison the request; keeping the second means `target.cookies` holds only what *this*
+    // extraction was handed, so two concurrent downloads cannot swap vixcloud session cookies and
+    // 403 each other (`streamingcommunity.py:407,442`).
+    let session = http.new_session();
+    let http = session.as_deref().unwrap_or(http);
     let versions = SiteVersions::new();
 
     // Legacy computed the path as `watch_url.replace(base_url, "")`; path-plus-query is the same
@@ -174,6 +181,44 @@ mod tests {
             .await
             .expect("a target");
         assert_eq!(http.count("https://sc.test/it"), 2);
+    }
+
+    #[tokio::test]
+    async fn the_extraction_runs_on_a_forked_session_so_the_cookies_are_this_downloads_own() {
+        // The long-lived client is shared by the whole resolve pool and its jar is keyed on the
+        // bare cookie name, so a concurrent extraction can overwrite the vixcloud session cookie
+        // between S4 and the spawn of N_m3u8DL-RE. Legacy built a new `curl_cffi.Session` per
+        // download; `fresh_stream` must fork one too and read *its* jar.
+        let session = std::sync::Arc::new(mock().with_cookies("vix_session=mine"));
+        let shared = MockHttp::new()
+            .with_cookies("vix_session=someone-elses; stale=from-a-previous-download")
+            .with_session(std::sync::Arc::clone(&session));
+
+        let watch = Url::parse("https://sc.test/it/watch/9?e=456").expect("url");
+        let t = fresh_stream(&shared, &base(), &watch)
+            .await
+            .expect("a target");
+
+        assert_eq!(t.cookies, "vix_session=mine");
+        assert_eq!(
+            shared.total(),
+            0,
+            "every hop must go through the forked session: {:?}",
+            shared.urls()
+        );
+        assert_eq!(session.total(), 4, "{:?}", session.urls());
+    }
+
+    #[tokio::test]
+    async fn a_client_with_no_separable_session_still_works() {
+        // The default `new_session()` is `None`; the caller then reuses the client it has.
+        let http = mock();
+        let watch = Url::parse("https://sc.test/it/watch/9?e=456").expect("url");
+        let t = fresh_stream(&http, &base(), &watch)
+            .await
+            .expect("a target");
+        assert_eq!(t.cookies, "sid=abc; cf_clearance=zzz");
+        assert_eq!(http.total(), 4, "{:?}", http.urls());
     }
 
     #[tokio::test]

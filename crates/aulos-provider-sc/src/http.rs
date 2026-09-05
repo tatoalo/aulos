@@ -15,11 +15,20 @@
 //!
 //! # Cookies
 //!
-//! [`ScHttp::cookie_header`] is an **addition** to the DESIGN §10.1 trait, which lists only `get`
-//! and `impersonating`. It exists because [`crate::jit::fresh_stream`] must hand
-//! `N_m3u8DL-RE`/ffmpeg the session's cookies as one `Cookie:` header — legacy read them straight
-//! off `curl_cffi`'s session jar (`streamingcommunity.py:442`). It has a default implementation
-//! returning an empty string, so the design signature is still all an implementor has to provide.
+//! [`ScHttp::cookie_header`] and [`ScHttp::new_session`] are **additions** to the DESIGN §10.1
+//! trait, which lists only `get` and `impersonating`. They exist because
+//! [`crate::jit::fresh_stream`] must hand `N_m3u8DL-RE`/ffmpeg the session's cookies as one
+//! `Cookie:` header — legacy read them straight off `curl_cffi`'s session jar
+//! (`streamingcommunity.py:442`) — and because that jar has to belong to *one* download.
+//!
+//! Legacy constructed a brand-new `curl_cffi.Session` for every `get_fresh_m3u8()` call
+//! (`streamingcommunity.py:407`), so the cookies it read back were exactly the ones the site had
+//! just set for that one extraction. The long-lived client here is shared by the whole resolve
+//! pool, and its jar is keyed on the bare cookie name: two concurrent vixcloud extractions
+//! overwrite each other's session cookie and each download then sends the other one's, which
+//! vixcloud answers with a 403. [`ScHttp::new_session`] restores legacy's shape by handing
+//! `fresh_stream` a client with an empty jar. Both have default implementations (an empty string
+//! and `None`), so the design signature is still all an implementor has to provide.
 
 use std::sync::Mutex;
 
@@ -153,6 +162,18 @@ pub trait ScHttp: Send + Sync {
     /// implementation, because the download engines need the jar as a header.
     fn cookie_header(&self) -> String {
         String::new()
+    }
+
+    /// A sibling client with an **empty cookie jar**, for the lifetime of one download.
+    ///
+    /// [`crate::jit::fresh_stream`] calls this so the `Cookie:` header it hands to `N_m3u8DL-RE`
+    /// and ffmpeg holds only the cookies that one just-in-time extraction was given — legacy's
+    /// per-download `curl_cffi.Session` (`streamingcommunity.py:407`). See the module docs.
+    ///
+    /// `None` means "this implementation has no separable session"; the caller then reuses the
+    /// client it already has, which is the honest thing for the in-process test mock.
+    fn new_session(&self) -> Option<std::sync::Arc<dyn ScHttp>> {
+        None
     }
 }
 
@@ -292,6 +313,19 @@ impl ScHttp for PlainClient {
 
     fn cookie_header(&self) -> String {
         self.cookies.header()
+    }
+
+    fn new_session(&self) -> Option<std::sync::Arc<dyn ScHttp>> {
+        match Self::new() {
+            Ok(c) => Some(std::sync::Arc::new(c)),
+            Err(e) => {
+                // The client built once at boot, so this can only be an OS-level failure. Falling
+                // back to the shared client keeps the download working with legacy's *old* bug
+                // rather than failing it outright.
+                tracing::warn!(error = %e, "could not build a per-download HTTP session");
+                None
+            }
+        }
     }
 }
 
@@ -443,6 +477,19 @@ mod impersonate {
         fn cookie_header(&self) -> String {
             self.cookies.header()
         }
+
+        fn new_session(&self) -> Option<std::sync::Arc<dyn ScHttp>> {
+            // `self.emulated` rather than `Self::new()`: the emulated build already succeeded (or
+            // already fell back) once at boot, so this neither re-warns nor silently upgrades a
+            // downgraded client.
+            match Self::build(self.emulated) {
+                Ok(c) => Some(std::sync::Arc::new(c)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not build a per-download HTTP session");
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -567,6 +614,28 @@ mod tests {
         let c = PlainClient::new().expect("plain client");
         assert!(!c.impersonating());
         assert_eq!(c.cookie_header(), "");
+    }
+
+    #[test]
+    fn a_forked_session_does_not_inherit_the_shared_jar() {
+        // `jit::fresh_stream` reads the forked session's jar and hands it to N_m3u8DL-RE. If the
+        // fork shared the recorder, one download would send another's vixcloud session cookie.
+        let shared = PlainClient::new().expect("plain client");
+        shared.cookies.record("vix_session", "someone-elses");
+        assert_eq!(shared.cookie_header(), "vix_session=someone-elses");
+
+        let session = shared.new_session().expect("a per-download session");
+        assert_eq!(
+            session.cookie_header(),
+            "",
+            "the fork must start with an empty jar"
+        );
+
+        // And writing into the fork does not leak back into the shared client.
+        let session2 = shared.new_session().expect("a second session");
+        assert_eq!(session2.cookie_header(), "");
+        assert_eq!(shared.cookie_header(), "vix_session=someone-elses");
+        assert!(!session.impersonating());
     }
 
     #[test]
