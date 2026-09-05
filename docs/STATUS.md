@@ -104,10 +104,65 @@ for merely-queued items.
 Workspace gates re-run by the orchestrator on `e69fef0` after all fixes: fmt clean, clippy
 `-D warnings` clean, `cargo test --workspace` all green.
 
-**Not yet done for round 1**: docker image rebuild + `AULOS_E2E=1 tests/e2e/run.sh` on the fixed
-tree; the image-name alignment in docs (published image is `ghcr.io/tatoalo/aulos`). **Round 2**
-(regression review, blind end-to-end trace, shipped-iOS simulation against the v1 shim) has not run.
-Both were interrupted by the org's API spend limit; resume from here.
+### What each fix agent landed
+
+Every finding handed out was fixed; **nothing was declined**. Each agent staged only its own crate's
+paths and ran its crate's gates before committing.
+
+| Crate | Commit | n | Findings |
+|---|---|---|---|
+| `aulos-queue` | `8634623` | 14 | engine-01…06, engine-08, engine-09, protocol-01, perf-3, perf-4, perf-5, perf-7, perf-8 |
+| `aulos-api` | `e69fef0` | 12 | protocol-02…08, security-{ssrf-api-guard-missing, state-dir-served-over-download-route, csrf-optional-json-body, cookie-tmp-permissions-race, file-serve-no-nosniff} |
+| `aulos-provider` | `95b14c3` | 2 | providers-1, perf-6 |
+| `aulos-provider-sc` | `1116450` | 2 | providers-2, providers-5 |
+| `aulos-provider-ytdlp` | `91ecdc1` | 2 | providers-3, providers-4 |
+| `aulos-core` | `d9c7e7f` | 2 | security-ytdl-options-secrets-not-redacted, ops-6 |
+| `aulos-store` | `12ea8d5` | 2 | perf-1, engine-07 |
+| `docker/` | `bd4525b` | 2 | ops-1, ops-3 |
+| `aulos-server` | `eac917c` | 1 | ops-2 |
+| `aulos-hooks` | `449bab5` | 1 | ops-4 |
+| `aulos-telegram` | `029984f` | 1 | ops-5 |
+| `aulos-subscriptions` | `63f3d36` | 1 | ops-7 |
+
+**42 fixed, 1 refuted (`perf-2`), 0 declined** — 43 findings accounted for. Doc edits were made only
+where the doc was the thing that was wrong; among them PROTOCOL §1.6, §4.1, §4.3, §4.7 and DESIGN
+§3, §7.1, §7.6, §10.1, §10.2, §12.5, §13.4, §16.1, §16.4, §16.6, §18.2, §18.3, §19, §21.4. Where the
+code disagreed with a doc that was already right — PROTOCOL §3.3, DESIGN §6.5.1, §8.9, §9.2, §14.3,
+§16.4, §16.5 — the code was changed and the doc left alone.
+
+### Integration pass (2026-09-05)
+
+- **One red gate, found and fixed here.** `cargo test --workspace` failed on
+  `aulos-workspace-tests::packaging::only_the_workflows_the_brief_keeps_are_present`: `16bb579`
+  added `.github/workflows/pat-check.yml`, and that test pins the workflow set to the four BRIEF's
+  scope trims keep. This was **already red on `main`** (`16bb579` is an ancestor of `e69fef0`) and
+  had been failing every CI run since; the orchestrator's re-run of the gates missed it.
+  Resolution: `pat-check.yml` is kept — it is `workflow_dispatch`-only, builds nothing and gates
+  nothing, and exists to tell an operator whether the `AULOS_REPO_PAT` that `update-yt-dlp.yml`
+  consumes is still valid, so it is not part of the automatic CI surface the trim table pins. The
+  test now separates `SHIPPED_CI` from `MANUAL_DIAGNOSTICS` and gained teeth rather than losing
+  them: every workflow the trims name as CUT is asserted absent by name (plus an `upstream-sync*`
+  prefix rule), and a listed diagnostic must declare `workflow_dispatch:` and must **not** declare
+  `push:`/`pull_request:`/`schedule:` — so it cannot quietly become a CI job.
+- **Image name decided and aligned.** The published image is **`ghcr.io/tatoalo/aulos`**
+  (`docker.yml` pushes `ghcr.io/${GITHUB_REPOSITORY}`); `aulos-server` is the binary inside it, not
+  the image. The seven `ghcr.io/tatoalo/aulos-server` references in DESIGN §18.3/§19 — the cutover
+  runbook's own `docker pull`, all four rehearsal `docker run`s and both compose snippets — are
+  corrected, as are the seven in the superseded `docs/design-candidates/migration.md`. §18.3 now
+  states the rule and why the earlier draft was wrong. New gate
+  `packaging::the_operator_docs_name_the_image_the_workflow_actually_publishes` fails if DESIGN.md,
+  `docker/compose.example.yml` or README.md ever names the wrong image again, and pins the
+  assumption it rests on (that `docker.yml` still derives the name from the repository).
+  The two surviving mentions of the old name, in this file above and in INTEGRATION-NOTES.md, are
+  deliberately left: they are the *record of the defect*, and rewriting them would make them false.
+- **Working tree was clean** — no leftovers to commit, no junk to remove; all twelve fix commits
+  were already pushed.
+- **Gates on the integrated tree**: `cargo fmt --all --check` clean; `cargo clippy --workspace
+  --all-targets -- -D warnings` clean; `cargo test --workspace` **1779 passed, 0 failed** across 80
+  test binaries; `cargo test -p aulos-workspace-tests` green (15 in `packaging`).
+
+**Round 2** (regression review, blind end-to-end trace, shipped-iOS simulation against the v1 shim)
+has not run — it was interrupted by the org's API spend limit. Resume from there.
 
 ## How the work is being done
 
@@ -143,11 +198,11 @@ self-contained enough to hand any WP to a fresh engineer/agent.
   one is a stable-Rust limitation, not a task: an engine-task panic cannot be discriminated in a
   panic hook without `tokio_unstable`, so such a panic is logged and the API then answers
   `state_unavailable` rather than aborting the process the way a store-thread panic does.
-- **Documentation debt**: DESIGN.md §18.3/§19 still name the published image
-  `ghcr.io/tatoalo/aulos-server`, but `docker.yml` publishes `ghcr.io/tatoalo/aulos`
-  (`ghcr.io/${GITHUB_REPOSITORY}`). `docker/compose.example.yml` and README.md use the real name;
-  DESIGN was deliberately left alone, because which name is *correct* is the repository owner's
-  call — either rename the design text or add a `images:` override to `docker.yml`.
+- ~~**Documentation debt**: DESIGN.md §18.3/§19 name the published image
+  `ghcr.io/tatoalo/aulos-server`, but `docker.yml` publishes `ghcr.io/tatoalo/aulos`.~~
+  **RESOLVED** in the round-1 integration pass: the name is `ghcr.io/tatoalo/aulos`, DESIGN and
+  `docs/design-candidates/migration.md` were rewritten to match, and a packaging test now enforces
+  it. See "Integration pass" above.
 - Five wave-0 deviations from DESIGN are recorded only in INTEGRATION-NOTES (types hoisted into
   `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl` in `aulos-provider`,
   `FormatSpec.flags.slow` placement, `ChatConfig` key count). DESIGN.md should be updated to match.

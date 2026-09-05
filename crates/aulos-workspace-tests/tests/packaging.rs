@@ -135,20 +135,98 @@ fn docker_workflow_builds_amd64_only() {
 fn only_the_workflows_the_brief_keeps_are_present() {
     // BRIEF scope trims: dev-build, update-sidecars, upstream-sync-* and the deny/coverage/
     // schema/gitleaks jobs are CUT for v1.0.
+    //
+    // The trim table pins the *automatic* CI surface — the workflows that run on push, on a pull
+    // request, on a tag or on a schedule. `pat-check.yml` is not one of those: it is
+    // `workflow_dispatch`-only, runs no build and gates nothing, and exists solely to tell an
+    // operator whether the AULOS_REPO_PAT secret that `update-yt-dlp.yml` consumes is still valid.
+    // It is listed separately so that adding a manual diagnostic is a deliberate edit here, and so
+    // that a CUT workflow cannot be smuggled back in under the same heading.
+    const SHIPPED_CI: [&str; 4] = ["ci.yml", "docker.yml", "release.yml", "update-yt-dlp.yml"];
+    const MANUAL_DIAGNOSTICS: [&str; 1] = ["pat-check.yml"];
+    // Every workflow the trim table names as CUT. None of these may reappear under any heading.
+    const CUT: [&str; 6] = [
+        "dev-build.yml",
+        "update-sidecars.yml",
+        "upstream-sync.yml",
+        "upstream-sync-check.yml",
+        "deny.yml",
+        "coverage.yml",
+    ];
+
     let dir = repo_root().join(".github/workflows");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{} must exist: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
     names.sort();
+
+    let mut expected: Vec<String> = SHIPPED_CI
+        .iter()
+        .chain(MANUAL_DIAGNOSTICS.iter())
+        .map(|s| (*s).to_owned())
+        .collect();
+    expected.sort();
     assert_eq!(
-        names,
-        vec![
-            "ci.yml".to_owned(),
-            "docker.yml".to_owned(),
-            "release.yml".to_owned(),
-            "update-yt-dlp.yml".to_owned(),
-        ]
+        names, expected,
+        "the workflow set is pinned by BRIEF's scope trims; add a workflow here only deliberately"
+    );
+
+    for cut in CUT {
+        assert!(
+            !names.iter().any(|n| n == cut),
+            "{cut} is CUT for v1.0 by BRIEF's scope trims and must not come back"
+        );
+    }
+    for name in &names {
+        assert!(
+            !name.starts_with("upstream-sync"),
+            "upstream-sync-*.yml is CUT for v1.0 by BRIEF's scope trims ({name})"
+        );
+    }
+
+    // A manual diagnostic must stay manual: if one ever grows a push/PR/schedule trigger it has
+    // become part of the CI surface the trim table pins, and belongs in SHIPPED_CI or nowhere.
+    for name in MANUAL_DIAGNOSTICS {
+        let wf = read(&format!(".github/workflows/{name}"));
+        for trigger in ["push:", "pull_request:", "schedule:"] {
+            assert!(
+                !wf.contains(trigger),
+                "{name} is allowed only as a workflow_dispatch diagnostic, but it declares `{trigger}`"
+            );
+        }
+        assert!(
+            wf.contains("workflow_dispatch:"),
+            "{name} must be dispatch-only"
+        );
+    }
+}
+
+#[test]
+fn the_operator_docs_name_the_image_the_workflow_actually_publishes() {
+    // `docker.yml` pushes `ghcr.io/${GITHUB_REPOSITORY}`, i.e. `ghcr.io/tatoalo/aulos`.
+    // `aulos-server` is the binary inside the image and the name of the bin crate — never the name
+    // of the image. An operator-facing doc that says `ghcr.io/tatoalo/aulos-server` fails to pull
+    // on the very first step of the cutover runbook (DESIGN §19.1), so it is a gate, not a typo.
+    const WRONG: &str = "ghcr.io/tatoalo/aulos-server";
+    const RIGHT: &str = "ghcr.io/tatoalo/aulos:";
+
+    for rel in ["docs/DESIGN.md", "docker/compose.example.yml", "README.md"] {
+        assert!(
+            !read(rel).contains(WRONG),
+            "{rel} names `{WRONG}`, which is not published; the image is `ghcr.io/tatoalo/aulos`"
+        );
+    }
+    for rel in ["docker/compose.example.yml", "README.md"] {
+        assert!(
+            read(rel).contains(RIGHT),
+            "{rel} must name the published image `{RIGHT}<tag>`"
+        );
+    }
+    assert!(
+        read(".github/workflows/docker.yml").contains("ghcr.io/${GITHUB_REPOSITORY}"),
+        "docker.yml must keep deriving the image from the repository name; \
+         if it stops, the name pinned by this test has to be revisited"
     );
 }
 

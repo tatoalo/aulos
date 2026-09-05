@@ -2787,7 +2787,7 @@ which is the useful part and is O(1) instead of O(library size).
 ```yaml
 services:
   aulos:
-    image: ghcr.io/tatoalo/aulos-server:latest
+    image: ghcr.io/tatoalo/aulos:latest
     container_name: aulos
     restart: unless-stopped
     ports: ["8081:8081"]
@@ -2857,30 +2857,30 @@ proxy, volume `/srv/media:/downloads`, state in `/srv/media/.metube`.
 | 2 | `docker compose exec metube ls -la /downloads/.metube` — confirm `queue.json`, `pending.json`, `completed.json`, `subscriptions.json`, `telegram_bot_config.json` exist and are `schema_version: 2`. If any legacy extensionless shelf is present, let the Python image run once so it migrates. |
 | 3 | Back up state: `tar czf /root/metube-state-$(date +%F).tgz -C /srv/media .metube` (a few MB). |
 | 4 | Snapshot the compose file and the running image digest: `docker compose config > /root/compose.pre-aulos.yml; docker inspect --format '{{index .RepoDigests 0}}' metube-pot > /root/image.pre-aulos`. |
-| 5 | Pull the new image: `docker pull ghcr.io/tatoalo/aulos-server:<tag>`. |
+| 5 | Pull the new image: `docker pull ghcr.io/tatoalo/aulos:<tag>`. |
 
 ### 20.2 Rehearsal (T-1 day, zero downtime, read-only)
 
 ```bash
 # 1. Dry-run the importer against the LIVE state dir. Reads only; writes nothing.
-docker run --rm -v /srv/media:/downloads ghcr.io/tatoalo/aulos-server:<tag> \
+docker run --rm -v /srv/media:/downloads ghcr.io/tatoalo/aulos:<tag> \
   aulos-server import --state-dir /downloads/.metube --db /tmp/probe.db --dry-run
 #    -> prints the import report (§5.5.6). Expect 0 errors. Investigate every warning.
 
 # 2. Validate the config the compose file will actually produce.
 docker run --rm --env-file /srv/aulos/.env -v /srv/media:/downloads \
-  ghcr.io/tatoalo/aulos-server:<tag> aulos-server check-config
+  ghcr.io/tatoalo/aulos:<tag> aulos-server check-config
 #    -> effective config table, exit 0.
 
 # 3. Tool probe inside the image.
-docker run --rm ghcr.io/tatoalo/aulos-server:<tag> aulos-server doctor
+docker run --rm ghcr.io/tatoalo/aulos:<tag> aulos-server doctor
 
 # 4. Shadow run on a spare port, with a COPY of the state dir. No writes to the real one.
 cp -a /srv/media/.metube /srv/media/.aulos-shadow
 docker run -d --name aulos-shadow -p 8082:8081 --env-file /srv/aulos/.env \
   -e STATE_DIR=/downloads/.aulos-shadow -e AULOS_DB_PATH=/downloads/.aulos-shadow/aulos.db \
   -e TELEGRAM_BOT_ENABLED=false -e JELLYFIN_SYNC_ENABLED=false \
-  -v /srv/media:/downloads ghcr.io/tatoalo/aulos-server:<tag>
+  -v /srv/media:/downloads ghcr.io/tatoalo/aulos:<tag>
 curl -s localhost:8082/healthz | jq          # all components ok, pot ok
 curl -s localhost:8082/history | jq 'keys'   # ["done","pending","queue"]
 curl -s localhost:8082/api/v2/import-report | jq
@@ -2902,7 +2902,7 @@ curl -s localhost:8081/history | jq '[.queue[]|select(.status=="downloading")]|l
 docker compose stop metube
 # 3. Edit compose: swap the image, add the two new lines. Keep the service NAME and the
 #    volume mounts identical so the proxy and Authelia config need no change.
-#      image: ghcr.io/tatoalo/aulos-server:<tag>
+#      image: ghcr.io/tatoalo/aulos:<tag>
 #      environment:  AULOS_DB_PATH: /downloads/.metube/aulos.db
 #                    AULOS_V1_ENABLED: "true"
 # 4. Start.

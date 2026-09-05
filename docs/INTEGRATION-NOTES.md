@@ -2237,9 +2237,11 @@ alternative:
    the repository was named `aulos`. `docker.yml` publishes `ghcr.io/${GITHUB_REPOSITORY}`, i.e.
    `ghcr.io/tatoalo/aulos`. A user copying the example would have got a pull failure on the first
    command of the quickstart. The compose file now carries the real name and a comment saying why
-   it differs from the design text. **DESIGN.md §18.3/§19 still say `aulos-server`** and are left
-   alone here: the fix belongs with whoever decides the published package name, and changing the
-   design's prose from an integration pass would hide the decision rather than record it.
+   it differs from the design text. At the time of this note DESIGN.md §18.3/§19 still said
+   `aulos-server`, and were left alone because the fix belonged with whoever decides the published
+   package name. **Superseded**: the round-1 integration pass made that decision — the image is
+   `ghcr.io/tatoalo/aulos` — and rewrote DESIGN §18.3/§19 to match. See "Review round 1 —
+   integration pass" at the end of this file.
 
 ### README.md
 
@@ -2276,3 +2278,33 @@ Recorded because three of them changed the wire contract or reached outside the 
   body** purely to run the `Content-Type` gate. They took no body argument at all before, so
   DESIGN §16.6's "every mutating v2 route requires `Content-Type: application/json`" was not true
   of them. Their success shapes are unchanged.
+
+## Review round 1 — integration pass (integrator, 2026-09-05)
+
+Two things reached outside a single crate and are recorded here.
+
+- **`.github/workflows/pat-check.yml` is a deliberate fifth workflow.** BRIEF's scope trims say CI
+  is SIMPLIFIED *to* `ci.yml`, `docker.yml`, `update-yt-dlp.yml` and `release.yml`, and
+  `packaging::only_the_workflows_the_brief_keeps_are_present` enforced that as an exact set — so
+  `16bb579`, which added `pat-check.yml`, turned `cargo test --workspace` red on `main` and every
+  CI run with it. The file is kept rather than deleted: it is `workflow_dispatch`-only, compiles
+  and pushes nothing, gates nothing, and its whole job is to tell an operator whether the
+  `AULOS_REPO_PAT` secret that `update-yt-dlp.yml` consumes still reads the repo and can open PRs.
+  The trim table pins the *automatic* CI surface — what runs on a push, a PR, a tag or a schedule —
+  and a manual diagnostic is not on it. **The gate was strengthened, not relaxed**: it now keeps a
+  `SHIPPED_CI` list and a separate, explicit `MANUAL_DIAGNOSTICS` list; every workflow the trims
+  name as CUT is asserted absent by name plus an `upstream-sync*` prefix rule; and anything on the
+  diagnostics list must declare `workflow_dispatch:` and must not declare `push:`,
+  `pull_request:` or `schedule:`, so a diagnostic cannot quietly grow into a CI job. Adding a
+  sixth workflow is therefore still a deliberate edit to that test.
+- **The published image is `ghcr.io/tatoalo/aulos`, decided once.** `docker.yml` pushes
+  `ghcr.io/${GITHUB_REPOSITORY}`; `aulos-server` is the binary inside the image and the name of the
+  bin crate, never the image. DESIGN §18.3/§19 (the compose snippet, the cutover runbook's
+  `docker pull`, and all four rehearsal `docker run`s) named `ghcr.io/tatoalo/aulos-server` and
+  would have failed to pull on the first step of a real cutover; they and the seven mentions in the
+  superseded `docs/design-candidates/migration.md` are corrected, and §18.3 now states the rule.
+  New gate `packaging::the_operator_docs_name_the_image_the_workflow_actually_publishes` covers
+  DESIGN.md, `docker/compose.example.yml` and README.md, and also asserts that `docker.yml` still
+  derives the name from the repository — the assumption the pinned name rests on. The bullet above
+  in this file (§"Final integration") and the two mentions in STATUS.md keep the old name on
+  purpose: they are the record of the defect, and rewriting them would make them false.
