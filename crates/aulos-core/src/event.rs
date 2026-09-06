@@ -445,6 +445,22 @@ impl EventFilter {
         Self::of(&[EventKind::Finishing, EventKind::Completed])
     }
 
+    /// The APNs notifier's filter: `StatusChanged | Completed | Removed` (DESIGN §25.2).
+    ///
+    /// `StatusChanged` is the progress-driven flood, and this is the one subscriber that wants it:
+    /// a Live Activity is a progress ring, so every frame is a potential update push (the notifier
+    /// throttles them per `(item, device)`, not here). `Added` is not in the set — nothing is
+    /// pushed for a row nobody has started — and neither is `Notice`, which has no phone-shaped
+    /// rendering.
+    #[must_use]
+    pub const fn apns() -> Self {
+        Self::of(&[
+            EventKind::StatusChanged,
+            EventKind::Completed,
+            EventKind::Removed,
+        ])
+    }
+
     /// The Telegram actor's filter: `Added | StatusChanged | Completed | Removed | Notice`.
     #[must_use]
     pub const fn telegram() -> Self {
@@ -517,6 +533,23 @@ impl SubscriberSpec {
             capacity: 512,
             policy: DropPolicy::DropNewest,
             filter: EventFilter::telegram(),
+        }
+    }
+
+    /// The `apns` subscriber: 256, `DropNewest`, `StatusChanged | Completed | Removed`.
+    ///
+    /// `DropNewest` and not `Block` for the same reason the other two notifiers are: `on_event`
+    /// spawns network work and awaits a `DeviceStore` read, so a stalled push must never apply
+    /// backpressure to the aggregator. A dropped event costs at most one Live Activity frame —
+    /// the trailing edge redelivers the last state, and a dropped `Completed` is the one real
+    /// loss, which is what `events.dropped.apns` is for (§16.7).
+    #[must_use]
+    pub const fn apns() -> Self {
+        Self {
+            name: "apns",
+            capacity: 256,
+            policy: DropPolicy::DropNewest,
+            filter: EventFilter::apns(),
         }
     }
 }
@@ -986,6 +1019,30 @@ mod tests {
         let tg = SubscriberSpec::telegram();
         assert_eq!((tg.name, tg.capacity), ("telegram", 512));
         assert_eq!(tg.policy, DropPolicy::DropNewest);
+        let apns = SubscriberSpec::apns();
+        assert_eq!((apns.name, apns.capacity), ("apns", 256));
+        assert_eq!(apns.policy, DropPolicy::DropNewest);
+    }
+
+    #[test]
+    fn the_apns_filter_is_the_three_discriminants_the_notifier_matches_on() {
+        let f = EventFilter::apns();
+        for kind in [
+            EventKind::StatusChanged,
+            EventKind::Completed,
+            EventKind::Removed,
+        ] {
+            assert!(f.allows(kind), "{kind} must reach the notifier");
+        }
+        for kind in EventKind::ALL {
+            if matches!(
+                kind,
+                EventKind::StatusChanged | EventKind::Completed | EventKind::Removed
+            ) {
+                continue;
+            }
+            assert!(!f.allows(kind), "{kind} must not reach the notifier");
+        }
     }
 
     #[test]
