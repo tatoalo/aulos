@@ -219,10 +219,18 @@ async fn the_example_plugin_resolves_and_downloads_end_to_end() {
     // guarantees: the item leaves `preparing`. Each leg of the `status_map`, `mux →
     // postprocessing` included, is asserted per-line against this very spec in
     // `command::progress::tests::status_map_translates_mux_to_postprocessing`.
-    assert!(
-        stages.iter().any(|s| *s != Stage::Preparing),
-        "the item must leave `preparing`: {stages:?}"
-    );
+    // One more wrinkle, seen on a fast CI runner: when the *whole* run lands in a single read,
+    // the newest status in that chunk is `stage=done`, which maps to the terminal `finished` — and
+    // a terminal status is never a `Stage` frame (the item is finished by the outcome, asserted
+    // above), so the only stage this sink can observe is `Preparing`. That is the parser doing
+    // exactly what `last_match_wins` says, not a missed transition, so the "leaves `preparing`"
+    // assertion applies only once more than one chunk carried a status.
+    if stages.len() > 1 {
+        assert!(
+            stages.iter().any(|s| *s != Stage::Preparing),
+            "the item must leave `preparing`: {stages:?}"
+        );
+    }
     assert!(
         stages.iter().all(|s| matches!(
             s,
