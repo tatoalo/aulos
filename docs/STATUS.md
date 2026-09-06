@@ -212,6 +212,13 @@ Jellyfin is deliberately **not** in `tests/e2e/run.sh` (no container, and it wou
 image behind a network-free profile). The manual check is: finish one download against a real
 Jellyfin, then read `components.jellyfin.mode` and `last_status` from `/healthz`.
 
+Orchestrator follow-up (`6906c12`): in the opt-in `JELLYFIN_PATH_MAP` mode a batch entry without a
+resolvable path now sends the whole batch to the global scan instead of a partial notification.
+Gates after the round: fmt/clippy clean, `cargo test --workspace` 1866 passed / 0 failed (83
+binaries), `AULOS_E2E=1 tests/e2e/run.sh` → PASS. Open follow-ups from the verifier: a boot-time
+check of `JELLYFIN_PATH_MAP`'s Jellyfin-side prefixes against `GET /Library/PhysicalPaths` (a wrong
+prefix is a silent 204 today), and an optional bounded post-scan verification in `global_scan` mode.
+
 ## Production bug round 3 + the web UI (2026-09-05, after the VPS cutover)
 
 The owner cut the VPS over to `ghcr.io/tatoalo/aulos:latest` on 2026-09-05 (legacy import clean:
