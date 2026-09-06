@@ -31,7 +31,7 @@ const UBIQUITOUS_FIVE: [&str; 5] = ["serde", "serde_json", "thiserror", "tracing
 
 /// One row of the DESIGN §3 table: the crate, and what it may depend on beyond the ubiquitous
 /// five. `None` means "everything" — the row `aulos-server` has.
-const TABLE: [(&str, Option<&[&str]>); 12] = [
+const TABLE: [(&str, Option<&[&str]>); 13] = [
     (
         "aulos-core",
         Some(&["ulid", "url", "time", "arc-swap", "regex", "tokio"]),
@@ -186,6 +186,16 @@ const TABLE: [(&str, Option<&[&str]>); 12] = [
             "tokio",
             "tokio-util",
             "url",
+        ]),
+    ),
+    (
+        "aulos-apns",
+        Some(&[
+            "aulos-core",
+            "reqwest",
+            "jsonwebtoken",
+            "tokio",
+            "tokio-util",
         ]),
     ),
     // "everything" — the binary wires the whole graph together.

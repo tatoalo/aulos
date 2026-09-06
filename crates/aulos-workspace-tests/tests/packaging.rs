@@ -258,6 +258,10 @@ fn every_crate_in_the_design_layout_exists_and_is_a_member() {
         "aulos-telegram",
         "aulos-subscriptions",
         "aulos-hooks",
+        // The thirteenth member, added deliberately by DESIGN §25 (the APNs notifier). This list
+        // is the gate that makes "one more crate" a decision rather than an accident, so it grows
+        // only alongside a §3 row and an `arch.rs` row.
+        "aulos-apns",
         "aulos-server",
         "aulos-workspace-tests",
     ];
@@ -269,7 +273,7 @@ fn every_crate_in_the_design_layout_exists_and_is_a_member() {
             manifest.display()
         );
     }
-    // Twelve members, no more: an accidental thirteenth crate is an architecture change.
+    // Thirteen members, no more: an accidental fourteenth crate is an architecture change.
     let count = std::fs::read_dir(repo_root().join("crates"))
         .map(|d| {
             d.filter_map(Result::ok)

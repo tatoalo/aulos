@@ -113,6 +113,10 @@ rustls = { version = "0.23", default-features = false }
 rustls-pemfile = "2"
 
 # --- integrations ---
+# APNs provider authentication tokens: ES256 over the .p8 signing key (DESIGN §25.3).
+# `rust_crypto` rather than the default `aws_lc_rs`/`ring` backend so the pinned 1.95
+# toolchain needs no C toolchain for a second crypto stack; `use_pem` reads the .p8.
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 teloxide = { version = "0.17", default-features = false }
 governor = { version = "0.8", default-features = false, features = ["std", "quanta"] }
 
@@ -150,6 +154,7 @@ aulos-api = { path = "crates/aulos-api" }
 aulos-telegram = { path = "crates/aulos-telegram" }
 aulos-subscriptions = { path = "crates/aulos-subscriptions" }
 aulos-hooks = { path = "crates/aulos-hooks" }
+aulos-apns = { path = "crates/aulos-apns" }
 
 [profile.release]
 codegen-units = 1

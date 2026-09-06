@@ -1,0 +1,39 @@
+[package]
+name = "aulos-apns"
+description = "The APNs notifier: alert pushes and Live Activity pushes for the iOS client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+aulos-core = { workspace = true }
+# `http2` is enabled *here* rather than on the workspace row: Apple's gateway speaks HTTP/2 only,
+# and no other crate needs it. `rustls-tls` and `json` come from the workspace row. Against a
+# plain `http://127.0.0.1` test server reqwest still negotiates HTTP/1.1, which is what lets the
+# client suite run without TLS.
+reqwest = { workspace = true, features = ["http2"] }
+jsonwebtoken = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+# NOT axum: rule A3 (crates/aulos-workspace-tests/tests/arch.rs) is judged on dev-dependencies
+# too, so the mock gateway is a `wiremock` server like the one `aulos-hooks` uses for Jellyfin.
+wiremock = { workspace = true }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+# The test harness builds an `Item`, whose `url` field is a `url::Url`.
+url = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
