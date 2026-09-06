@@ -364,7 +364,7 @@
     "prefer_manual",
     "prefer_auto"
   ],
-  "description": "get_opts(download_type, codec, format, quality, ytdl_opts, subtitle_language, subtitle_mode) -> the merged yt-dlp option dict, for every legal request tuple (empty caller opts) plus one entry per branch that needs non-default inputs.",
+  "description": "get_opts(download_type, codec, format, quality, ytdl_opts, subtitle_language, subtitle_mode) -> the merged yt-dlp option dict, for every legal request tuple (empty caller opts) plus one entry per branch that needs non-default inputs. The video|*|mp4|<quality != best_remux> rows carry the Aulos delta DESIGN §9.8 Δ C47: merge_output_format=\"mp4\", which legacy emitted only for best_remux.",
   "key_format": "download_type|codec|format|quality, with |subtitle_mode|subtitle_language appended for download_type=captions",
   "provenance": {
     "captured_at": "2026-09-04T11:19:19+00:00",
@@ -1542,27 +1542,35 @@
       "postprocessors": []
     },
     "video|auto|mp4|1080": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|1440": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|2160": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|240": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|360": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|480": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|720": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|best": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|auto|mp4|best_remux": {
@@ -1579,6 +1587,7 @@
       ]
     },
     "video|auto|mp4|worst": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|any|1080": {
@@ -1636,27 +1645,35 @@
       "postprocessors": []
     },
     "video|av1|mp4|1080": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|1440": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|2160": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|240": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|360": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|480": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|720": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|best": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|av1|mp4|best_remux": {
@@ -1673,6 +1690,7 @@
       ]
     },
     "video|av1|mp4|worst": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|any|1080": {
@@ -1730,27 +1748,35 @@
       "postprocessors": []
     },
     "video|h264|mp4|1080": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|1440": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|2160": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|240": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|360": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|480": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|720": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|best": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h264|mp4|best_remux": {
@@ -1767,6 +1793,7 @@
       ]
     },
     "video|h264|mp4|worst": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|any|1080": {
@@ -1824,27 +1851,35 @@
       "postprocessors": []
     },
     "video|h265|mp4|1080": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|1440": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|2160": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|240": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|360": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|480": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|720": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|best": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|h265|mp4|best_remux": {
@@ -1861,6 +1896,7 @@
       ]
     },
     "video|h265|mp4|worst": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|any|1080": {
@@ -1918,27 +1954,35 @@
       "postprocessors": []
     },
     "video|vp9|mp4|1080": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|1440": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|2160": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|240": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|360": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|480": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|720": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|best": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     },
     "video|vp9|mp4|best_remux": {
@@ -1955,6 +1999,7 @@
       ]
     },
     "video|vp9|mp4|worst": {
+      "merge_output_format": "mp4",
       "postprocessors": []
     }
   }

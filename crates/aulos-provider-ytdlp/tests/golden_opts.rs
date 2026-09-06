@@ -14,14 +14,24 @@
 //! workspace (no `preserve_order` feature) both sides are key-sorted by construction — the
 //! "canonical JSON" the PLAN asks for, with no normalisation step to get wrong.
 //!
-//! # The one expected difference
+//! # The two expected differences
+//!
+//! They are recorded in opposite directions, on purpose.
+//!
+//! Δ C47 (`merge_output_format: "mp4"` for every `{video, mp4}` selection, not just
+//! `best_remux`) is baked **into the corpus**: `tools/capture/dump_formats.py` applies it to the
+//! sweep it captures, so a re-capture reproduces the checked-in file and this test file needs no
+//! special case for it. That is the right home for a delta the port always applies — encoding it
+//! here instead would mean the corpus no longer says what Aulos actually emits.
+//!
+//! Δ C9 is the other way round, because it is a *removal*:
 //!
 //! Legacy appended `{"key": "Exec", "exec_cmd": "python3 /app/app/audio_sync_fix.py
 //! %(filepath)q"}` to `postprocessors` for `{video, mp4, best_remux}`. DESIGN §9.8 (Δ C9)
 //! replaces it with the in-process `audio_sync` hook of §13.3, so this port does not emit it. The
 //! delta is *proven*, not assumed: [`strip_legacy_exec`] asserts the trailing entry is exactly
 //! [`aulos_provider_ytdlp::opts::legacy_audio_sync_exec`] before removing it, and
-//! [`the_only_difference_from_legacy_is_the_exec_step`] asserts the corpus still contains that
+//! [`only_best_remux_still_carries_the_legacy_exec_step`] asserts the corpus still contains that
 //! entry — so if a future capture drops it, or changes it, this file fails instead of quietly
 //! agreeing.
 
@@ -223,7 +233,7 @@ fn every_golden_branch_reproduces_and_leaves_the_caller_dict_alone() {
 }
 
 #[test]
-fn the_only_difference_from_legacy_is_the_exec_step() {
+fn only_best_remux_still_carries_the_legacy_exec_step() {
     let g = load();
     // The corpus must still record the legacy `Exec` step for `best_remux`; if a re-capture ever
     // drops it, this file's `strip_legacy_exec` calls would silently become no-ops and the

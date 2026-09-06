@@ -249,7 +249,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("AULOS_JELLYFIN_DEBOUNCE_SECS", "30"),
     ("AULOS_JELLYFIN_MAX_WAIT_SECS", "300"),
     ("AULOS_NFO_ENABLED", "true"),
-    ("AULOS_NFO_DELETE_INFO_JSON", "false"),
     ("AULOS_NFO_PROVIDERS", ""),
     // --- AULOS_*: Telegram ---
     ("AULOS_TELEGRAM_BOARD", "board"),
@@ -300,7 +299,6 @@ pub const BOOLEAN_KEYS: &[&str] = &[
     "AULOS_SC_USE_OUTPUT_TEMPLATE",
     "AULOS_POT_ENABLED",
     "AULOS_NFO_ENABLED",
-    "AULOS_NFO_DELETE_INFO_JSON",
     "AULOS_TELEGRAM_WATCH_ALL",
     "AULOS_V1_ENABLED",
     "AULOS_WEB_UI",
@@ -868,8 +866,6 @@ pub struct Config {
     pub hooks_enabled: bool,
     /// `AULOS_NFO_ENABLED`.
     pub nfo_enabled: bool,
-    /// `AULOS_NFO_DELETE_INFO_JSON`.
-    pub nfo_delete_info_json: bool,
     /// `AULOS_NFO_PROVIDERS` — an optional comma-separated allow-list of provider ids the NFO
     /// hook writes for. **Empty means every provider**, which is the legacy parity default: the
     /// legacy `Exec` postprocessor wrote an NFO for every finished download, YouTube included.
@@ -1188,7 +1184,6 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         plugin_timeout_resolve: g.u64("AULOS_PLUGIN_TIMEOUT_RESOLVE"),
         hooks_enabled: g.bool("AULOS_HOOKS_ENABLED"),
         nfo_enabled: g.bool("AULOS_NFO_ENABLED"),
-        nfo_delete_info_json: g.bool("AULOS_NFO_DELETE_INFO_JSON"),
         nfo_providers: comma_list(g.str("AULOS_NFO_PROVIDERS")),
 
         pot_enabled: g.bool("AULOS_POT_ENABLED"),

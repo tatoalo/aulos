@@ -2539,9 +2539,42 @@ selector; the audio postprocessor chain with the `writethumbnail` guard and the 
 key; presets applied in request order; MeTube's own extraction keys applied **after** user options
 so a preset cannot break `extract_flat`/`noplaylist`.
 
-The one deliberate change: the late `Exec` postprocessor
-(`python3 /app/app/audio_sync_fix.py %(filepath)q`) is replaced by the in-process `audio_sync`
-hook (§13.3).
+**Δ C9:** the late `Exec` postprocessor (`python3 /app/app/audio_sync_fix.py %(filepath)q`) is
+replaced by the in-process `audio_sync` hook (§13.3).
+
+**Δ C47 — every `{video, mp4}` selection names its container.** `opts.rs` emits
+`merge_output_format: "mp4"` for **every** quality of `{download_type: video, format: mp4}`, not
+only for `best_remux`. No postprocessor comes with it: a `merge_output_format` is a **remux** —
+ffmpeg stream-copies the two picked streams into the box — so this is not a re-encode, and
+`best_remux` remains the one selection that also runs the lossy `FFmpegVideoConvertor`.
+
+On the stock path this changes nothing, and that is the point. `get_format` pins **both** merge
+inputs to ISO-BMFF for every `{video, *, mp4, quality != best_remux}` — the selector is
+`bestvideo<codec><height>[ext=mp4]+bestaudio[ext=m4a]/…/best<height>[ext=mp4]` — so yt-dlp's
+`get_compatible_ext` already answered `mp4` for the merge, and the trailing `best…[ext=mp4]`
+alternative is a *single* format, which never enters the merge path at all. The legacy Telegram
+default `{video, auto, mp4, best}` landed on AV1 + AAC in an `.mp4` because of those `ext`
+filters, not because anything had asked the merger for a box.
+
+The delta earns its keep where the selector is **not** the thing choosing the streams. An
+operator `format` in `YTDL_OPTIONS`/`YTDL_OPTIONS_FILE` is merged **over** the computed selector
+for every job (§17.2 — the real `avc1`-only incident), and such a `format` carries no `ext`
+filter of its own: picking a WebM video stream would hand back an `.mkv` from a request the UI,
+the bot and the API all called "mp4". The same holds for a site whose `mp4`-ext streams use
+codecs outside yt-dlp's `COMPATIBLE_CODECS['mp4']`. Naming the container makes the box a property
+of the **request** instead of a property of whichever streams the merge inputs turned out to be:
+belt and braces, one line, no re-encode.
+
+The type-derived keys still sit **on top** of the layered caller dict (§17.2), so an operator
+`merge_output_format` in `YTDL_OPTIONS` does not survive for `{video, mp4}` — the same rule that
+already protected `writethumbnail` and `skip_download`. §17.2 logs one WARN at options load
+naming that key so the override is visible rather than mysterious.
+
+The golden corpus carries the delta in its data: the 45 `video|*|mp4|<quality != best_remux>`
+sweep rows of `tests/golden/opts.json` hold `merge_output_format`, applied by
+`tools/capture/dump_formats.py` after the legacy dump so a re-capture reproduces the checked-in
+file instead of silently reverting it. (Δ C9 goes the other way — the corpus keeps the legacy
+`Exec` entry and the Rust test strips it — because that delta is a removal.)
 
 ---
 
@@ -3607,10 +3640,14 @@ every download, YouTube included.
   (`%Y-%m-%d %H:%M:%S`, UTC now), `studio`, `director` (from `uploader` or `channel`),
   `uniqueid type="streamingcommunity"|"youtube"`, `website` (`original_url` or `webpage_url`), up
   to 20 `tag`, `runtime` in whole minutes. Pretty-printed, blank lines removed.
-- The SC downloader still writes `<safe_title>.info.json` (parity — users' own `Exec`
-  postprocessors may consume it). After a successful NFO write it is deleted **only when**
-  `AULOS_NFO_DELETE_INFO_JSON=true`, default **`false`**. The legacy CLI always deleted it;
-  making that opt-in avoids breaking anyone's pipeline on the wrong side of a cutover.
+- The SC downloader still writes `<safe_title>.info.json` (parity — the download itself is
+  unchanged). After a **successful** NFO write the sidecar is deleted, unconditionally and with no
+  env knob, which is exactly what legacy `jellyfin_nfo_generator.py` did: a missing sidecar is a
+  no-op, a failed unlink is a warning and not a hook failure (the `.nfo`, which is the point, is
+  already on disk). The rule is per-arm: a run that writes **no** NFO deletes nothing, so the one
+  readable source of metadata is never destroyed without a document to replace it. Rationale: once
+  the `.nfo` exists Jellyfin has no use for the sidecar, and an `.info.json` per video is ~11 MB of
+  noise left in the library.
 - Once the NFO exists, the item's `entry_json` is dropped from the DB via
   `ctx.store.drop_entry_blob(item.id)` (§7.1) — the port, not the store. A StreamingCommunity row
   is always told to drop (a failed blob read is not proof there is nothing to drop, and the
@@ -4462,6 +4499,23 @@ Ours changes nothing until the file parses.
 re-applied after every reload, as legacy. On boot, if `<STATE_DIR>/cookies.txt` exists the override
 is set (legacy did this only inside its `__main__` block).
 
+**Δ (better): the operator layer says out loud when it outranks the format picker.** `format` in
+`YTDL_OPTIONS`/`YTDL_OPTIONS_FILE` is merged **over** the computed selector for every job (§9.2),
+so it silently replaces the format and quality the UI, the bot and the API chose — the one
+exception being `{video, mp4, best_remux}`, where `get_opts` pops the key back out. This is the
+documented layering and it stays, but it is invisible: an `avc1`-only `format` left in
+`/config/ytdl-options.json` turned every add into 1080p H.264 while every surface still offered
+"best", and nothing in the log said so. `merge_output_format` is the mirror image — a type-derived
+key that `get_opts` writes on top of the operator layer for `{video, mp4}` (§9.8 Δ C47), so there
+the operator's value is the one that loses.
+
+`ytdl_options::override_warnings(&base) -> Vec<String>` names either key found in the merged
+operator layer and explains which way the precedence runs; `load_options` logs the result at WARN
+**once per load** — at boot and on every reload, never per job. It is a pure function so the
+wording is unit-tested without a tracing subscriber. A `null` value still counts, because `layer`
+keeps nulls. Nothing else in the dict is inspected: this is a named two-key trap, not a linter for
+yt-dlp options.
+
 **`ConfigWatcher`** — legacy used `watchfiles.awatch(<file>)` with a `samefile` filter, which has a
 real failure mode: editors, `docker cp` and Ansible **replace** the file (`rename(tmp, target)`),
 invalidating an inode-level watch. We watch the **parent directory**, non-recursively:
@@ -4606,7 +4660,6 @@ variable is ignored rather than fatal (§17.1), which is the price of the except
 | `AULOS_JELLYFIN_DEBOUNCE_SECS` | `30` | int | trailing debounce | N |
 | `AULOS_JELLYFIN_MAX_WAIT_SECS` | `300` | int | debounce cap, so a long playlist still refreshes | N |
 | `AULOS_NFO_ENABLED` | `true` | bool | NFO hook, for every provider; writes nothing for an item with neither a stored entry nor a readable `<file>.info.json` (§13.2) | N |
-| `AULOS_NFO_DELETE_INFO_JSON` | `false` | bool | legacy's CLI always deleted it; opt-in here | N |
 | `AULOS_NFO_PROVIDERS` | `''` | comma list | provider ids the NFO hook writes for; **empty = all** | N |
 | `AULOS_TELEGRAM_BOARD` | `board` | `board\|per_job` | live board vs one message per job | N |
 | `AULOS_TELEGRAM_EDIT_INTERVAL_MS` | `3000` | int | per-chat edit budget | N |
@@ -5286,7 +5339,7 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 3 | `canceled` in v1 `/history`? | **Omitted entirely.** The shipped `DownloadStatus` has no `canceled` case and maps unknown → `.pending`, so a cancelled row would be stuck in "In Progress" forever. Legacy made cancels vanish; this is faithful (§11.4). |
 | 4 | v1 `id`: the ULID or the legacy extractor id? | **`media_id` when present, else the ULID**, with the `<prefix>.<id>` prefixing reproduced. The shipped client keys deletes on `url ?? id`, and the resolution ladder (§11.3) accepts all three tokens, so both work (§11.4). |
 | 5 | `SubId` representation for imported subscriptions? | **A validated string newtype**, not a `Ulid`, and not an enum with two variants. Imported UUIDs are kept verbatim; new ids are ULIDs. One representation, no `legacy_id` column, no join (§4.1). |
-| 6 | Delete the `.info.json` after NFO generation? | **No** — `AULOS_NFO_DELETE_INFO_JSON=false` by default. Legacy's CLI always deleted it, but users' own `Exec` postprocessors may consume it, and changing that on the wrong side of a cutover is the wrong risk (§13.2). |
+| 6 | Delete the `.info.json` after NFO generation? | **Yes, always** — reversed 2026-09-06 at the operator's request, and the opt-in env knob that used to gate it was deleted outright rather than re-defaulted, so there is nothing left to switch off. This was first answered "no, opt-in" out of cutover caution about users' own `Exec` postprocessors; in practice the sidecar is pure residue once the `.nfo` exists (~11 MB per video in the library), and legacy `jellyfin_nfo_generator.py` removed it unconditionally. Parity wins: delete after a successful write only, missing sidecar is a no-op, a run that writes nothing deletes nothing (§13.2). |
 | 7 | SC output naming? | **Kept** as `<sanitised title>.mp4` + `.info.json`, ignoring `OUTPUT_TEMPLATE*`. Existing Jellyfin libraries depend on those paths. `AULOS_SC_USE_OUTPUT_TEMPLATE=true` opts in (§10.5). |
 | 8 | Keep the `[0, 99.9]` percent clamp? | **Keep it.** `percent` is the download number; the real `postprocessing` status plus `phase`/`phase_percent` now carry what the clamp used to hide (§4.7). |
 | 9 | `quality: "worst"` — fix the selector or keep the quirk? | **Keep the quirk**, byte-identical to legacy, and make it honest: the catalog carries `notice: "This selector currently resolves to the best available stream"` (§6.6). No hidden env flag. |
@@ -6132,9 +6185,10 @@ number is the row in Appendix B) · **✗** dropped, BRIEF out of scope.
 and the whole `get_opts` branch table (the audio postprocessor chain with the `writethumbnail`
 guard and the **string** `preferredquality`; thumbnail `skip_download` + `writethumbnail` +
 `FFmpegThumbnailsConvertor`; `best_remux`'s `opts.pop("format")` + `merge_output_format` +
-`FFmpegVideoConvertor`; the per-mode caption `subtitleslangs` ordering). **K**, with two deltas:
-the late `Exec` postprocessor becomes the in-process `audio_sync` hook (Δ C9), and the catalog now
-labels `worst` honestly (Δ C21).
+`FFmpegVideoConvertor`; the per-mode caption `subtitleslangs` ordering). **K**, with three
+deltas: the late `Exec` postprocessor becomes the in-process `audio_sync` hook (Δ C9), the catalog
+now labels `worst` honestly (Δ C21), and `merge_output_format="mp4"` is emitted for every
+`{video, mp4}` selection rather than only for `best_remux` (Δ C47).
 
 ### A.7 Subscriptions (spec §7)
 
@@ -6275,6 +6329,7 @@ yt-dlp bump automation hardened (§18.5).
 | C45 | v1 `POST <p>add` keeps reporting resolution failures in its body by waiting for resolution for up to `AULOS_V1_ADD_RESOLVE_WAIT_MS` (default 10 s) before answering; v2's add is unconditionally async (§11.2 step 6). On a failure the item is **kept** as an `error` row, where legacy created nothing. | The shipped share extension's *only* failure path is parsing that body, so without the wait a mistyped or geo-blocked link would report "queued" and the "Couldn't add to Aulos" notification would never fire. The wait is also strictly shorter than legacy's, which blocked for the whole extraction with no ceiling. Keeping the failed row means the user can see *why* it failed in the queue instead of only in a notification they may have missed. |
 | C46 | `streamingcommunity` matches on **host and path** (`/watch/`, `/titles/`, `/season-`) and returns `Match::No` otherwise; a healthy provider answering `Unsupported` is retried **once** through the runner-up (§6.4, §8.4, §10.2). | Legacy detected SC by hostname but dispatched by path and handed everything else to yt-dlp. A search page, a browse page or a mirror's homepage on an SC host therefore keeps working exactly as it did, instead of dying with `unsupported_url`. |
 | C44 | An upcoming livestream (and any entry-level pre-download `msg`) is `queued` with `auto_start = false` and a populated `error`, not a terminal `error` (§8.4). | Legacy's behaviour restored: the row sits in "In Progress"/`pending[]` with its scheduled-start text, is one tap from starting, and is re-queued by its subscription when the stream goes live — instead of appearing in **Failed** and never starting. |
+| C47 | `merge_output_format="mp4"` is emitted for **every** `{video, mp4}` selection, not only for `best_remux` (§9.8). | The stock selector already pinned both merge inputs to ISO-BMFF, so this is belt and braces for the case that actually bites: an operator `format` in `YTDL_OPTIONS` replaces the selector (§17.2) and carries no `ext` filter, so a request every surface called "mp4" could come back as an `.mkv`. It is a remux — a stream copy — so nothing is re-encoded. |
 
 **Kept on purpose (K1).** SC output naming and its `.info.json`; the `[0, 99.9]` percent clamp and
 its monotonic-per-source rule; `preferredquality` as a string; the exact N_m3u8DL-RE argv; the

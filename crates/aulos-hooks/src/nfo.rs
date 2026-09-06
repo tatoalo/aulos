@@ -1,14 +1,17 @@
 //! NFO generation, now actually wired (DESIGN §13.2).
 //!
 //! A port of legacy `jellyfin_nfo_generator.py`, which the legacy image ran as an `Exec`
-//! postprocessor on **every** finished download. Two things move:
+//! postprocessor on **every** finished download. Three things move:
 //!
 //! - The input is preferably the item's `entry_json`, read through
 //!   [`aulos_core::ports::HookStore`], and only otherwise the on-disk `.info.json`. So for a
 //!   StreamingCommunity item there is nothing to read back and no race with a user's own `Exec`
-//!   postprocessor, and the sidecar survives by default (`AULOS_NFO_DELETE_INFO_JSON`, default
-//!   `false`). The legacy CLI always deleted it; making that opt-in avoids breaking anyone's
-//!   pipeline on the wrong side of a cutover.
+//!   postprocessor.
+//! - The `.info.json` the NFO was rendered from is deleted once the `.nfo` is written, and only
+//!   then — legacy `jellyfin_nfo_generator.py` removed it unconditionally after a successful
+//!   write, and a sidecar left behind in the library is ~11 MB of noise per video that Jellyfin
+//!   has no use for once the `.nfo` exists. A run that writes nothing deletes nothing, so the one
+//!   readable source of metadata is never destroyed without a document to replace it.
 //! - After a successful write the blob is dropped through the port, because DESIGN §7.5 keeps SC
 //!   entries alive past the terminal transition **only** until this hook has run.
 //!
@@ -750,15 +753,18 @@ impl Hook for NfoHook {
                     .map_err(|e| HookError::io(format!("write {}", path.display()), e))?;
                 tracing::info!(path = %path.display(), "created NFO");
 
-                if ctx.cfg.nfo_delete_info_json {
-                    match tokio::fs::remove_file(&sidecar_path).await {
-                        Ok(()) => {
-                            tracing::info!(path = %sidecar_path.display(), "deleted info.json");
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            tracing::warn!(path = %sidecar_path.display(), error = %e, "could not delete info.json");
-                        }
+                // Legacy parity (DESIGN §13.2): the sidecar goes as soon as the `.nfo` exists,
+                // and only from this arm — the arm that writes nothing must leave the only
+                // readable metadata where it is. A missing sidecar is a no-op (the metadata came
+                // from the stored blob), and a failed unlink is not worth failing the hook over:
+                // the NFO, which is the point, is already on disk.
+                match tokio::fs::remove_file(&sidecar_path).await {
+                    Ok(()) => {
+                        tracing::info!(path = %sidecar_path.display(), "deleted info.json");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::warn!(path = %sidecar_path.display(), error = %e, "could not delete info.json");
                     }
                 }
             }

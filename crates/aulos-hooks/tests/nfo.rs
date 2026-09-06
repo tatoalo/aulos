@@ -217,10 +217,11 @@ fn a_thin_entry_falls_back_to_the_row() {
     );
 }
 
-/// The whole hook: the file is written next to the media file, the sidecar survives by default,
-/// and the blob is dropped through the port afterwards.
+/// The whole hook: the file is written next to the media file, the `.info.json` it consumed is
+/// deleted (legacy `jellyfin_nfo_generator.py` parity, DESIGN §13.2), and the blob is dropped
+/// through the port afterwards.
 #[tokio::test]
-async fn the_hook_writes_the_file_keeps_the_sidecar_and_drops_the_blob() {
+async fn the_hook_writes_the_file_deletes_the_sidecar_and_drops_the_blob() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cfg = config_rooted(dir.path(), &[]);
     let item = ItemBuilder::finished("Il Grande Film")
@@ -254,8 +255,8 @@ async fn the_hook_writes_the_file_keeps_the_sidecar_and_drops_the_blob() {
     let written = std::fs::read_to_string(&nfo_file).expect("the nfo exists");
     assert!(written.starts_with("<?xml version=\"1.0\" ?>"), "{written}");
     assert!(
-        dir.path().join("Film/Il Grande Film.info.json").exists(),
-        "the sidecar survives by default"
+        !dir.path().join("Film/Il Grande Film.info.json").exists(),
+        "the sidecar the NFO replaces is deleted, with no knob to ask for it"
     );
     assert_eq!(
         store.writes(),
@@ -263,42 +264,6 @@ async fn the_hook_writes_the_file_keeps_the_sidecar_and_drops_the_blob() {
         "exactly the one write the hook is documented to make"
     );
     assert_eq!(store.calls().first(), Some(&Call::EntryBlob(id)));
-}
-
-/// `AULOS_NFO_DELETE_INFO_JSON=true` restores the legacy CLI's behaviour.
-#[tokio::test]
-async fn the_sidecar_is_deleted_when_the_knob_is_on() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let cfg = config_rooted(dir.path(), &[("AULOS_NFO_DELETE_INFO_JSON", "true")]);
-    let item = ItemBuilder::finished("Clip")
-        .provider("streamingcommunity")
-        .filename("Clip.mp4");
-    let id = item.id();
-    let view = item.view();
-    std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
-    std::fs::write(dir.path().join("Clip.info.json"), b"{}").expect("sidecar");
-
-    let store = FakeStore::with_blob(id, fixture("sc_movie_state.json"));
-    let (factory, _rx) = sink();
-    let runner = HookRunner::new(
-        Arc::clone(&cfg),
-        Arc::new(FakeClock::default()),
-        Arc::clone(&store) as Arc<dyn HookStore>,
-        factory,
-    );
-    runner
-        .run(
-            &NfoHook::new(),
-            &view,
-            &[BatchEntry::from_view(&view, TerminalStatus::Finished)],
-        )
-        .await
-        .expect("the hook writes");
-    assert!(dir.path().join("Clip.nfo").exists());
-    assert!(
-        !dir.path().join("Clip.info.json").exists(),
-        "and it is gone"
-    );
 }
 
 /// `AULOS_NFO_ENABLED=false` makes it a no-op, and reports `disabled` rather than `ok`.
@@ -312,6 +277,7 @@ async fn the_hook_can_be_disabled() {
     let id = item.id();
     let view = item.view();
     std::fs::write(dir.path().join("Clip.mp4"), b"video").expect("media");
+    std::fs::write(dir.path().join("Clip.info.json"), b"{}").expect("sidecar");
 
     let hook = NfoHook::from_config(&cfg);
     assert!(!hook.applies(&view, TerminalStatus::Finished));
@@ -337,6 +303,10 @@ async fn the_hook_can_be_disabled() {
         .await
         .expect("a disabled hook is a no-op, not an error");
     assert!(!dir.path().join("Clip.nfo").exists());
+    assert!(
+        dir.path().join("Clip.info.json").exists(),
+        "a hook that never ran deletes no sidecar"
+    );
     assert!(store.writes().is_empty(), "and it wrote nothing");
 }
 
@@ -489,10 +459,10 @@ async fn a_ytdlp_item_renders_from_the_info_json_sidecar() {
         "{written}"
     );
     assert!(
-        dir.path()
+        !dir.path()
             .join("Le incredibili elezioni del 2000 [8Xrcn5B04u4].info.json")
             .exists(),
-        "the sidecar survives by default"
+        "the sidecar it rendered from is deleted once the NFO is on disk"
     );
     assert!(
         store.writes().is_empty(),
@@ -636,6 +606,12 @@ async fn a_broken_sidecar_is_not_a_hook_failure() {
     assert!(
         !dir.path().join("Clip.nfo").exists(),
         "unreadable metadata writes no file"
+    );
+    // The delete belongs to the arm that wrote something. A run that writes nothing must not
+    // destroy the only sidecar on disk — a later fix to the file is still worth something.
+    assert!(
+        dir.path().join("Clip.info.json").exists(),
+        "a hook that wrote no NFO deletes no sidecar"
     );
 }
 

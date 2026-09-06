@@ -466,6 +466,22 @@ def _call_opts(
     )
 
 
+def _apply_aulos_deltas(sweep: dict[str, object]) -> None:
+    """Apply DESIGN §9.8 Δ C47 to a freshly captured sweep, in place.
+
+    Aulos names the container for *every* ``{video, mp4}`` selection, where legacy
+    named it only for ``best_remux``; it is a remux (a stream copy), so no
+    postprocessor comes with it. Applied here rather than left to a hand edit so a
+    re-capture reproduces the checked-in corpus byte for byte instead of silently
+    reverting the delta.
+    """
+    for key, opts in sweep.items():
+        parts = key.split("|")
+        if parts[0] == "video" and parts[2] == "mp4" and parts[3] != "best_remux":
+            assert isinstance(opts, dict)
+            opts["merge_output_format"] = "mp4"
+
+
 def build_opts() -> dict[str, object]:
     # The tuple sweep, with an empty caller option dict. For `captions` the
     # result also depends on (mode, language), so those are part of the key.
@@ -480,6 +496,7 @@ def build_opts() -> dict[str, object]:
                     )
         else:
             sweep[tuple_key(t)] = _call_opts(t, {})
+    _apply_aulos_deltas(sweep)
 
     branches: list[dict[str, object]] = []
     for case in OPTS_BRANCH_CASES:
@@ -514,7 +531,9 @@ def build_opts() -> dict[str, object]:
             "get_opts(download_type, codec, format, quality, ytdl_opts, "
             "subtitle_language, subtitle_mode) -> the merged yt-dlp option dict, "
             "for every legal request tuple (empty caller opts) plus one entry per "
-            "branch that needs non-default inputs."
+            "branch that needs non-default inputs. The video|*|mp4|<quality != "
+            "best_remux> rows carry the Aulos delta DESIGN §9.8 Δ C47: "
+            'merge_output_format="mp4", which legacy emitted only for best_remux.'
         ),
         "key_format": (
             "download_type|codec|format|quality, with |subtitle_mode|subtitle_language "

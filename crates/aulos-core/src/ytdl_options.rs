@@ -144,13 +144,62 @@ pub fn load_options(
         var: "YTDL_OPTIONS",
     })?;
 
-    let Some(path) = file else { return Ok(base) };
+    let Some(path) = file else {
+        warn_about_picker_overrides(&base);
+        return Ok(base);
+    };
     let text = read_existing(path, "YTDL_OPTIONS_FILE")?;
     let from_file = parse_object(&text).ok_or(YtdlOptionsError::FileInvalid {
         var: "YTDL_OPTIONS_FILE",
     })?;
     merge_over(&mut base, &from_file);
+    warn_about_picker_overrides(&base);
     Ok(base)
+}
+
+/// The operator-layer keys that quietly outrank the per-download format picker, and what to say
+/// about each (DESIGN §17.2).
+///
+/// - `format` is merged **over** the base dict's computed selector for every job (DESIGN §9.2),
+///   so it replaces whatever `formats::get_format` produced. The one exception is
+///   `{video, mp4, best_remux}`, where `opts::get_opts` pops it back out.
+/// - `merge_output_format` is the mirror image: it is one of the type-derived keys `get_opts`
+///   writes **on top** of the operator layer, so for `{video, mp4}` the operator's value is the
+///   one that loses (DESIGN §9.8 Δ C47).
+///
+/// Array order is report order, so the log is stable across runs.
+const PICKER_OVERRIDES: [(&str, &str); 2] = [
+    (
+        "format",
+        "it replaces the per-download format selector for every job, so the format and quality \
+         chosen in the UI, the bot and the API are ignored — except video/mp4/best_remux, which \
+         pops the key. Remove it unless you mean to pin one selector globally",
+    ),
+    (
+        "merge_output_format",
+        "it names the output container for every job, except video/mp4 downloads, where Aulos \
+         sets \"mp4\" over it (DESIGN §9.8)",
+    ),
+];
+
+/// One human-readable warning per [`PICKER_OVERRIDES`] key present in the merged operator layer.
+///
+/// A pure function rather than a `warn!` at the call site because the wording is the part worth
+/// testing and this crate has no tracing capture: the caller logs, the test asserts the text.
+#[must_use]
+pub fn override_warnings(base: &Map<String, Value>) -> Vec<String> {
+    PICKER_OVERRIDES
+        .iter()
+        .filter(|(key, _)| base.contains_key(*key))
+        .map(|(key, why)| format!("YTDL_OPTIONS/YTDL_OPTIONS_FILE sets `{key}`: {why}."))
+        .collect()
+}
+
+/// Logs [`override_warnings`] once per load — at boot and on every reload, never per job.
+fn warn_about_picker_overrides(base: &Map<String, Value>) {
+    for message in override_warnings(base) {
+        tracing::warn!("{message}");
+    }
 }
 
 /// `YTDL_OPTIONS_PRESETS` + `YTDL_OPTIONS_PRESETS_FILE`. Every value must itself be an object.
@@ -300,6 +349,52 @@ mod tests {
         );
         assert_eq!(merged["only_env"], json!(true));
         assert_eq!(merged["extra"], json!(1));
+    }
+
+    #[test]
+    fn an_operator_format_key_is_reported_as_overriding_the_picker() {
+        // The production incident this exists for: an avc1-only `format` in
+        // `YTDL_OPTIONS_FILE` turned every add into 1080p H.264 while the UI still offered
+        // "best", with nothing in the log to say so (DESIGN §17.2).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("opts.json");
+        fs::write(&file, r#"{"format":"bv[vcodec^=avc1]+ba"}"#).unwrap();
+        let merged = load_options("{}", Some(&file)).unwrap();
+
+        let warnings = override_warnings(&merged);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].contains("`format`"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("video/mp4/best_remux"),
+            "the one selection that survives must be named: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn both_picker_override_keys_are_reported_and_nothing_else_is() {
+        let both = json!({ "merge_output_format": "mkv", "format": "worst", "quiet": true })
+            .as_object()
+            .unwrap()
+            .clone();
+        let warnings = override_warnings(&both);
+        assert_eq!(warnings.len(), 2, "got {warnings:?}");
+        assert!(
+            warnings[0].contains("`format`"),
+            "`format` is reported first"
+        );
+        assert!(warnings[1].contains("`merge_output_format`"));
+
+        // A value of `null` still counts: the key is present, and `layer` keeps nulls.
+        let nulled = json!({ "format": null }).as_object().unwrap().clone();
+        assert_eq!(override_warnings(&nulled).len(), 1);
+
+        // Everything else is silent — this must not become a general linter for yt-dlp options.
+        let innocent = json!({ "quiet": true, "postprocessors": [] })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(override_warnings(&innocent).is_empty());
     }
 
     #[test]

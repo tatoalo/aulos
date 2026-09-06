@@ -15,11 +15,19 @@
 //!
 //! The `[late]` list is where legacy appended
 //! `{"key": "Exec", "exec_cmd": "python3 /app/app/audio_sync_fix.py %(filepath)q"}` for
-//! `{video, mp4, best_remux}`. **It is omitted here** — the one deliberate behaviour change of
-//! DESIGN §9.8 (Δ C9): the re-encode is the in-process `audio_sync` completion hook of §13.3, so
-//! the shim never spawns a grandchild for it. The list is kept in the code as an explicit empty
-//! stage rather than deleted, because it is the seam the hook replaced and the golden corpus
-//! diff is expressed against it.
+//! `{video, mp4, best_remux}`. **It is omitted here** — DESIGN §9.8 Δ C9: the re-encode is the
+//! in-process `audio_sync` completion hook of §13.3, so the shim never spawns a grandchild for
+//! it. The list is kept in the code as an explicit empty stage rather than deleted, because it is
+//! the seam the hook replaced and the golden corpus diff is expressed against it.
+//!
+//! # Deliberate changes from legacy
+//!
+//! Two, both recorded in DESIGN §9.8:
+//!
+//! - Δ C9 — the `[late]` `Exec` step above.
+//! - Δ C47 — `merge_output_format: "mp4"` is emitted for **every** `{video, mp4}` selection,
+//!   where legacy emitted it only for `{video, mp4, best_remux}`. It is a remux (a stream copy),
+//!   so nothing is re-encoded and no postprocessor comes with it.
 //!
 //! # Preserved quirks
 //!
@@ -141,17 +149,26 @@ pub fn get_opts_raw(
     // The legacy `late_postprocessors` stage. Always empty: see the module docs (Δ C9).
     let late: Vec<Value> = Vec::new();
 
-    if download_type == "video" && format == "mp4" && quality == "best_remux" {
-        // Remove any caller `format` so it cannot override `formats::get_format`.
-        opts.remove("format");
+    // Every `{video, mp4}` selection names its container, not just `best_remux` (DESIGN §9.8,
+    // Δ C47). `formats::get_format` already pins both merge inputs to ISO-BMFF
+    // (`[ext=mp4]`/`[ext=m4a]`), so for the stock path this is belt and braces; it bites when the
+    // selector is not what picked the streams — an operator `format` in `YTDL_OPTIONS` is merged
+    // over it (§17.2) and carries no `ext` filter of its own, so a WebM pick would land an `.mkv`
+    // on a request every surface called "mp4". Setting it is a remux — a stream copy — so no
+    // postprocessor is added here; only `best_remux` keeps its lossy `FFmpegVideoConvertor`.
+    if download_type == "video" && format == "mp4" {
         opts.insert(
             "merge_output_format".to_owned(),
             Value::String("mp4".to_owned()),
         );
-        derived.push(json!({
-            "key": "FFmpegVideoConvertor",
-            "preferedformat": "mp4",
-        }));
+        if quality == "best_remux" {
+            // Remove any caller `format` so it cannot override `formats::get_format`.
+            opts.remove("format");
+            derived.push(json!({
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": "mp4",
+            }));
+        }
     }
 
     if download_type == "captions" {
@@ -275,6 +292,39 @@ mod tests {
         assert!(!out.contains_key("format"));
         assert_eq!(out["merge_output_format"], json!("mp4"));
         assert_eq!(pps(&out), ["FFmpegVideoConvertor"]);
+    }
+
+    #[test]
+    fn every_mp4_video_selection_remuxes_into_an_mp4_without_a_re_encode() {
+        for quality in [
+            "best", "2160", "1440", "1080", "720", "480", "360", "240", "worst",
+        ] {
+            let out = get_opts_raw(Some("video"), Some("mp4"), quality, empty(), "en", "x");
+            assert_eq!(
+                out["merge_output_format"],
+                json!("mp4"),
+                "quality {quality}"
+            );
+            assert!(
+                pps(&out).is_empty(),
+                "quality {quality}: a remux is a stream copy, not a convertor run"
+            );
+        }
+
+        // Only `best_remux` pops the caller's `format`; the rest leave the layered dict alone.
+        let mut user = empty();
+        user.insert("format".to_owned(), json!("bestvideo[height<=480]"));
+        let out = get_opts_raw(Some("video"), Some("mp4"), "best", user, "en", "x");
+        assert_eq!(out["format"], json!("bestvideo[height<=480]"));
+
+        // And no other branch gains the key: it is the mp4 *container* being named, nothing else.
+        for (dt, format) in [("video", "any"), ("video", "ios"), ("thumbnail", "mp4")] {
+            let out = get_opts_raw(Some(dt), Some(format), "best", empty(), "en", "x");
+            assert!(
+                !out.contains_key("merge_output_format"),
+                "{dt}/{format} must not name a container"
+            );
+        }
     }
 
     #[test]

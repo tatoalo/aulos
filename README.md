@@ -70,6 +70,17 @@ meaning and default. The **complete table** — roughly ninety variables, each m
 **[`docs/DESIGN.md` §17.3](docs/DESIGN.md)**. `yt-dlp` options themselves come from
 `YTDL_OPTIONS` / `YTDL_OPTIONS_FILE` (hot-reloaded on change), not from env vars.
 
+Two keys in that file outrank the per-download format picker, so Aulos logs one WARN naming them
+each time the options are loaded or reloaded:
+
+- **`format`** replaces the selector for *every* job. The format and quality chosen in the web UI,
+  the Telegram bot and the API are then ignored — a leftover `bv[vcodec^=avc1]+ba` makes every
+  download 1080p H.264 no matter what was asked for. The single exception is video / mp4 /
+  `best_remux`, which pops the key back out.
+- **`merge_output_format`** works the other way: it names the container for every job *except*
+  video/mp4 downloads, where Aulos sets `"mp4"` over it so a video asked for as mp4 is always
+  remuxed into one (never re-encoded).
+
 ### Jellyfin
 
 `JELLYFIN_SYNC_ENABLED=true` with a `JELLYFIN_URL` and a `JELLYFIN_API_KEY` asks Jellyfin to scan
@@ -296,7 +307,8 @@ Four things to know:
   pointing at `DOWNLOAD_DIR`.
 - **Remove the `jellyfin_nfo_generator.py` entry** rather than carrying it over.
   `AULOS_NFO_ENABLED=true` writes the same `.nfo` in-process for **every** provider — not just
-  yt-dlp — with no grandchild process per download, and honours `AULOS_NFO_DELETE_INFO_JSON`.
+  yt-dlp — with no grandchild process per download, and deletes the `.info.json` it rendered from
+  once the `.nfo` is on disk, exactly as the script did.
   Set `AULOS_NFO_PROVIDERS` (a comma-separated list of provider ids, empty by default, meaning
   all) to narrow it. Running **both** is worse than running either: the script deletes the
   `.info.json` as soon as it has read it, so the built-in hook — which runs after the download —

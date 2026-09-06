@@ -210,8 +210,8 @@ printf 'RE-ENCODED' > "$out""#,
         "{nfo}"
     );
     assert!(
-        dir.path().join("Clip.info.json").exists(),
-        "the sidecar survives by default"
+        !dir.path().join("Clip.info.json").exists(),
+        "the NFO hook deletes the sidecar it replaces (DESIGN §13.2)"
     );
     assert_eq!(
         store.writes(),
