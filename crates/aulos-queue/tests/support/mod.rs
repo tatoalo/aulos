@@ -302,9 +302,24 @@ impl Harness {
     }
 
     /// Waits until the row reaches `status`.
+    ///
+    /// For a terminal status it also waits for the row's `Completed` event to have been fanned out:
+    /// the persisted write and the event reach observers on different paths, and a test that reads
+    /// `events.completed()` right after seeing the row would otherwise race the router by a few
+    /// hundred microseconds (seen as a flake on CI).
     pub async fn until_status(&self, id: ItemId, status: Status) -> Item {
-        self.until(id, &format!("status {status}"), |i| i.status == status)
-            .await
+        let item = self
+            .until(id, &format!("status {status}"), |i| i.status == status)
+            .await;
+        if status.is_terminal() {
+            self.events
+                .until(
+                    "completed",
+                    |e| matches!(e, DomainEvent::Completed(v) if v.id == id),
+                )
+                .await;
+        }
+        item
     }
 
     /// Waits until the row leaves `resolving`.
