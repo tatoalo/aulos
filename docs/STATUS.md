@@ -305,6 +305,12 @@ new `Source` argument); image rebuilt; `AULOS_E2E=1 tests/e2e/run.sh` → `END-T
 (47 checks; the `healthz` nfo-count assertion polls, because `healthz` is rate-limited and serves a
 cached component set when asked again too soon).
 
+CI hygiene (2026-09-06, after the APNs round): two runner-only flakes fixed at the root — the
+queue-test harness's `until_status` now waits for the `Completed` event on a terminal status (tests
+read `events.completed()` right after the persisted row and raced the router by microseconds), and
+the example-plugin test accepts a single-chunk run (whose newest status is the terminal `done`, never
+a `Stage` frame). `ci` and `docker` green at `f7ebf82`.
+
 ## Where things stand
 
 - **Server**: in production on the VPS since 2026-09-05; round-3 fixes and the web UI are on `main`
