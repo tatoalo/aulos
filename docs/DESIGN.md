@@ -2249,7 +2249,7 @@ property.
 - **stderr**: raw text, drained into `tracing` at DEBUG (`WARN` for lines matching
   `^(ERROR|WARNING)`) with `target = "ytdlp.child"`; the last 8 KiB retained as `tail` for error
   reporting. **Draining is mandatory** — a full pipe deadlocks the child.
-- **line cap**: 8 MiB (`info` frames for large playlists are big). Over cap ⇒ kill and report
+- **line cap**: 8 MiB (`info` frames for large playlists are big). The shim keeps the frame under it by dropping the per-format and per-caption tables (`formats`, `automatic_captions`, …) before emitting — nothing reads them back, and with `writesubtitles` on yt-dlp's expanded `automatic_captions` alone runs to 11 MB for one video. Over cap ⇒ kill and report
   `contract`.
 - **exit codes**: `0` clean, `2` malformed job, `3` internal shim error, `64` protocol mismatch,
   `130` cancelled via SIGTERM/SIGINT.

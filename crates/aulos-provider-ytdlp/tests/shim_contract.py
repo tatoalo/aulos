@@ -237,6 +237,62 @@ def test_extract_streams_entries():
     check(envelope_is_well_formed(frames), "the envelope is well formed")
 
 
+def test_info_frame_drops_the_format_tables():
+    """The ``info`` frame carries the metadata, never the per-format or per-caption bulk.
+
+    With ``writesubtitles`` on, yt-dlp expands ``automatic_captions`` to every translation
+    target — 11 MB for one YouTube video — which is more than the 8 MiB line cap, and nothing
+    on the server reads those tables back (the download re-extracts them from the URL).
+    """
+    print("info frame")
+    captions = {
+        f"lang{i}": [{"ext": "vtt", "url": "https://stub.test/c"} for _ in range(150)]
+        for i in range(200)
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        scenario = scenario_file(
+            tmp,
+            {
+                "extract": {
+                    "_type": "video",
+                    "id": "stub1",
+                    "title": "Stub clip",
+                    "url": "https://stub.test/watch/1",
+                    "ext": "mp4",
+                    "duration": 1.0,
+                    "description": "kept",
+                    "upload_date": "20260906",
+                    "formats": [
+                        {"format_id": str(i), "url": "https://stub.test/f"} for i in range(200)
+                    ],
+                    "requested_formats": [{"format_id": "1"}],
+                    "automatic_captions": captions,
+                    "subtitles": {"en": [{"ext": "vtt", "url": "https://stub.test/s"}]},
+                }
+            },
+        )
+        code, frames, _, _ = run_job(
+            {
+                "v": 1,
+                "protocol": 1,
+                "mode": "extract",
+                "url": "https://stub.test/watch/1",
+                "options": {"writesubtitles": True},
+                "extract": {"flat": True, "noplaylist": True},
+            },
+            scenario=scenario,
+        )
+    check(code == 0, "exits 0")
+    info = next(f for f in frames if f["t"] == "info")["entry"]
+    for key in ("formats", "requested_formats", "automatic_captions", "subtitles"):
+        check(key not in info, f"the info frame drops {key}")
+    check(
+        info.get("description") == "kept" and info.get("upload_date") == "20260906",
+        "the metadata stays",
+    )
+    check(len(json.dumps(info)) < 4096, "the frame is small once the tables are gone")
+
+
 def test_error_classification():
     """The §9.6 ordered table, through the real classifier."""
     print("error classification")
@@ -671,6 +727,7 @@ def main():
         test_bad_jobs,
         test_protocol_mismatch,
         test_extract_streams_entries,
+        test_info_frame_drops_the_format_tables,
         test_error_classification,
         test_message_cleaning,
         test_progress_rate_limit,

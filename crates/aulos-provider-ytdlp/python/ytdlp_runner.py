@@ -762,11 +762,33 @@ def run_extract(channel, job, options, policy):
     channel.emit("result", ok=True, count=count, truncated=truncated)
 
 
+# Keys the ``info`` frame leaves out. Every one of them is per-format or per-caption data that
+# the server never reads back: the frame becomes the entry's ``state``, and the only things read
+# out of that are the playlist/channel fields for ``%(playlist_title)s`` (DESIGN §7.5) and the
+# hints; a download re-extracts from the URL, and the NFO hook reads the ``.info.json`` yt-dlp
+# writes next to the file. They are also the whole of the frame's weight: ``formats`` is ~450 KB
+# for one YouTube video, and with ``writesubtitles`` on, yt-dlp expands ``automatic_captions`` to
+# every translation target — 183 languages × ~150 formats, 11 MB for a fifteen-minute clip —
+# which blew straight through the 8 MiB line cap (DESIGN §9.4) and failed every YouTube add with
+# "wrote a line longer than 8388608 bytes".
+INFO_FRAME_DROP = (
+    "entries",
+    "formats",
+    "requested_formats",
+    "requested_downloads",
+    "automatic_captions",
+    "subtitles",
+    "requested_subtitles",
+    "heatmap",
+)
+
+
 def _root_info(info):
-    """The full ``sanitize_info``'d root dict, minus ``entries``.
+    """The ``sanitize_info``'d root dict, minus ``entries`` and the per-format bulk.
 
     The children already crossed as ``entry`` frames, and a 500-item playlist's full info dict
-    is megabytes of duplication.
+    is megabytes of duplication; see :data:`INFO_FRAME_DROP` for why the format and caption
+    tables go with them.
     """
     try:
         import yt_dlp
@@ -775,7 +797,7 @@ def _root_info(info):
     except Exception:  # noqa: BLE001
         clean = info
     if isinstance(clean, dict):
-        clean = {k: v for k, v in clean.items() if k != "entries"}
+        clean = {k: v for k, v in clean.items() if k not in INFO_FRAME_DROP}
     return jsonable(clean)
 
 
