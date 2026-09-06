@@ -4226,6 +4226,12 @@ guarantees no torn writes. The recovery unit tests seed every status directly.
 - Secrets — `TELEGRAM_BOT_TOKEN`, `JELLYFIN_API_KEY`, `AULOS_API_TOKEN`, and any `YTDL_OPTIONS`
   key matching `(?i)(cookie|password|passwd|token|key|secret|proxy)` — are replaced with
   `«redacted»` by a `Redact` newtype used in every `Debug`/`Display` impl and in `check-config`.
+- **The logged `path` is redacted, per segment.** A path segment of 32 or more hexadecimal
+  characters keeps its first eight and loses the rest. `api/v2/devices/{token}` (§25.8) puts an
+  APNs device token *in the URL*, and the access-log span writes every path — at INFO with
+  `ENABLE_ACCESSLOG`, at DEBUG otherwise, which is exactly the level an operator turns up to debug
+  push. The rule is on the segment shape rather than on that route, so a future route cannot be
+  added without it; a ULID is not hexadecimal, so no ordinary path is touched.
 
 ### 16.6 Auth and reverse-proxy posture
 
@@ -5684,7 +5690,27 @@ Three rules are easy to get wrong and are each pinned by a test:
   progress ring spinning on the lock screen.
 - **A paused item does not start twice.** `queued → downloading → queued → downloading` is an
   ordinary pause/resume, so the ids already started are remembered until the item completes or is
-  removed.
+  removed. The latch is taken **inside** the start push, after the device table has been read and
+  at least one device has offered a start token — not when the event arrives. Latching on arrival
+  would spend the item's one chance on a store hiccup or a full task set (`is_start_edge` fires
+  once per download, so nothing would ever retry), and would silently skip the item whose only
+  device registered its push-to-start token thirty seconds into the download.
+
+**Ending a Live Activity does not depend on a successful read.** If `live_activities_for` fails on
+the terminal path the notifier falls back to the registrations it has cached — at most one throttle
+window old — sends the `end` pushes from those, and still calls `remove_live_activities_for`. A
+failed read is not "this item had no registrations": nothing retries a `Completed`, so treating the
+two the same would leave the progress ring spinning until the item is deleted.
+
+**The trailing edge terminates because "up to date" is a fact about the delivered *view*.** Each
+`Track` carries a sequence number bumped whenever the pending view is replaced, and a registration
+records which sequence it last received. A registration already holding the current sequence is
+neither a push target nor a reason to re-arm the timer. Deciding it from the timestamp alone does
+not converge: with two registrations whose windows are offset by less than the interval — a phone
+and an iPad, or one device after iOS rotated its update token — every pass re-stamps whichever
+registration it just sent, pushing it back inside the other's window, so the timer re-delivers the
+*same* content-state at N pushes per interval for ever. Apple budgets Live Activity updates, and
+exceeding the budget is what gets the activity killed by iOS.
 
 `interested()` is `|_| true`. A device registration is per user, not per source, so unlike
 `TelegramNotifier` (§12.6) there is nothing to filter on.
@@ -5696,6 +5722,13 @@ claims `{iss: APNS_TEAM_ID, iat: <unix seconds>}` and **no `exp`** — Apple der
 `iat` and rejects a token that carries one. It is cached and reminted every **50 minutes**: Apple
 accepts 20–60 minutes and rate-limits providers that mint one per request, so 50 sits in the middle
 of the band with ten minutes of slack for a slow clock.
+
+The check-and-mint happens **under one guard**, and the `403` recovery is a compare-and-swap
+against the token that was actually rejected. Both are about the same hazard: eight push tasks fan
+out together (§25.5), so a check-then-act cache would have every one of them sign its own JWT at
+the 50-minute boundary — which is precisely what Apple answers with
+`429 TooManyProviderTokenUpdates`. Signing an ES256 JWT is microseconds and the lock is otherwise
+uncontended, so holding it across the mint costs nothing worth measuring.
 
 The key is parsed **once, at construction**, so a malformed `APNS_KEY_FILE` is reported at boot
 rather than on the first completed download. `jsonwebtoken` with the `rust_crypto` backend does the
@@ -5773,6 +5806,16 @@ URL and exists **only for the tests** (§25.9).
 An APNs answer is never an `Err`: three of the five rows are *instructions*, so they are
 `Outcome` values and `ApnsError` is reserved for a misconfigured server (§25.6).
 
+**A device token never reaches a log line or `healthz`.** The push URL is `/3/device/<token>`, and
+reqwest's `Display` for a transport error appends ` for url (…)`, so the ordinary DNS/TLS/timeout
+failure would otherwise publish a device token through `apns.last_error` — which is served outside
+the auth layer (§16). Three places close that: the transport error is stringified with
+`without_url()`, `Counters::set_last_error` shortens every run of 32-or-more hex characters to its
+first eight, and the access log redacts the same shape per path segment (§16.5). An undocumented
+response body kept verbatim is truncated on a **character boundary**; a fixed byte 200 panicked
+inside the spawned push task, and the task's in-flight slot is released by a `Drop` guard precisely
+so a panic cannot leak one of the 256.
+
 **Nothing blocks the event inbox on the network.** `on_event` does in-memory bookkeeping and at
 most one `DeviceStore` read; every HTTP request is a spawned task, bounded by **8** simultaneous
 requests, **256** outstanding tasks and a **10 s** per-request timeout. Past 256 the push is
@@ -5804,6 +5847,10 @@ cannot sign a JWT is not a reason to take the download server down, and the oper
 (§25.6) or the last push failed with a non-retryable provider error, and `ok` otherwise. It is
 never `down`: a push service that cannot reach Apple does not make this server unusable (§16.3).
 
+`last_error` is redacted on the way in: any run of 32 or more hexadecimal characters keeps its
+first eight and loses the rest, because this component is served by the unauthenticated `healthz`
+and an APNs device token is the one secret in this crate that lives in a URL (§25.5).
+
 `devices` is read from the store on every poll. `live_activities` is the number of registrations
 the **notifier currently has cached** rather than a `SELECT COUNT(*)`, because the `DeviceStore`
 port has no global count — it is exact for every item the notifier has looked at inside the
@@ -5823,6 +5870,19 @@ failure.
 | `PUT <p>api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}` | `204`; `404` envelope when the device is unknown; `item_id` validated as a ULID but need not exist |
 | `DELETE <p>api/v2/devices/{token}/live-activities/{item_id}` | — | `204`, idempotent |
 
+`bundle_id` is validated against **`APNS_TOPIC`**, not only against its shape: it must be
+`APNS_TOPIC` itself or an extension of it (`<APNS_TOPIC>.something`, which is how a widget or an
+App Clip is named), else `400 validation_failed` on `bundle_id`. The field becomes the `apns-topic`
+of every push to that device, so leaving it free-form lets any holder of `AULOS_API_TOKEN` choose
+which app the operator's ES256 provider key signs for. Apple confines the damage to the operator's
+own team and the route is authenticated, which is why this is a fence rather than an alarm — but
+the server should have an opinion about which app it is pushing to.
+
+The `{token}` path segment is a **secret in a URL**, the only one on the v2 surface. The access-log
+middleware shortens any path segment of 32-or-more hexadecimal characters to its first eight
+(§16.5), so `ENABLE_ACCESSLOG=true` — or the DEBUG level an operator turns up to debug push — does
+not write device tokens to disk.
+
 Removals are idempotent because APNs tells the notifier about dead tokens the app may already have
 deleted.
 
@@ -5832,13 +5892,18 @@ deleted.
 
 - `payloads.rs` — every payload case compared as a whole `Value`, including the seven-key content
   state, the null-everywhere case, the estimate fallback, and the group body.
-- `provider_token.rs` — header, claims, the absent `exp`, the 50-minute cache, the forced remint,
+- `provider_token.rs` — header, claims, the absent `exp`, the 50-minute cache, the forced remint
+  and its compare-and-swap, eight barrier-released threads past the TTL minting exactly one token,
   and that `Debug` never prints the key. The token is verified with the public key.
 - `gateway.rs` — the whole §25.5 table: headers, `200`, `410`, the three `400`s, the `403`
   remint-and-retry, the `403` that survives it, `429` backoff, `5xx` giving up after three retries,
-  a non-JSON body, and an unreachable gateway.
+  a non-JSON body, and an unreachable gateway — whose reason must carry neither the device token
+  nor the URL.
 - `notifier.rs` — the §25.2 rules, pruning the right row for each token kind, the throttle's
-  trailing edge, the store-read budget, `APNS_ENABLED=false`, and an unreadable key file.
+  trailing edge (including the two-registration case that used to push for ever), the start latch
+  surviving an unreadable device table and a start token registered late, the `end` sent from the
+  cache when the store cannot be read, the store-read budget, `APNS_ENABLED=false`, and an
+  unreadable key file.
 
 The **wiring** is covered where it lives, in `crates/aulos-server/tests/server.rs`, through the
 production boot (`run_with`) rather than a test-only assembly: `healthz` names an `apns` component

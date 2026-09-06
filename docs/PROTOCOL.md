@@ -1169,7 +1169,7 @@ The registration body:
 | Field | Type | Meaning |
 |---|---|---|
 | `platform` | string, required | `"ios"`. Anything else is `400 validation_failed`. |
-| `bundle_id` | string, required | the app's bundle identifier, which is also the `apns-topic` the server pushes with. |
+| `bundle_id` | string, required | the app's bundle identifier, which is also the `apns-topic` the server pushes with. It must be the server's `APNS_TOPIC` (default `com.tatoalo.aulos`) or an extension of it — `<APNS_TOPIC>.something`, which is how a widget or App Clip is named. Anything else is `400 validation_failed` on `bundle_id`: the field decides which app the operator's provider key signs a push for, so the server has an opinion about it. |
 | `environment` | string, required | `"sandbox"` or `"production"` — which APNs gateway minted the token. A Debug/simulator build is `sandbox`, a TestFlight/App Store build is `production`. Getting it wrong makes every push fail inside APNs, so it is validated. |
 | `alerts` | boolean, optional | whether completion/failure alerts are wanted. Absent or `null` means `true`. |
 | `live_activity_start_token` | string or `null`, optional | the Live Activity **push-to-start** token (iOS 17.2+), when the app has one. `null` clears a previously reported one. |
