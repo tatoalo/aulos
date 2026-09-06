@@ -69,7 +69,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
-use aulos_core::{Clock, Config, HealthRegistry, SubscriptionsHandle, SystemClock, UnixMs};
+use aulos_core::{
+    Clock, Config, DeviceStore, HealthRegistry, SubscriptionsHandle, SystemClock, UnixMs,
+};
 use aulos_provider::Registry;
 use aulos_queue::{EngineHandle, EventHub, StateView};
 use aulos_store::Store;
@@ -171,6 +173,13 @@ pub struct ApiState {
     pub hub: EventHub,
     /// Typed reads only — paged history, subscriptions, the import report.
     pub store: Store,
+    /// APNs device and Live Activity registrations (PROTOCOL §4.8, DESIGN §25).
+    ///
+    /// A port rather than the [`Store`] it is defaulted to, because the four `devices` routes are
+    /// the *only* thing in this crate that touches those tables and a test wants to drive them
+    /// without a database. [`ApiState::new`] fills it in from `store`, so no caller has to know
+    /// the two are the same object today.
+    pub devices: Arc<dyn DeviceStore>,
     /// Provider selection, catalogs and the plugin reload.
     pub registry: Arc<RwLock<Registry>>,
     /// The effective configuration.
@@ -219,11 +228,13 @@ impl ApiState {
     ) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let info = Arc::new(ServerInfo::new(&cfg, clock.as_ref()));
+        let devices: Arc<dyn DeviceStore> = Arc::new(store.clone());
         Self {
             engine,
             state,
             hub,
             store,
+            devices,
             registry,
             cfg,
             ytdl,
@@ -233,6 +244,16 @@ impl ApiState {
             live: Arc::new(Live::default()),
             clock,
         }
+    }
+
+    /// Replaces the [`DeviceStore`] the `devices` routes write through.
+    ///
+    /// The default is the SQLite store; this exists for a test that wants an in-memory stand-in,
+    /// and for a build that persists registrations somewhere else.
+    #[must_use]
+    pub fn with_devices(mut self, devices: Arc<dyn DeviceStore>) -> Self {
+        self.devices = devices;
+        self
     }
 
     /// Replaces the clock. Used by this crate's tests and by `check-config`.

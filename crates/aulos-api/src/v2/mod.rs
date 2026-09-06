@@ -16,6 +16,7 @@
 
 pub mod actions;
 pub mod cookies;
+pub mod devices;
 pub mod downloads;
 pub mod meta;
 pub mod query;
@@ -25,7 +26,7 @@ use aulos_core::ErrorCode;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Query};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, header};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Router, body::Bytes};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -115,6 +116,15 @@ pub fn router(state: ApiState) -> Router {
             patch(subs::update).delete(subs::remove),
         )
         .route(&r("subscriptions/{id}/check"), post(subs::check_one))
+        // --- push registration (PROTOCOL §4.8) ---
+        .route(
+            &r("devices/{token}"),
+            put(devices::register).delete(devices::unregister),
+        )
+        .route(
+            &r("devices/{token}/live-activities/{item_id}"),
+            put(devices::register_activity).delete(devices::unregister_activity),
+        )
         // One limit for the whole surface, sized for the largest legal body — the cookie upload,
         // whose own 1 000 000-byte cap is enforced in the handler so the answer is the legacy
         // `413` envelope rather than axum's bare rejection (DESIGN §16.6).
