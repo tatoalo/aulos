@@ -395,6 +395,15 @@ pub(crate) fn apply(
             missing(n, *id)?;
         }
         WriteOp::DeleteItems(ids) => {
+            // The Live Activity rows go **first**: `live_activities.item_id` is not a foreign key
+            // (PROTOCOL §4.8 lets the app register an activity before the item row exists), and a
+            // group's children are only reachable through `items.group_id` until the `DELETE`
+            // cascades them away. Doing this after the item delete would strand every child's
+            // registration for ever, and the notifier would keep pushing to an activity whose
+            // download no longer exists (DESIGN §25).
+            for id in ids {
+                crate::devices::remove_for_item(conn, *id)?;
+            }
             let mut stmt = conn.prepare_cached("DELETE FROM items WHERE id = ?1")?;
             for id in ids {
                 stmt.execute([id.to_string()])?;

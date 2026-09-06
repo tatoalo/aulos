@@ -1,3 +1,14 @@
+CREATE TABLE devices (
+  token                     TEXT    PRIMARY KEY,
+  platform                  TEXT    NOT NULL,
+  bundle_id                 TEXT    NOT NULL,
+  environment               TEXT    NOT NULL CHECK (environment IN ('sandbox','production')),
+  alerts                    INTEGER NOT NULL DEFAULT 1,
+  live_activity_start_token TEXT,
+  app_version               TEXT,
+  registered_at             INTEGER NOT NULL,
+  last_seen_at              INTEGER NOT NULL
+) STRICT;
 CREATE TABLE items (
   id                  TEXT    PRIMARY KEY,
   kind                TEXT    NOT NULL CHECK (kind IN ('item','group')),
@@ -35,6 +46,14 @@ CREATE TABLE kv (
   value_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE live_activities (
+  device_token  TEXT    NOT NULL REFERENCES devices(token) ON DELETE CASCADE,
+  item_id       TEXT    NOT NULL,
+  update_token  TEXT    NOT NULL,
+  environment   TEXT    NOT NULL CHECK (environment IN ('sandbox','production')),
+  registered_at INTEGER NOT NULL,
+  PRIMARY KEY (device_token, item_id)
+) WITHOUT ROWID, STRICT;
 CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -65,6 +84,8 @@ CREATE TABLE telegram_chats (
   config_json TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
 ) STRICT;
+CREATE INDEX devices_start_token ON devices(live_activity_start_token)
+  WHERE live_activity_start_token IS NOT NULL;
 CREATE INDEX items_canonical     ON items(canonical_key);
 CREATE INDEX items_clear_after   ON items(clear_after) WHERE clear_after IS NOT NULL;
 CREATE INDEX items_finished_at   ON items(finished_at) WHERE finished_at IS NOT NULL;
@@ -73,5 +94,6 @@ CREATE INDEX items_media_id      ON items(media_id) WHERE media_id IS NOT NULL;
 CREATE INDEX items_ord           ON items(ord);
 CREATE INDEX items_status_ord    ON items(status, ord);
 CREATE INDEX items_url           ON items(url);
+CREATE INDEX live_activities_item ON live_activities(item_id);
 CREATE INDEX subscription_seen_age ON subscription_seen(subscription_id, seen_at DESC);
 CREATE INDEX subscriptions_due ON subscriptions(enabled, next_due);

@@ -7,8 +7,9 @@ mod support;
 use std::collections::BTreeSet;
 
 use aulos_core::{
-    ChatConfig, EntryBlob, ErrorCode, FieldUpdate, FileSlot, Item, ItemId, Kind, ProviderId,
-    RelPath, SourceKind, SourceRef, Status, SubId, SubscriptionRecord, WireError,
+    ApnsEnvironment, ChatConfig, DeviceRecord, DeviceStore, EntryBlob, ErrorCode, FieldUpdate,
+    FileSlot, Item, ItemId, Kind, LiveActivityRecord, ProviderId, RelPath, SourceKind, SourceRef,
+    Status, SubId, SubscriptionRecord, WireError,
 };
 use aulos_store::{Durability, Store, StoreError, WriteOp, retry_ops};
 
@@ -32,7 +33,7 @@ async fn seeded(store: &Store) -> Item {
     item
 }
 
-/// The headline acceptance bullet: all nineteen variants, each observed through a typed read.
+/// The headline acceptance bullet: every variant, each observed through a typed read.
 ///
 /// The `covered` set is asserted against [`WriteOp::NAMES`] at the end, so a variant added to the
 /// enum without a case here fails the test instead of quietly going untested.
@@ -379,6 +380,82 @@ async fn every_write_op_round_trips_through_a_typed_read() {
     // The seeded keys are untouched by a `meta` write.
     assert!(s.meta().await.unwrap().contains_key("schema_version"));
     covered.insert("set_meta");
+
+    // 21-25. The five device ops (DESIGN §25). Observed through the `DeviceStore` reads, which is
+    // the only way the notifier ever sees these tables.
+    let device = DeviceRecord {
+        token: "a1b2".repeat(8).into(),
+        platform: "ios".into(),
+        bundle_id: "com.tatoalo.aulos".into(),
+        environment: ApnsEnvironment::Sandbox,
+        alerts: true,
+        live_activity_start_token: Some("c3d4".repeat(8).into()),
+        app_version: Some("1.0.0 (3)".into()),
+        registered_at: 1_757_000_000_000,
+        last_seen_at: 1_757_000_000_000,
+    };
+    s.write(
+        vec![WriteOp::UpsertDevice(Box::new(device.clone()))],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert_eq!(DeviceStore::devices(s).await.unwrap(), vec![device.clone()]);
+    covered.insert("upsert_device");
+
+    let activity = LiveActivityRecord {
+        device_token: device.token.clone(),
+        item_id: id,
+        update_token: "e5f6".repeat(8).into(),
+        environment: ApnsEnvironment::Sandbox,
+        registered_at: 1_757_000_000_100,
+    };
+    s.write(
+        vec![WriteOp::UpsertLiveActivity(Box::new(activity.clone()))],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.live_activities_for(id).await.unwrap(),
+        vec![activity.clone()]
+    );
+    covered.insert("upsert_live_activity");
+
+    s.write(
+        vec![WriteOp::RemoveLiveActivity {
+            device_token: device.token.clone(),
+            item: id,
+        }],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert!(s.live_activities_for(id).await.unwrap().is_empty());
+    covered.insert("remove_live_activity");
+
+    s.write(
+        vec![
+            WriteOp::UpsertLiveActivity(Box::new(activity)),
+            WriteOp::RemoveLiveActivitiesFor { item: id },
+        ],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert!(s.live_activities_for(id).await.unwrap().is_empty());
+    covered.insert("remove_live_activities_for");
+
+    s.write(
+        vec![WriteOp::RemoveDevice {
+            token: device.token.clone(),
+        }],
+        Durability::Sync,
+    )
+    .await
+    .unwrap();
+    assert!(DeviceStore::devices(s).await.unwrap().is_empty());
+    covered.insert("remove_device");
 
     let expected: BTreeSet<&'static str> = WriteOp::NAMES.into_iter().collect();
     assert_eq!(

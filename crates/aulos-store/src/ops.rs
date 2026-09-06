@@ -16,8 +16,9 @@
 //!   re-asserting a status.
 
 use aulos_core::{
-    ChatConfig, EntryBlob, FieldUpdate, FileRef, FileSlot, Item, ItemId, ProviderId, RelPath,
-    SourceRef, Status, SubId, SubscriptionRecord, UnixMs, WireError,
+    ChatConfig, DeviceRecord, EntryBlob, FieldUpdate, FileRef, FileSlot, Item, ItemId,
+    LiveActivityRecord, ProviderId, RelPath, SourceRef, Status, SubId, SubscriptionRecord, UnixMs,
+    WireError,
 };
 use serde_json::Value;
 
@@ -208,6 +209,37 @@ pub enum WriteOp {
         value: Option<Value>,
     },
 
+    /// Insert or refresh one APNs device registration (DESIGN §25, PROTOCOL §4.8).
+    ///
+    /// `Box`ed for the same reason [`WriteOp::UpsertSubscription`] is: every `WriteOp` pays for
+    /// the largest variant, and a nine-field record is not what the enum should be sized by.
+    /// A repeat `PUT` refreshes every column but `registered_at`.
+    UpsertDevice(Box<DeviceRecord>),
+
+    /// Forget one device and, through `ON DELETE CASCADE`, its Live Activities. Idempotent.
+    RemoveDevice {
+        /// The APNs device token.
+        token: Box<str>,
+    },
+
+    /// Insert or refresh one Live Activity registration, keyed on `(device_token, item_id)`.
+    UpsertLiveActivity(Box<LiveActivityRecord>),
+
+    /// Forget one Live Activity registration. Idempotent.
+    RemoveLiveActivity {
+        /// The owning device.
+        device_token: Box<str>,
+        /// The item it tracked.
+        item: ItemId,
+    },
+
+    /// Forget every Live Activity registration for one item — after the final `end` push, and as
+    /// part of deleting the item. Idempotent.
+    RemoveLiveActivitiesFor {
+        /// The item.
+        item: ItemId,
+    },
+
     /// One `meta` key (DESIGN §7.2). Added in WP-05: the importer's provenance keys
     /// (`imported_from`, `imported_at`, `import_report`) must land in the **same transaction** as
     /// the rows they describe (DESIGN §7.6.6), and the two existing `meta` writers — the schema
@@ -249,7 +281,16 @@ impl WriteOp {
             | Self::DeleteSubscriptions(_)
             | Self::UpsertTelegramChat { .. }
             | Self::SetKv { .. }
-            | Self::SetMeta { .. } => None,
+            | Self::SetMeta { .. }
+            // The five device ops name no `items` row: `RemoveLiveActivity` and
+            // `RemoveLiveActivitiesFor` carry an item id, but they touch `live_activities` only
+            // and can never report `NotFound` against it — the id need not exist at all
+            // (PROTOCOL §4.8).
+            | Self::UpsertDevice(_)
+            | Self::RemoveDevice { .. }
+            | Self::UpsertLiveActivity(_)
+            | Self::RemoveLiveActivity { .. }
+            | Self::RemoveLiveActivitiesFor { .. } => None,
         }
     }
 
@@ -277,14 +318,20 @@ impl WriteOp {
             Self::UpsertTelegramChat { .. } => "upsert_telegram_chat",
             Self::SetKv { .. } => "set_kv",
             Self::SetMeta { .. } => "set_meta",
+            Self::UpsertDevice(_) => "upsert_device",
+            Self::RemoveDevice { .. } => "remove_device",
+            Self::UpsertLiveActivity(_) => "upsert_live_activity",
+            Self::RemoveLiveActivity { .. } => "remove_live_activity",
+            Self::RemoveLiveActivitiesFor { .. } => "remove_live_activities_for",
         }
     }
 
     /// Every variant name, so the round-trip test can assert it covers all of them.
     ///
     /// DESIGN §7.1 lists nineteen variants and calls them "eighteen" in prose; the enum is the
-    /// authority and this list is asserted against it. WP-05 added the twentieth, `set_meta`.
-    pub const NAMES: [&'static str; 20] = [
+    /// authority and this list is asserted against it. WP-05 added the twentieth, `set_meta`, and
+    /// the APNs work the five device ops (DESIGN §25).
+    pub const NAMES: [&'static str; 25] = [
         "insert_items",
         "set_status",
         "set_auto_start",
@@ -305,6 +352,11 @@ impl WriteOp {
         "upsert_telegram_chat",
         "set_kv",
         "set_meta",
+        "upsert_device",
+        "remove_device",
+        "upsert_live_activity",
+        "remove_live_activity",
+        "remove_live_activities_for",
     ];
 }
 

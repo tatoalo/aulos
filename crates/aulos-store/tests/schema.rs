@@ -186,7 +186,7 @@ async fn the_backfill_clears_a_stale_status_line_off_rows_an_older_build_finishe
 
     // Rewind to the schema the buggy build shipped, so the reopen has a migration to run.
     let conn = Connection::open(support::db_path(dir.path())).unwrap();
-    conn.pragma_update(None, "user_version", 1).unwrap();
+    rewind_to_0001(&conn);
     drop(conn);
 
     let upgraded = Store::open(support::options(dir.path())).unwrap();
@@ -202,7 +202,7 @@ async fn the_backfill_clears_a_stale_status_line_off_rows_an_older_build_finishe
             .unwrap()
             .get("schema_version")
             .map(std::convert::AsRef::as_ref),
-        Some("2"),
+        Some(SCHEMA_VERSION.to_string().as_str()),
         "and records the schema it migrated to"
     );
 }
@@ -238,7 +238,7 @@ async fn the_backfill_leaves_a_failed_row_its_message() {
     store.close().await.unwrap();
 
     let conn = Connection::open(support::db_path(dir.path())).unwrap();
-    conn.pragma_update(None, "user_version", 1).unwrap();
+    rewind_to_0001(&conn);
     drop(conn);
 
     let upgraded = Store::open(support::options(dir.path())).unwrap();
@@ -247,4 +247,22 @@ async fn the_backfill_leaves_a_failed_row_its_message() {
         Some("Imported with unknown legacy status: cancelled"),
         "an import note is a reason, not a stale progress line"
     );
+}
+
+/// Rewinds an already-migrated file to the state migration `0001` left it in.
+///
+/// `user_version` alone is not enough and has not been since `0003`: rolling the counter back on a
+/// file that still carries the later migrations' tables makes the next `to_latest` re-run their
+/// DDL and fail with "table devices already exists". A test that wants a pre-`0002` database has
+/// to undo what came after it, so this drops `0003`'s objects too. **Every migration that creates
+/// DDL adds its undo here.**
+fn rewind_to_0001(conn: &Connection) {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS devices_start_token; \
+         DROP INDEX IF EXISTS live_activities_item; \
+         DROP TABLE IF EXISTS live_activities; \
+         DROP TABLE IF EXISTS devices;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
 }
