@@ -189,6 +189,13 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("TELEGRAM_STALL_TIMEOUT_SECONDS", "180"),
     ("TELEGRAM_HARD_TIMEOUT_SECONDS", "7200"),
     ("TELEGRAM_MAX_URLS_PER_MESSAGE", "10"),
+    // --- APNs push (DESIGN §25) ---
+    ("APNS_ENABLED", "false"),
+    ("APNS_KEY_FILE", ""),
+    ("APNS_KEY_ID", ""),
+    ("APNS_TEAM_ID", ""),
+    ("APNS_TOPIC", "com.tatoalo.aulos"),
+    ("APNS_BASE_URL_OVERRIDE", ""),
     // --- identity and plugins ---
     ("METUBE_VERSION", "dev"),
     ("PLUGINS_DIR", "/config/plugins"),
@@ -284,6 +291,7 @@ pub const BOOLEAN_KEYS: &[&str] = &[
     "SC_USE_FFMPEG",
     "JELLYFIN_SYNC_ENABLED",
     "TELEGRAM_BOT_ENABLED",
+    "APNS_ENABLED",
     // new
     "AULOS_RESOLVE_FALLTHROUGH",
     "AULOS_CLEAN_ORPHAN_TEMP",
@@ -760,6 +768,26 @@ pub struct Config {
     /// legacy blind spot is a bug, not a feature (BRIEF scope trims).
     pub telegram_watch_all: bool,
 
+    // --- APNs push (DESIGN §25) ---
+    /// `APNS_ENABLED` — arms the `aulos-apns` notifier. `false` leaves `healthz` `apns:
+    /// disabled` and registers no subscriber.
+    pub apns_enabled: bool,
+    /// `APNS_KEY_FILE` — the `.p8` ES256 signing key. `None` when unset.
+    ///
+    /// The **path** is not a secret and is printed by `check-config`; the file's contents are,
+    /// and are never read into a `Config` field (`aulos-apns` opens the file itself).
+    pub apns_key_file: Option<PathBuf>,
+    /// `APNS_KEY_ID` — the `kid` header of the provider token. Not a secret.
+    pub apns_key_id: Box<str>,
+    /// `APNS_TEAM_ID` — the `iss` claim of the provider token. Not a secret.
+    pub apns_team_id: Box<str>,
+    /// `APNS_TOPIC` — the default bundle id, and the `apns-topic` for a device that did not
+    /// report its own. A device's `bundle_id` wins when present.
+    pub apns_topic: Box<str>,
+    /// `APNS_BASE_URL_OVERRIDE` — **test only**: points both gateways at one base URL so the
+    /// `aulos-apns` suite can run against a local mock. Empty in every real deployment.
+    pub apns_base_url_override: Box<str>,
+
     // --- identity ---
     /// `METUBE_VERSION`, with `AULOS_VERSION` as an accepted alias.
     pub version: Box<str>,
@@ -1106,6 +1134,13 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         ),
         telegram_edit_interval_ms: g.u64("AULOS_TELEGRAM_EDIT_INTERVAL_MS"),
         telegram_watch_all: g.bool("AULOS_TELEGRAM_WATCH_ALL"),
+
+        apns_enabled: g.bool("APNS_ENABLED"),
+        apns_key_file: g.opt_path("APNS_KEY_FILE"),
+        apns_key_id: g.str("APNS_KEY_ID").into(),
+        apns_team_id: g.str("APNS_TEAM_ID").into(),
+        apns_topic: g.str("APNS_TOPIC").into(),
+        apns_base_url_override: g.str("APNS_BASE_URL_OVERRIDE").into(),
 
         version: g.str("METUBE_VERSION").into(),
 
