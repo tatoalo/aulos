@@ -42,6 +42,7 @@ aulos-telegram = { workspace = true }
 teloxide = { workspace = true, features = ["macros", "ctrlc_handler", "rustls"] }
 aulos-subscriptions = { workspace = true }
 aulos-hooks = { workspace = true }
+aulos-apns = { workspace = true }
 
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

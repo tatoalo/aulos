@@ -328,6 +328,7 @@ async fn healthz_names_every_component_the_wiring_owns() {
         "audio_sync",
         "events",
         "subscriptions",
+        "apns",
     ] {
         assert!(
             components.contains_key(name),
@@ -343,6 +344,10 @@ async fn healthz_names_every_component_the_wiring_owns() {
         "{body}"
     );
     assert_eq!(components["events"]["dropped"]["hooks"], 0, "{body}");
+    assert_eq!(components["events"]["dropped"]["apns"], 0, "{body}");
+    // Push is off in the stock rig, and `disabled` is not a failure either.
+    assert_eq!(components["apns"]["status"], "disabled", "{body}");
+    assert_eq!(components["apns"]["devices"], 0, "{body}");
 
     // `livez` does no work at all.
     let livez = rig.get_json("livez").await;
@@ -697,4 +702,118 @@ fn completed_view() -> ItemView {
         clear_after: None,
     };
     ItemView::from_item(&item, None, &ViewExtras::default())
+}
+
+// ---------------------------------------------------------------------------
+// APNs (DESIGN §25.6, §25.7): the wiring's three states.
+// ---------------------------------------------------------------------------
+
+/// The committed throwaway P-256 key the `aulos-apns` suite signs with.
+///
+/// Referenced rather than copied: a second checked-in private key is a second thing a secret
+/// scanner has to be told about, and this one is already documented as a fixture.
+fn apns_test_key() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../aulos-apns/tests/fixtures/apns_test_key.p8")
+        .canonicalize()
+        .expect("the aulos-apns key fixture must exist")
+}
+
+/// DESIGN §25.6: `APNS_ENABLED=true` with an unreadable `.p8` must **not** stop the server.
+///
+/// This is the regression that matters most about the APNs wiring: a `?` on
+/// `ApnsNotifier::new` would turn a typo in a path into a container that never comes up, and
+/// nothing else in the suite would notice, because every other test leaves push disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_misconfigured_apns_key_degrades_healthz_and_the_server_still_serves() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("nope.p8");
+    let rig = Rig::start(
+        root.path(),
+        &[
+            ("APNS_ENABLED", "true"),
+            ("APNS_KEY_FILE", &missing.display().to_string()),
+            ("APNS_KEY_ID", "ABCD123456"),
+            ("APNS_TEAM_ID", "TEAM123456"),
+        ],
+        vec![],
+    )
+    .await;
+
+    let body = rig.get_json("healthz").await;
+    let apns = &body["components"]["apns"];
+    assert_eq!(apns["status"], "degraded", "{body}");
+    assert!(
+        apns["last_error"].as_str().is_some_and(|e| !e.is_empty()),
+        "the reason an operator has to act on must be in healthz: {body}"
+    );
+    // The server is otherwise entirely healthy, which is the point.
+    assert_eq!(body["components"]["store"]["status"], "ok", "{body}");
+    assert_eq!(rig.get_json("livez").await["ok"], true);
+    rig.stop().await.unwrap();
+}
+
+/// With a readable key the component is `ok`, and the `devices` gauge is the **same** registration
+/// table the `PUT <p>api/v2/devices/{token}` route writes.
+///
+/// That shared `Arc<dyn DeviceStore>` is the one thing the wiring can get wrong invisibly: the
+/// routes would keep answering `204` and the notifier would keep pushing to nobody.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_device_reaches_the_apns_health_component() {
+    let root = tempfile::tempdir().unwrap();
+    let key = apns_test_key();
+    let rig = Rig::start(
+        root.path(),
+        &[
+            ("APNS_ENABLED", "true"),
+            ("APNS_KEY_FILE", &key.display().to_string()),
+            ("APNS_KEY_ID", "ABCD123456"),
+            ("APNS_TEAM_ID", "TEAM123456"),
+            // Nothing is ever sent in this test, but a real gateway URL in a unit test is a
+            // trap waiting for someone to add an assertion that downloads something.
+            ("APNS_BASE_URL_OVERRIDE", "http://127.0.0.1:1"),
+        ],
+        vec![],
+    )
+    .await;
+
+    let before = rig.get_json("healthz").await;
+    assert_eq!(before["components"]["apns"]["status"], "ok", "{before}");
+    assert_eq!(before["components"]["apns"]["devices"], 0, "{before}");
+
+    let token = "a".repeat(64);
+    let status = reqwest::Client::new()
+        .put(rig.url(&format!("api/v2/devices/{token}")))
+        .json(&serde_json::json!({
+            "platform": "ios",
+            "bundle_id": "com.tatoalo.aulos",
+            "environment": "sandbox",
+            "alerts": true,
+            "live_activity_start_token": null,
+            "app_version": "1.0.0 (3)",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(
+        status.as_u16(),
+        204,
+        "the registration route must accept it"
+    );
+
+    // `healthz` recomputes on its own tick, so poll rather than assume.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let body = rig.get_json("healthz").await;
+        if body["components"]["apns"]["devices"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the registered device never reached components.apns: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    rig.stop().await.unwrap();
 }

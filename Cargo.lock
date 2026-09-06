@@ -385,6 +385,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "aulos-api",
+ "aulos-apns",
  "aulos-core",
  "aulos-hooks",
  "aulos-provider",

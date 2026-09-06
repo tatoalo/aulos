@@ -11,11 +11,11 @@
 //!  0      SIGTERM/SIGINT handlers — before anything that can take minutes
 //!  1..9   bootstrap: config, tracing, dirs, store, importer, options, plugins, tool probes
 //!  10     POT supervisor
-//!  11     EventRouter::new → subscribe(aggregator, hooks, telegram) → EventSender to producers
+//!  11     EventRouter::new → subscribe(aggregator, hooks, telegram, apns) → EventSender to producers
 //!         Store actor (already running), EventHub, Aggregator, QueueEngine
 //!  12     boot recovery: re-queue in-flight items, recompute group counters
 //!  13     HookDispatcher, SubscriptionScheduler, ConfigWatcher, health publisher
-//!  14     Telegram actor, then EventRouter::spawn() — no subscriber after this point
+//!  14     Telegram actor + the APNs loop, then EventRouter::spawn() — no subscriber after this
 //!  15     bind HOST:PORT (TLS when HTTPS=true), serve with graceful shutdown
 //!  16     log "aulos-server <version> listening on …"
 //! ```
@@ -51,10 +51,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aulos_api::{ApiState, ServerInfo};
+use aulos_apns::{ApnsHealth, ApnsNotifier, DeviceStore};
 use aulos_core::BootId;
 use aulos_core::clock::{Clock, SystemClock};
 use aulos_core::config::Config;
-use aulos_core::event::{EventRouter, SubscriberSpec};
+use aulos_core::event::{EventInbox, EventRouter, Notifier, SubscriberSpec};
 use aulos_core::health::HealthRegistry;
 use aulos_core::subscription::SubscriptionsHandle;
 use aulos_hooks::{AudioSyncHook, Hook, HookDispatcher, JellyfinHook, ManifestHook, NfoHook};
@@ -251,6 +252,24 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         .as_ref()
         .map(aulos_core::event::EventInbox::dropped_handle);
 
+    // The `DeviceStore` port (DESIGN §25.1). One `Arc`, shared by the two halves of the same
+    // contract: `aulos-api`'s four `devices` routes write through it, and the APNs notifier reads
+    // and prunes through it. `ApiState::new` would default it from the store anyway; it is spelled
+    // out because `healthz`'s `apns.devices` gauge has to read the *same* registrations the routes
+    // wrote, and because this is the line that says the push crate never sees `aulos-store`.
+    let devices: Arc<dyn DeviceStore> = Arc::new(store.clone());
+    // Built **before** the subscribe, for the reason the Telegram inbox is: an inbox with no
+    // reader fills, drops, and turns `events.dropped.apns` into a lie. The three-arm match is
+    // DESIGN §25.6 — disabled, misconfigured (ERROR + `degraded`, and the server carries on), or
+    // running.
+    let apns = build_apns(&cfg, Arc::clone(&devices), &clock, &health);
+    let apns_inbox = apns
+        .as_ref()
+        .map(|_| event_router.subscribe(SubscriberSpec::apns()));
+    let apns_dropped = apns_inbox
+        .as_ref()
+        .map(aulos_core::event::EventInbox::dropped_handle);
+
     let hub = EventHub::new(store.seq_allocator(), BootId::new(), &cfg);
     health.set_identity(hub.boot_id());
 
@@ -409,7 +428,15 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         .component(),
     );
 
-    // --- 14. the Telegram actor, then the router ------------------------------------------
+    // --- 14. the notifier loops, then the router ------------------------------------------
+    //
+    // The APNs notifier is a `Notifier`, not an actor: `aulos-core` hands out an `EventInbox`, so
+    // the driving loop lives here (the Telegram actor owns its own, which is why it has a `spawn`).
+    let apns_health = apns.as_ref().map(ApnsNotifier::health_handle);
+    let apns_task = match (apns, apns_inbox) {
+        (Some(notifier), Some(inbox)) => Some(tokio::spawn(run_apns(notifier, inbox))),
+        _ => None,
+    };
     let telegram = spawn_telegram(
         &cfg,
         &store,
@@ -447,6 +474,8 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         subs: subs_handle.clone(),
         telegram: telegram.health,
         telegram_dropped,
+        apns: apns_health,
+        apns_dropped,
     };
     // One pass before the bind, so the very first `healthz` is complete.
     health::publish_once(&health_probes, &health).await;
@@ -517,7 +546,11 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
             Arc::clone(&health),
             subs_handle.clone(),
         )
-        .with_clock(Arc::clone(&clock));
+        .with_clock(Arc::clone(&clock))
+        // The same `Arc` the notifier reads: `ApiState::new` would default one from the store, but
+        // two `Arc<dyn DeviceStore>` over the same `Store` is exactly the shape that survives a
+        // refactor which gives one of them a cache.
+        .with_devices(Arc::clone(&devices));
         if let Some(version) = &yt_dlp {
             // Without this `capabilities.yt_dlp`, `GET <p>version` and `healthz.yt_dlp` all stay
             // `null` (the WP-14 request in `docs/INTEGRATION-NOTES.md`).
@@ -635,6 +668,7 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         aggregator_task,
         dispatcher_task,
         telegram_tasks,
+        apns_task,
     )
     .await;
 
@@ -726,13 +760,17 @@ async fn boot_cancelled(
 /// - the hook dispatcher's cancellation token was already cancelled with the jobs (step 5), so its
 ///   own contract says the trailing debounce batch is dropped with a WARN;
 /// - the Telegram actor's outbound queue is progress edits and terminal notifications for jobs
-///   that have just been killed.
+///   that have just been killed;
+/// - the APNs loop cancels its own in-flight pushes and timers once its inbox closes
+///   ([`APNS_DRAIN_WINDOW`]), so what the ceiling below can drop is at most one push already past
+///   its `await` — and a push is fire-and-forget by contract (DESIGN §25.5).
 ///
 async fn shutdown_tasks(
     mut engine: tokio::task::JoinHandle<()>,
     aggregator: tokio::task::JoinHandle<()>,
     dispatcher: tokio::task::JoinHandle<()>,
     telegram: Vec<tokio::task::JoinHandle<()>>,
+    apns: Option<tokio::task::JoinHandle<()>>,
 ) {
     // The engine was told to stop before this was called, so this is a join and not a race.
     if tokio::time::timeout(ENGINE_DRAIN_CEILING, &mut engine)
@@ -749,6 +787,9 @@ async fn shutdown_tasks(
         let _ = aggregator.await;
         let _ = dispatcher.await;
         for task in telegram {
+            let _ = task.await;
+        }
+        if let Some(task) = apns {
             let _ = task.await;
         }
     };
@@ -857,6 +898,79 @@ impl TelegramWiring {
             health: None,
         }
     }
+}
+
+/// How long the APNs notifier's in-flight pushes are given after its inbox closes.
+///
+/// Shorter than [`CONSUMER_DRAIN_CEILING`] on purpose: the loop must have finished cancelling and
+/// draining before the ceiling that would otherwise *drop* it expires, so the "bounded tasks, no
+/// dangling awaits" property is the loop's own and not a race against the outer timeout.
+pub const APNS_DRAIN_WINDOW: Duration = Duration::from_secs(1);
+
+/// Builds the APNs notifier, publishing the `apns` component in every one of its three states.
+///
+/// DESIGN §25.6: `APNS_ENABLED=true` with a missing or unreadable `.p8` logs an ERROR and leaves
+/// the server running with push disabled. It never returns an error, because there is no
+/// misconfiguration of an **optional integration** worth refusing to serve downloads over.
+fn build_apns(
+    cfg: &Arc<Config>,
+    devices: Arc<dyn DeviceStore>,
+    clock: &Arc<dyn Clock>,
+    health: &Arc<HealthRegistry>,
+) -> Option<ApnsNotifier> {
+    match ApnsNotifier::new(cfg, devices, Arc::clone(clock)) {
+        Ok(None) => {
+            tracing::info!("APNs push is disabled");
+            ApnsHealth::disabled().apply(health);
+            None
+        }
+        Ok(Some(notifier)) => {
+            tracing::info!(
+                topic = %cfg.apns_topic,
+                key_id = %cfg.apns_key_id,
+                team_id = %cfg.apns_team_id,
+                "APNs push is armed"
+            );
+            Some(notifier)
+        }
+        Err(e) => {
+            // The key file's *contents* are the secret; its path, the key id and the team id are
+            // identifiers, and naming them is the whole value of this line to an operator.
+            tracing::error!(
+                error = %e,
+                key_file = ?cfg.apns_key_file,
+                key_id = %cfg.apns_key_id,
+                team_id = %cfg.apns_team_id,
+                "APNS_ENABLED=true but APNs is misconfigured; push is disabled and the server \
+                 carries on"
+            );
+            ApnsHealth::misconfigured(&e.to_string()).apply(health);
+            None
+        }
+    }
+}
+
+/// Drives the APNs notifier off its inbox until the router closes it, then stops its tasks.
+///
+/// `aulos-core` hands out an `EventInbox`, not a `Notifier` driver, so this three-line loop is the
+/// wiring's job. It ends when every `EventSender` has been dropped — which the DESIGN §16.4
+/// shutdown arranges by awaiting the engine task first — and the notifier is then given
+/// [`APNS_DRAIN_WINDOW`] to land what is already in flight before the rest is cancelled.
+async fn run_apns(notifier: ApnsNotifier, mut inbox: EventInbox) {
+    while let Some(ev) = inbox.recv().await {
+        notifier.on_event(&ev).await;
+    }
+    if tokio::time::timeout(APNS_DRAIN_WINDOW, notifier.quiesce())
+        .await
+        .is_err()
+    {
+        tracing::debug!(
+            in_flight = notifier.in_flight(),
+            "cancelling the APNs pushes still in flight at shutdown"
+        );
+    }
+    notifier.shutdown().await;
+    tracing::debug!("the APNs notifier stopped");
 }
 
 /// Builds and spawns the Telegram actor, or logs one line and carries on (DESIGN §12.1).

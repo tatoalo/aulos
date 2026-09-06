@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use aulos_apns::ApnsHealthHandle;
 use aulos_core::config::Config;
 use aulos_core::event::{DomainEvent, EventSender};
 use aulos_core::health::{ComponentHealth, ComponentStatus, HealthRegistry};
@@ -53,6 +54,13 @@ pub struct Probes {
     /// The `telegram` subscriber's event-drop counter, taken **before** the inbox was moved into
     /// the actor. `None` when the bot is not running, and reported as `0` in that case.
     pub telegram_dropped: Option<Arc<AtomicU64>>,
+    /// The APNs notifier's counters, taken **before** the notifier was moved into its subscriber
+    /// loop. `None` when push is disabled or misconfigured — in which case the `apns` component is
+    /// the static one the wiring published once, and this publisher must not overwrite it.
+    pub apns: Option<ApnsHealthHandle>,
+    /// The `apns` subscriber's event-drop counter, taken **before** the inbox was moved into the
+    /// loop. `None` when push is not running, and reported as `0` in that case.
+    pub apns_dropped: Option<Arc<AtomicU64>>,
 }
 
 /// Publishes the moving components until `shutdown` is cancelled.
@@ -91,10 +99,17 @@ pub async fn publish_once(probes: &Probes, health: &HealthRegistry) -> bool {
             .telegram_dropped
             .as_ref()
             .map_or(0, |c| c.load(Ordering::Relaxed));
+        let apns_dropped = probes
+            .apns_dropped
+            .as_ref()
+            .map_or(0, |c| c.load(Ordering::Relaxed));
         changed |= health.set(
             "events",
-            events_component(view.events_dropped, telegram_dropped),
+            events_component(view.events_dropped, telegram_dropped, apns_dropped),
         );
+    }
+    if let Some(apns) = &probes.apns {
+        changed |= apns.health().await.apply(health);
     }
     if let Some(tg) = &probes.telegram {
         changed |= health.set("telegram", telegram_component(Some(&tg.health())));
@@ -205,15 +220,23 @@ pub fn queue_component(probes: &Probes) -> ComponentHealth {
 /// `TelegramActor::spawn` consumes the inbox. `telegram` reads `0` when the bot is not running,
 /// which is the truth — an inbox nobody was given cannot drop anything.
 #[must_use]
-pub fn events_component(hooks_dropped: u64, telegram_dropped: u64) -> ComponentHealth {
-    let status = if hooks_dropped == 0 && telegram_dropped == 0 {
+pub fn events_component(
+    hooks_dropped: u64,
+    telegram_dropped: u64,
+    apns_dropped: u64,
+) -> ComponentHealth {
+    let status = if hooks_dropped == 0 && telegram_dropped == 0 && apns_dropped == 0 {
         ComponentStatus::Ok
     } else {
         ComponentStatus::Degraded
     };
     ComponentHealth::new(status).with(
         "dropped",
-        serde_json::json!({ "hooks": hooks_dropped, "telegram": telegram_dropped }),
+        serde_json::json!({
+            "hooks": hooks_dropped,
+            "telegram": telegram_dropped,
+            "apns": apns_dropped,
+        }),
     )
 }
 
@@ -289,6 +312,8 @@ mod tests {
             subs,
             telegram: None,
             telegram_dropped: None,
+            apns: None,
+            apns_dropped: None,
         }
     }
 
@@ -371,12 +396,13 @@ mod tests {
 
     #[test]
     fn the_events_component_degrades_only_when_something_was_dropped() {
-        let clean = events_component(0, 0);
+        let clean = events_component(0, 0, 0);
         assert_eq!(clean.status, ComponentStatus::Ok);
         assert_eq!(clean.detail["dropped"]["hooks"], 0);
         assert_eq!(clean.detail["dropped"]["telegram"], 0);
+        assert_eq!(clean.detail["dropped"]["apns"], 0);
 
-        let lossy = events_component(4, 0);
+        let lossy = events_component(4, 0, 0);
         assert_eq!(
             lossy.status,
             ComponentStatus::Degraded,
@@ -385,10 +411,15 @@ mod tests {
         assert_eq!(lossy.detail["dropped"]["hooks"], 4);
 
         // The Telegram half is measured now, not hard-coded: a dropped notification degrades too.
-        let tg = events_component(0, 2);
+        let tg = events_component(0, 2, 0);
         assert_eq!(tg.status, ComponentStatus::Degraded);
         assert_eq!(tg.detail["dropped"]["telegram"], 2);
         assert_eq!(tg.detail["dropped"]["hooks"], 0);
+
+        // And so does a dropped push: a lost `Completed` is a Live Activity left spinning.
+        let apns = events_component(0, 0, 1);
+        assert_eq!(apns.status, ComponentStatus::Degraded);
+        assert_eq!(apns.detail["dropped"]["apns"], 1);
     }
 
     #[test]
