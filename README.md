@@ -36,7 +36,7 @@ services:
       MAX_CONCURRENT_DOWNLOADS: "3"
       YTDL_OPTIONS_FILE: /config/ytdl-options.json
       # Optional integrations, all off unless enabled:
-      # JELLYFIN_SYNC_ENABLED / JELLYFIN_URL / JELLYFIN_API_KEY / JELLYFIN_LIBRARY_ID
+      # JELLYFIN_SYNC_ENABLED / JELLYFIN_URL / JELLYFIN_API_KEY / JELLYFIN_PATH_MAP
       # TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_CHAT_IDS
     volumes:
       - /srv/media:/downloads
@@ -68,6 +68,37 @@ meaning and default. The **complete table** — roughly ninety variables, each m
 (`L`), legacy-with-a-behaviour-note (`L*`) or new (`AULOS_*`) — is
 **[`docs/DESIGN.md` §17.3](docs/DESIGN.md)**. `yt-dlp` options themselves come from
 `YTDL_OPTIONS` / `YTDL_OPTIONS_FILE` (hot-reloaded on change), not from env vars.
+
+### Jellyfin
+
+`JELLYFIN_SYNC_ENABLED=true` with a `JELLYFIN_URL` and a `JELLYFIN_API_KEY` asks Jellyfin to scan
+its libraries when a download finishes. Completions inside a 30 s window
+(`AULOS_JELLYFIN_DEBOUNCE_SECS`) are coalesced into one request, capped at 5 minutes
+(`AULOS_JELLYFIN_MAX_WAIT_SECS`), so a 50-item playlist costs one scan rather than fifty.
+
+By default that request is `POST /Library/Refresh` — a **global** scan. It is the only endpoint on
+any Jellyfin version that discovers a file the server has never seen; a new file has no item yet,
+so nothing scoped to an item or a library can find it. `docs/reference/jellyfin-refresh-experiment.md`
+has the measurements.
+
+- **`JELLYFIN_LIBRARY_ID` does nothing.** It is still accepted so no deployment fails to boot over
+  it, but Jellyfin exposes no per-library scan, so an id cannot narrow the work. Setting it logs
+  one WARN at boot and shows `library_id_ignored: true` in `/healthz`.
+- **`JELLYFIN_PATH_MAP` is how you get a targeted scan.** Set it to comma-separated
+  `aulos_prefix=jellyfin_prefix` pairs — e.g. `JELLYFIN_PATH_MAP=/downloads=/data/videos` when the
+  same media is mounted at `/downloads` in this container and `/data/videos` in Jellyfin's. Aulos
+  then sends `POST /Library/Media/Updated` naming the finished files in Jellyfin's own spelling,
+  and only the containing folder is rescanned. The longest matching source prefix wins. Anything
+  the map does not cover, and any request Jellyfin does not accept, falls back to the global scan,
+  so a wrong map costs latency and never silence. Note the trade-off: the targeted call is handled
+  by Jellyfin's library monitor, which waits out its own `LibraryMonitorDelay` (60 s by default)
+  before it scans, whereas a global scan starts within a second or two. Leave the map unset unless
+  full scans are actually costing you something.
+
+`GET /healthz` reports `components.jellyfin` with `mode` (`global_scan` or `media_updated`),
+`last_request_at`, `last_status` (the HTTP code Jellyfin returned) and the usual
+`runs_total` / `failures_total`. `mode` and `last_status` together are how you tell a working
+sync from one that is being politely accepted and ignored.
 
 ## The web UI
 
@@ -152,6 +183,21 @@ Start from the two worked examples in **[`plugins/examples/`](plugins/examples/)
 **§13.4** for the `[[hook]]` manifest. A manifest that fails to parse degrades that one plugin with
 a reason surfaced in `GET api/v2/providers` and `healthz.plugin_warnings`; it never fails the
 startup and never fails silently.
+
+### Coming from MeTube-POT's Jellyfin sync
+
+MeTube called `POST /Library/Refresh` unconditionally and never read `JELLYFIN_LIBRARY_ID`, so
+carrying your env file across changes nothing about which endpoint gets called: aulos calls the
+same one. Two notes for anyone who read the earlier cutover note or the earlier docs:
+
+- **Unsetting `JELLYFIN_LIBRARY_ID` is no longer necessary.** Between the cutover and 2026-09-06 a
+  set id put aulos on `POST /Items/{id}/Refresh`, which cannot discover a new file and answers
+  `204` while doing nothing — downloads landed on disk and never appeared. That path is gone; the
+  id is inert and merely warns. If you unset it as a workaround, you can leave it unset or put it
+  back, it makes no difference now.
+- **Set `JELLYFIN_PATH_MAP` if you want a targeted scan**, per the Jellyfin section above. That is
+  the only supported way to narrow the work, and it needs the paths as Jellyfin sees them — which,
+  in the usual compose, are not the paths aulos writes to.
 
 ## Importing legacy MeTube state
 

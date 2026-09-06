@@ -3367,22 +3367,74 @@ nothing to do — while emitting no log line at any level. A hook of the *other*
 it was never offered the event. An out-of-tree hook that implements only `applies()` is still
 counted, with the generic reason `it does not apply to this item`.
 
-### 13.1 Jellyfin refresh, debounced and targeted
+### 13.1 Jellyfin library scan, debounced and optionally targeted
+
+> **Rewritten 2026-09-06 after a production regression.** The previous version of this section
+> specified a targeted `POST /Items/{id}/Refresh` when `JELLYFIN_LIBRARY_ID` is set. That endpoint
+> **cannot discover a file Jellyfin has never seen** — it refreshes metadata for an existing item —
+> and it answers `204 No Content` for the no-op, so the fallback (gated on the call being
+> *rejected*) never fired and no aulos-era download was ever indexed for two days.
+> `docs/reference/jellyfin-refresh-experiment.md` measures every candidate mechanism against
+> Jellyfin 10.10.7 and 12.0.0; this section is derived from it, not from the Jellyfin docs.
 
 - Each completion arms/extends an `AULOS_JELLYFIN_DEBOUNCE_SECS` (30) trailing timer, but the fire
   time is **capped** at `first_at + AULOS_JELLYFIN_MAX_WAIT_SECS` (300), so a 500-item playlist
-  still refreshes every 5 minutes instead of only at the very end. A plain trailing-edge debounce
-  would make a long playlist invisible in Jellyfin for hours.
+  still scans every 5 minutes instead of only at the very end. A plain trailing-edge debounce
+  would make a long playlist invisible in Jellyfin for hours. Unchanged, and it is why a playlist
+  of 50 items produces one scan.
 
-| Condition | Request |
-|---|---|
-| `JELLYFIN_LIBRARY_ID` empty | `POST {base}/Library/Refresh` — legacy behaviour, refreshes all libraries |
-| `JELLYFIN_LIBRARY_ID` set | `POST {base}/Items/{id}/Refresh?metadataRefreshMode={JELLYFIN_METADATA_REFRESH_MODE}&imageRefreshMode={JELLYFIN_IMAGE_REFRESH_MODE}&replaceAllMetadata=false&replaceAllImages=false` — the targeted refresh BRIEF §13 asks for |
+**What actually discovers a new file** (measured, both versions):
 
-- Headers `Accept: application/json`, `Authorization: MediaBrowser Token="<key>"`, no body,
-  timeout `JELLYFIN_SYNC_TIMEOUT_SECONDS`. A targeted refresh returning 400/404 falls back **once**
-  to the global `/Library/Refresh` and logs a WARN naming the bad library id — a mistyped
-  `JELLYFIN_LIBRARY_ID` must not silently disable sync.
+| Mechanism | Status | Time to appear |
+|---|---|---|
+| `POST /Items/{id}/Refresh` (± `&recursive=true`, which is not in the schema) | `204` | **never** |
+| `POST /Library/Refresh` | `204` | ~1 s |
+| `POST /Library/Media/Updated` with a path Jellyfin knows | `204` | up to the server's `LibraryMonitorDelay` (60 s default) |
+| `POST /Library/Media/Updated` with a path it does not know | `204` | never |
+
+Filtering both versions' OpenAPI for operations that scan or refresh leaves exactly one whose
+summary is "Starts a library scan" — `POST /Library/Refresh`, **with no parameters at all**. There
+is no per-library scan endpoint on any Jellyfin, so a library id cannot scope discovery; the web
+UI's own per-library "Scan library" button has nothing else to call either.
+
+**The two modes:**
+
+| Condition | Request | `mode` |
+|---|---|---|
+| default, and whenever the targeted mode does not apply | `POST {base}/Library/Refresh`, no body — byte-identical to legacy `jellyfin_sync.py` | `global_scan` |
+| `JELLYFIN_PATH_MAP` set **and** it covers every path the batch produced | `POST {base}/Library/Media/Updated` with body `{"Updates":[{"Path":"<mapped>","UpdateType":"Created"},…]}`, one entry per produced file, in batch order | `media_updated` |
+
+- **`JELLYFIN_LIBRARY_ID` is accepted and inert.** When it is set the hook logs one WARN at boot
+  saying the id cannot scope discovery and that `JELLYFIN_PATH_MAP` is the way to get a targeted
+  scan, adds `library_id_ignored: true` to its `healthz` detail, and requests a global scan
+  regardless. `JELLYFIN_METADATA_REFRESH_MODE` and `JELLYFIN_IMAGE_REFRESH_MODE` only ever
+  parameterised the item-metadata refresh, which aulos no longer issues, so they are inert too.
+  All three keep parsing and validating, so no deployment fails to boot over them.
+- **`JELLYFIN_PATH_MAP` is opt-in and exists because the targeted call is addressed by path.**
+  aulos and Jellyfin see the same media through different mounts (`/downloads` here,
+  `/data/videos` there), so the notification needs the translation and is useless without it.
+  Syntax: comma-separated `aulos_prefix=jellyfin_prefix` pairs, longest source prefix wins, a
+  prefix matches only at a path-component boundary. A blank half is dropped with a WARN.
+- **The fallback is never gated on a status class.** The hook falls back to the global scan on
+  **any** non-2xx *and* on any transport failure *and* whenever the map does not cover a path the
+  batch produced — with a WARN naming the uncovered path. A partially covered batch takes the
+  global scan whole, because a global scan is a superset of the notification it would replace.
+  Cancellation is the one non-fallback: shutdown is not a Jellyfin problem.
+  The reason for this shape is the bug: `204` is Jellyfin's answer for a no-op, so "the call was
+  rejected" is a condition that does not occur, and a fallback waiting for it waits forever.
+- Headers `Accept: application/json`, `Authorization: MediaBrowser Token="<key>"`, plus
+  `Content-Type: application/json` in `media_updated` mode; timeout `JELLYFIN_SYNC_TIMEOUT_SECONDS`
+  per attempt.
+- **Log lines say what was requested, not what was refreshed.** `requested a Jellyfin library scan
+  (global)` and `requested a Jellyfin library scan (paths=N via Media/Updated)`, each carrying the
+  HTTP status. All the call establishes is that Jellyfin accepted the request; whether the scan
+  then found the file is Jellyfin's business, and the old line's claim of success is what kept the
+  regression invisible.
+- **No post-scan verification poll, deliberately.** In `media_updated` mode nothing can appear for
+  a whole `LibraryMonitorDelay` (60 s by default), so a poll a few seconds later would WARN on
+  every healthy scan, and a poll long enough to be correct would hold the hook for over a minute
+  per batch. The honest `mode` / `last_status` / `last_request_at` fields carry the observability
+  instead — enough to tell a working deployment from a no-op from `/healthz` alone.
 - Legacy error message shapes are preserved verbatim, all four of them:
 
 | Condition | Message (byte-identical to legacy) |
@@ -3400,8 +3452,16 @@ counted, with the generic reason `it does not apply to this item`.
   boot** at WARN, sets `healthz.components.jellyfin` to `degraded` with that message as `detail`
   for the life of the process, `applies()` returns `false`, and every completion is a silent no-op.
   The message text is unchanged; only its delivery is fixed.
-- Retries: 3 attempts, 2 s / 8 s backoff, then give up until the next completion.
-- `healthz.components.jellyfin` reports `{status, last_success_at, last_error, pending}`.
+- Retries: 3 attempts, 2 s / 8 s backoff, then give up until the next completion. With the
+  targeted mode armed the hook's own `timeout()` budgets **two** such rounds — the notification and
+  the global scan it may fall back to — so the dispatcher's outer bound can never cut the fallback
+  off, which would be the original failure in a new costume.
+- `healthz.components.jellyfin` reports `{status, last_success_at, last_error, pending}` plus
+  `mode` (`global_scan` | `media_updated` — the mode the **last** request used, or the configured
+  one before there has been a request), `last_request_at` (unix ms) and `last_status` (the HTTP
+  code, `null` when the request never got one), and `library_id_ignored: true` when
+  `JELLYFIN_LIBRARY_ID` is set. These exist because a hook asking the wrong endpoint and a hook
+  asking the right one used to report byte-identical health.
 
 ### 13.2 NFO generation (now actually wired)
 
@@ -4206,7 +4266,7 @@ adding a row.
 | `aulos_hook_runs_total` | counter | `hook`, `outcome` | `components.<hook>.runs_total` (one component per built-in hook: `jellyfin`, `nfo`, `audio_sync`; `hook:<dir>/<id>` for a community hook) | §13 |
 | `aulos_hook_writebacks_total` | counter | `hook`, `kind` (`size`/`drop_entry_blob`) | — | §13.3 — engine-mediated hook writes |
 | `aulos_hook_seconds` | histogram | `hook` | — | |
-| `aulos_jellyfin_refreshes_total` | counter | `mode` (`global`/`targeted`), `outcome` | `components.jellyfin` | §13.1 |
+| `aulos_jellyfin_refreshes_total` | counter | `mode` (`global_scan`/`media_updated`), `outcome` | `components.jellyfin` | §13.1 |
 | `aulos_subscription_checks_total` | counter | `outcome` | `components.subscriptions` | §14.2 |
 | `aulos_subscription_items_queued_total` | counter | — | — | |
 | `aulos_subscriptions_failing` | gauge | — | `components.subscriptions.failing` | |
@@ -4373,9 +4433,10 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `JELLYFIN_URL` | `''` | str (trailing `/` stripped) | | L |
 | `JELLYFIN_API_KEY` | `''` | secret str | redacted everywhere | L |
 | `JELLYFIN_SYNC_TIMEOUT_SECONDS` | `20` | float (invalid ⇒ warn + 20) | | L |
-| `JELLYFIN_LIBRARY_ID` | `''` | str | **now implemented**: targeted `Items/{id}/Refresh` | L\* |
-| `JELLYFIN_METADATA_REFRESH_MODE` | `Default` | `None\|ValidationOnly\|Default\|FullRefresh` | **now implemented** | L\* |
-| `JELLYFIN_IMAGE_REFRESH_MODE` | `Default` | same set | **now implemented** | L\* |
+| `JELLYFIN_LIBRARY_ID` | `''` | str | **accepted and inert** — Jellyfin has no per-library scan endpoint, so an id cannot scope discovery. Setting it logs one boot WARN and adds `library_id_ignored` to `healthz`; the scan is global regardless (§13.1) | L |
+| `JELLYFIN_PATH_MAP` | `''` | comma list of `aulos_prefix=jellyfin_prefix` | **new**: opt-in targeted mode over `POST /Library/Media/Updated`, addressed by path as Jellyfin sees it. Longest source prefix wins; a prefix matches only at a component boundary; an uncovered path falls back to the global scan (§13.1) | N |
+| `JELLYFIN_METADATA_REFRESH_MODE` | `Default` | `None\|ValidationOnly\|Default\|FullRefresh` | parsed and validated, but **inert**: it only ever parameterised the item-metadata refresh aulos no longer issues (§13.1) | L |
+| `JELLYFIN_IMAGE_REFRESH_MODE` | `Default` | same set | same — parsed, validated, inert | L |
 | `TELEGRAM_BOT_ENABLED` | `false` | bool | | L |
 | `TELEGRAM_BOT_TOKEN` | `''` | secret str | empty ⇒ the bot logs an error and does not start | L |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | `''` | comma list of i64 | empty ⇒ the bot refuses to start (kept) | L |
@@ -4658,7 +4719,9 @@ services:
       JELLYFIN_SYNC_ENABLED: "true"
       JELLYFIN_URL: http://jellyfin:8096
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
-      JELLYFIN_LIBRARY_ID: ${JELLYFIN_LIBRARY_ID}
+      # JELLYFIN_LIBRARY_ID is inert (§13.1). For a targeted scan, map aulos paths to
+      # the paths Jellyfin sees instead:
+      # JELLYFIN_PATH_MAP: /downloads=/data/videos
       TELEGRAM_BOT_ENABLED: "true"
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
@@ -4900,7 +4963,7 @@ curl -fsS localhost:8081/history | jq 'keys'
 | Integration — API | in-process `axum::Router` + `reqwest` + `tokio-tungstenite` | every v2 endpoint request/response shape (`insta`); the full WS frame sequence for each §21 sequence; `?since=` delta vs snapshot vs `UpToDate`; a `since` above head after a simulated restart; ETag/304; the error envelope for every code. The whole suite runs **twice**, with `URL_PREFIX=/` and `URL_PREFIX=/metube/` |
 | **Contract — v1 shim** | recorded legacy responses | The highest-value tests. `tests/v1_golden/` holds request/response pairs captured from the running Python server, replayed against the shim and compared field-by-field modulo an allow-list of documented deltas. Plus a JSON-Schema check generated by `aulos-server print-schema` run against `/history`, `/version` and `/add` — i.e. the shipped Swift models' expectations, mechanically. **The three checked-in corpora — `tests/v1_golden/`, `crates/aulos-provider-ytdlp/tests/golden/{formats,opts}.json`, and the `Normalizer` vectors — are produced by a named deliverable, PLAN WP-00**, with a `MANIFEST.json` recording the legacy commit (`fd35a66`), the image digest and the capture date. They are the sole mitigation for R1 and R21, so an unowned corpus is an unmitigated top risk |
 | **Consistency** | `stress_consistency` | Reconstruct the client's state **purely from the frame stream** (`snapshot` + every subsequent frame, applying the documented delta semantics) and assert equality against the authoritative snapshot every 5 s under load. This is the only test that catches a desynced delta, and it is non-negotiable |
-| Integration — hooks | `wiremock` + real ffmpeg on a 2 s generated clip | debounce coalescing and the `max_wait` cap; targeted vs global Jellyfin refresh; the 404 fallback; NFO XML snapshots for movie and episode; the audio-sync round trip and the "a hook failure never fails the item" invariant; `[[hook]]` http and command templates including `{count}` batching |
+| Integration — hooks | `wiremock` + real ffmpeg on a 2 s generated clip | debounce coalescing and the `max_wait` cap; the global Jellyfin scan that is the default; the `Media/Updated` body shape; the fallback on an uncovered path and on any non-2xx; the `mode`/`last_status` health detail; NFO XML snapshots for movie and episode; the audio-sync round trip and the "a hook failure never fails the item" invariant; `[[hook]]` http and command templates including `{count}` batching |
 | Integration — subscriptions | fake provider + paused time | backfill suppression; `is_live` re-queue; the backoff curve and cap; the concurrency cap; `next_due` persistence across a simulated restart; the single-video rejection counting as a failure |
 | Integration — plugins | the shipped example + `wiremock` | end-to-end resolve+download; every manifest rejection reason; a deliberately hostile plugin (infinite stdout, `sleep 1d`, a 1 GiB write) asserts each limit fires |
 | Property | `proptest` | percent monotonicity; `ItemView` serialisation never omits a key; the resume merge is equivalent to sequential application; `resolve(token)` never returns an id twice |
@@ -5531,7 +5594,7 @@ number is the row in Appendix B) · **✗** dropped, BRIEF out of scope.
 | A reload failure silently discarding the file's contribution | last-good options kept | Δ C20 |
 | `frontend_safe()` 8 keys, two emitted as strings | `api/v2/capabilities.config` (numbers) + the v1 shim (strings) | K\* / Δ C1 |
 | Env vars outside `_DEFAULTS` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `METUBE_VERSION`, `PUID`…) | §17.3 | K |
-| `JELLYFIN_LIBRARY_ID` / `*_REFRESH_MODE` silently ignored | `hooks::jellyfin`, §13.1 | Δ C11 |
+| `JELLYFIN_LIBRARY_ID` / `*_REFRESH_MODE` silently ignored | still inert, but **said out loud**: one boot WARN and a `healthz` flag, because no Jellyfin can scope a scan to a library (§13.1) | Δ C11 |
 | Pre-config `basicConfig`, third-party dampening, DEBUG ⇒ yt-dlp verbose | §16.5; DEBUG sets `verbose:true` in the runner job | K\* |
 | 5 s memoised `get_custom_dirs()` recursive glob on the event loop | `api/v2/custom-dirs`: same exclusion regex, walk on `spawn_blocking`, 30 s cache, `AULOS_CUSTOM_DIRS_MAX_DEPTH` | Δ C24 |
 
@@ -5628,7 +5691,7 @@ number is the row in Appendix B) · **✗** dropped, BRIEF out of scope.
 | `auto_start is True` comparison | accepts booleans and boolean strings | Δ C10 |
 | `start_pending` / `cancel` / `clear` semantics | `Start` / `Cancel` / `Delete` | K\* |
 | `DELETE_FILE_ON_TRASHCAN` deletes only `filename` | also chapter/subtitle/`.info.json`/`.nfo` | Δ C19 |
-| Jellyfin fired once per finished download | debounced, capped, optionally targeted | Δ C11 |
+| Jellyfin fired once per finished download | debounced, capped, and optionally targeted via `JELLYFIN_PATH_MAP` | Δ C11 |
 | ffmpeg PP timeout `max(600, ceil(dur/2))`, 1800 unknown | `hooks::audio_sync` | K |
 
 ### A.6 `dl_formats` (spec §6)
@@ -5703,7 +5766,7 @@ All of spec §9 is **K** (§10 lists the module per step) except:
 | Legacy | Here | |
 |---|---|---|
 | `POST {base}/Library/Refresh`, `MediaBrowser Token`, no body, the exact error message shapes | `hooks::jellyfin` | K |
-| Refreshes all libraries; `JELLYFIN_LIBRARY_ID` inert | targeted `Items/{id}/Refresh` when set, with a one-shot fallback and a WARN | Δ C11 |
+| Refreshes all libraries; `JELLYFIN_LIBRARY_ID` inert | the same global `/Library/Refresh` (legacy parity — it is the only endpoint that discovers a new file), plus an opt-in targeted `/Library/Media/Updated` mode behind `JELLYFIN_PATH_MAP` | Δ C11 |
 | One refresh per finished download | 30 s debounce with a 300 s cap | Δ C11 |
 | `jellyfin_nfo_generator.py`: an unwired CLI that deletes the `.info.json` it consumes | an in-process hook for SC items, reading the in-memory entry; deletion opt-in | Δ C9 |
 | `audio_sync_fix.py` as an `Exec` PP at a hard-coded container path | an in-process hook with a `postprocessing` status, real progress, and a failure that does not fail the item | Δ C9 |
@@ -5746,7 +5809,7 @@ yt-dlp bump automation hardened (§18.5).
 | C8 | Subscriptions: per-subscription timers, first check ~10 s after boot with jitter, bounded concurrency, `last_checked` always updated, exponential backoff to 6 h, `check` returns immediately. | A dead feed stops hammering YouTube every 60 seconds forever; a fresh boot picks up new videos immediately instead of a minute later; one slow feed can no longer hang an HTTP request or block every other subscription. |
 | C9 | NFO generation and the audio-sync re-encode run in-process, ordered, with a `postprocessing` status and progress; a hook failure never fails the item. | NFOs actually get written (the legacy script was never wired), and a failed audio-sync no longer makes a perfectly good download report as an error. |
 | C10 | `auto_start` accepts boolean strings. | An iOS Shortcut sending `"true"` no longer has its download silently parked in *pending*. |
-| C11 | Jellyfin: 30 s debounce with a 300 s cap, and a targeted library refresh when `JELLYFIN_LIBRARY_ID` is set; the three documented-but-inert env vars now work. | A 500-item playlist triggers a handful of scans instead of 500 full-library ones, and only rescans the library that changed — minutes instead of hours of Jellyfin CPU. |
+| C11 | Jellyfin: 30 s debounce with a 300 s cap, and an opt-in targeted `/Library/Media/Updated` scan behind `JELLYFIN_PATH_MAP`. | A 500-item playlist triggers a handful of scans instead of 500 full-library ones. **Amended 2026-09-06:** the original form of this delta — a targeted `Items/{id}/Refresh` keyed on `JELLYFIN_LIBRARY_ID` — was a regression, not an improvement: that endpoint cannot discover a new file. See §13.1 and `docs/reference/jellyfin-refresh-experiment.md`. |
 | C12 | `CLEAR_COMPLETED_AFTER` survives restarts and applies to items aged out of memory. | The setting finally means what it says. |
 | C13 | Terminal handling and hooks run outside the download slot. | The next download starts immediately instead of waiting for a disk-touching cleanup. |
 | C14 | Cancel is SIGTERM to the process group, then SIGKILL, with full partial cleanup. | No more orphaned ffmpeg / N_m3u8DL-RE processes eating CPU after a cancel, and no more stray `.part` files. |

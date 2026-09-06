@@ -2529,3 +2529,72 @@ DESIGN/PROTOCOL, and why. Everything not listed here matches.
 - **`tools/web/screenshots/` is gitignored on purpose.** The five artboard-comparison screenshots
   are regenerated on every smoke run and uploaded by CI's `web` job as the `web-screenshots`
   artifact; binaries that change on every run do not belong in the repository.
+
+## Production bug — Jellyfin discovery (2026-09-06)
+
+- **The previous behaviour was a regression, and this is the plainest way to say it.** Between the
+  MeTube cutover and today, a set `JELLYFIN_LIBRARY_ID` made the hook call
+  `POST /Items/{id}/Refresh`. That endpoint refreshes metadata for an item Jellyfin already has;
+  a file that has just landed on disk has no item, so it cannot be found by it — filesystem
+  discovery is not something it does, by design. **No aulos-era download was ever indexed.** The
+  cutover note advertised "`JELLYFIN_LIBRARY_ID` is now actually used" as an improvement; honouring
+  the variable is precisely what moved the deployment onto the broken path, and MeTube's ignoring
+  it is why MeTube worked. DESIGN §13.1 and the C11 delta row are amended accordingly.
+- **The failure was invisible because `204 No Content` is Jellyfin's answer for the no-op.** The
+  fallback to the global scan was gated on the targeted call being *rejected* (400/404). A call
+  that succeeds at doing nothing is never rejected, so the fallback never fired, `failures_total`
+  stayed `0`, `status` stayed `"ok"`, and the log line read "refreshed the targeted Jellyfin
+  library". **Never gate a fallback on a status class when the no-op has a success status.** The
+  new code falls back on any non-2xx, on any transport failure, and on an uncovered path; the only
+  thing that does not fall back is cancellation, which is shutdown rather than a Jellyfin problem.
+- **The facts were established empirically before anything was written**, because the API's
+  behaviour here is not what its shape suggests: `docs/reference/jellyfin-refresh-experiment.md`
+  runs throwaway Jellyfin 10.10.7 and 12.0.0 containers, drops a fresh `ffmpeg`-generated mp4 per
+  trial, fires exactly one endpoint and records the status and the time-to-appear. The
+  `CollectionFolder` id the containers produced — `ca4fc2dadb00fcd7e929d2d0a49151b8` — came out
+  byte-identical to the reporter's `JELLYFIN_LIBRARY_ID`, because the id is a deterministic hash
+  of the library path. That independently rules out the mistyped-id theory the old 400/404 fallback
+  was written for: the id was always real, and the endpoint was always wrong.
+- **There is no per-library scan endpoint on any Jellyfin, so `JELLYFIN_LIBRARY_ID` cannot be
+  rescued.** Filtering both versions' OpenAPI for scan/refresh operations leaves exactly one whose
+  summary is "Starts a library scan" — `POST /Library/Refresh`, with **no parameters at all**. The
+  `&recursive=true` the web UI was suspected of sending is not in the schema either; the server
+  accepts the unknown query parameter, ignores it, and returns the same useless `204`. So the
+  variable is kept (nobody's deployment should fail to boot over it), warned about once at boot,
+  flagged as `library_id_ignored` in `/healthz`, and otherwise ignored. `JELLYFIN_METADATA_REFRESH_MODE`
+  and `JELLYFIN_IMAGE_REFRESH_MODE` go inert with it: they only ever parameterised the request
+  aulos no longer issues.
+- **`JELLYFIN_PATH_MAP` ships because `Library/Media/Updated` is addressed by path, not by id.**
+  It is the one targeted mechanism that does index a new file (measured: 60 s and 61 s, on two
+  versions, on a repeat run). The 60 s is not ours — `GET /System/Configuration` reports
+  `LibraryMonitorDelay = 60` on both versions, and the server log says
+  `LibraryMonitor: tube (/media/tube) will be refreshed`, so the notification is coalesced by
+  Jellyfin's own monitor before it scans. That latency is why the mode is opt-in rather than the
+  default: a global scan starts in about a second.
+- **A wrong path map has exactly the failure shape of the original bug**, which is the argument for
+  every guard around it. A path in no library returns `204` and does nothing. Hence: the targeted
+  call is attempted only when the map covers **every** path the batch produced (a partially covered
+  batch takes the global scan whole, which is a superset of the notification it replaces); an
+  uncovered path logs a WARN naming the path; and `healthz` carries the `mode` that actually ran,
+  not the one that was configured.
+- **A post-scan verification poll was considered and deliberately not shipped.** In
+  `media_updated` mode nothing can appear for a whole `LibraryMonitorDelay`, so the "one poll a few
+  seconds later" shape would WARN on every healthy scan, and a poll long enough to be correct would
+  hold the hook for over a minute per batch. What ships instead is `mode` + `last_status` +
+  `last_request_at` in the health detail, which is enough to distinguish a working sync from a
+  politely-accepted no-op without a stopwatch or a Jellyfin login — the actual complaint in the
+  report. If verification is wanted later, the cheap robust form is a one-shot boot-time check of
+  the map's Jellyfin-side prefixes against `GET /Library/PhysicalPaths` (present in both versions),
+  not a per-batch poll.
+- **`BatchEntry` gained a `download_type`.** The targeted mode must name every file a debounced
+  batch produced, and `HookCtx::file` only ever describes the representative item; resolving the
+  others needs each entry's download root, which is selected by its own `download_type`. A 50-item
+  playlist that notified Jellyfin about one file would be a subtler version of the same bug.
+- **The hook's `timeout()` now budgets two attempt rounds when the targeted mode is armed**
+  (notification, then the global scan it may fall back to). A budget for one round would let the
+  dispatcher's outer bound cut the fallback off — the original failure in a new costume.
+- **Jellyfin is not in `tests/e2e/run.sh` and was not added to it.** The suite has no Jellyfin
+  container and adding one would make a network-free profile depend on a 500–870 MB image. The
+  replacement is the recorded experiment above, which is reproducible from its own protocol, plus
+  the manual check in the fix report: point a staging aulos at a real Jellyfin, finish one
+  download, and read `components.jellyfin.mode` / `last_status` out of `/healthz`.

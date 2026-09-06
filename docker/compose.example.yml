@@ -43,7 +43,20 @@ services:
       JELLYFIN_SYNC_ENABLED: "true"
       JELLYFIN_URL: http://jellyfin:8096
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
-      JELLYFIN_LIBRARY_ID: ${JELLYFIN_LIBRARY_ID}
+      # A finished download asks Jellyfin for a GLOBAL scan (POST /Library/Refresh), coalesced
+      # over AULOS_JELLYFIN_DEBOUNCE_SECS. It is the only endpoint that discovers a file Jellyfin
+      # has never seen — see docs/reference/jellyfin-refresh-experiment.md.
+      #
+      # JELLYFIN_LIBRARY_ID is accepted but INERT: Jellyfin has no per-library scan, so an id
+      # cannot narrow the work. Setting it logs one boot WARN and nothing else.
+      #
+      # For a genuinely targeted scan, map aulos paths to the paths JELLYFIN sees. Here the same
+      # host directory is /downloads in this container; if the jellyfin container mounts it at
+      # /data/videos, that is:
+      # JELLYFIN_PATH_MAP: /downloads=/data/videos
+      # Comma-separated pairs, longest source prefix wins. Anything unmapped falls back to the
+      # global scan. The targeted call waits out Jellyfin's own LibraryMonitorDelay (60s default),
+      # so it trades latency for less scanning — leave it unset unless full scans cost you.
       TELEGRAM_BOT_ENABLED: "true"
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}

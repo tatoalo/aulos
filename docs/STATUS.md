@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-05 evening (production bug round 3 fixed; web UI shipped). Update this file at every checkpoint.
+Last updated: 2026-09-06 (Jellyfin discovery regression fixed). Update this file at every checkpoint.
 
 ## What this is
 
@@ -179,6 +179,38 @@ engine. One cross-crate fallout fixed by the orchestrator: the API skip-reasons 
 
 Integration by the orchestrator: fmt/clippy clean, `cargo test --workspace` green, image rebuilt,
 `AULOS_E2E=1 tests/e2e/run.sh` → `END-TO-END: PASS` (43 checks).
+
+## Production bug round 4 — Jellyfin never indexed anything (2026-09-06)
+
+Downloads reached `finished` with the file on disk and never appeared in Jellyfin, while
+`/healthz` showed `jellyfin: { failures_total: 0, status: "ok" }` and the log claimed success.
+
+**Cause**: a set `JELLYFIN_LIBRARY_ID` selected `POST /Items/{id}/Refresh`, which refreshes
+metadata for an item Jellyfin already has and cannot discover a new file — and it answers `204`
+for that no-op, so the fallback (gated on the call being *rejected*) never fired. MeTube ignored
+the variable and always called `/Library/Refresh`, which is why MeTube worked; "the id is now
+actually used" was the regression, not an improvement.
+
+**Established empirically first** — `docs/reference/jellyfin-refresh-experiment.md`: throwaway
+Jellyfin 10.10.7 and 12.0.0 containers, one endpoint per trial against a fresh mp4.
+`/Items/{id}/Refresh` (± `&recursive=true`) never indexes; `/Library/Refresh` indexes in ~1 s;
+`/Library/Media/Updated` indexes after the server's `LibraryMonitorDelay` (60 s default). Neither
+version has a per-library scan endpoint at all.
+
+**Fix** (`0378b0d` experiment, `35a4805` code, docs commit below):
+- The default is `POST /Library/Refresh` on every completion again, debounce unchanged.
+- `JELLYFIN_LIBRARY_ID` is accepted but inert: one boot WARN, `library_id_ignored` in `/healthz`,
+  global scan regardless. `JELLYFIN_*_REFRESH_MODE` go inert with it.
+- New `JELLYFIN_PATH_MAP` (`/downloads=/data/videos`, comma-separated, longest prefix wins) is the
+  opt-in targeted mode over `/Library/Media/Updated`. Falls back to the global scan on any non-2xx
+  and on any path it does not cover — never on a status class, since `204` is the no-op's answer.
+- Log lines say what was *requested*; `components.jellyfin` carries `mode`, `last_request_at` and
+  `last_status`. No verification poll: in targeted mode nothing can appear for a whole
+  `LibraryMonitorDelay`, so a short poll would warn on every healthy scan.
+
+Jellyfin is deliberately **not** in `tests/e2e/run.sh` (no container, and it would put an 870 MB
+image behind a network-free profile). The manual check is: finish one download against a real
+Jellyfin, then read `components.jellyfin.mode` and `last_status` from `/healthz`.
 
 ## Production bug round 3 + the web UI (2026-09-05, after the VPS cutover)
 
