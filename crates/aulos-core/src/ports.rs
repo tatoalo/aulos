@@ -1,6 +1,7 @@
-//! Cross-crate seams: the [`HookStore`] port, [`HookPhase`] and [`FieldUpdate`].
+//! Cross-crate seams: the [`HookStore`] and [`DeviceStore`] ports, [`HookPhase`] and
+//! [`FieldUpdate`].
 //!
-//! These three types are declared here because they are the *vocabulary* two crates share without
+//! These types are declared here because they are the *vocabulary* two crates share without
 //! either depending on the other:
 //!
 //! - `aulos-hooks` reaches item state through [`HookStore`] and nothing else, so it needs neither
@@ -11,11 +12,14 @@
 //! - [`HookPhase`] is read by the engine and declared by hooks.
 //! - [`FieldUpdate`] is the one three-state patch convention every nullable `WriteOp` column uses
 //!   (DESIGN §7.1); it is named in signatures by `aulos-store`, `aulos-queue` and their tests.
+//! - [`DeviceStore`] is how the APNs notifier (`aulos-apns`, DESIGN §25) reads and prunes device
+//!   registrations without depending on `aulos-store`; `aulos-store` implements it and `aulos-api`
+//!   writes registrations through it.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
-use crate::id::ItemId;
+use crate::id::{ItemId, UnixMs};
 use crate::item::EntryBlob;
 
 /// When a hook runs relative to the terminal status write (DESIGN §13).
@@ -165,6 +169,126 @@ pub trait HookStore: Send + Sync {
     /// # Errors
     /// [`PortError`] if the row is gone or the write could not be applied.
     async fn set_size(&self, id: ItemId, size: u64) -> Result<(), PortError>;
+}
+
+/// Which APNs gateway a device's tokens belong to (DESIGN §25).
+///
+/// A token minted by a Debug/simulator build is only valid against the sandbox gateway, a
+/// TestFlight/App Store token only against production; the app reports which it is at
+/// registration and the notifier routes each push accordingly.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApnsEnvironment {
+    /// `api.sandbox.push.apple.com`.
+    Sandbox,
+    /// `api.push.apple.com`.
+    Production,
+}
+
+impl ApnsEnvironment {
+    /// The lowercase wire spelling, as the app sends it and the store persists it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::Production => "production",
+        }
+    }
+}
+
+/// One registered device: `PUT api/v2/devices/{token}` (PROTOCOL §4.8, DESIGN §25).
+///
+/// `token` is the lowercase-hex APNs device token and the natural key. `live_activity_start_token`
+/// is the Live Activity push-to-start token (iOS 17.2+), present only when the device offered one.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    /// Lowercase hex APNs device token; the key.
+    pub token: Box<str>,
+    /// `"ios"` today.
+    pub platform: Box<str>,
+    /// The app's bundle id, which is also the `apns-topic`.
+    pub bundle_id: Box<str>,
+    /// Which gateway the token belongs to.
+    pub environment: ApnsEnvironment,
+    /// Whether completion/failure alerts are wanted.
+    pub alerts: bool,
+    /// The Live Activity push-to-start token, when offered.
+    pub live_activity_start_token: Option<Box<str>>,
+    /// Free-form app version string, for logs.
+    pub app_version: Option<Box<str>>,
+    /// When the token was first registered.
+    pub registered_at: UnixMs,
+    /// When the registration was last refreshed.
+    pub last_seen_at: UnixMs,
+}
+
+/// One live Live Activity: the update token a device forwarded for one item
+/// (`PUT api/v2/devices/{token}/live-activities/{item_id}`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LiveActivityRecord {
+    /// The owning device's token (a [`DeviceRecord::token`]).
+    pub device_token: Box<str>,
+    /// The item the activity tracks.
+    pub item_id: ItemId,
+    /// The activity's push-to-update token, lowercase hex. Rotates; the app re-forwards it.
+    pub update_token: Box<str>,
+    /// Copied from the device at registration, so a push needs no join.
+    pub environment: ApnsEnvironment,
+    /// When the token was (last) forwarded.
+    pub registered_at: UnixMs,
+}
+
+/// Device and Live Activity registrations, as the APNs notifier sees them (DESIGN §25).
+///
+/// Implemented by `aulos-store`; `aulos-api` writes through it and `aulos-apns` reads and prunes
+/// through it. Removals are idempotent: removing an unknown token is `Ok(())`, because APNs tells
+/// the notifier about dead tokens (`410 Unregistered`) that the app may already have deleted.
+#[async_trait::async_trait]
+pub trait DeviceStore: Send + Sync {
+    /// Inserts or refreshes a device; a repeat `PUT` updates every field but `registered_at`.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the write could not be applied.
+    async fn upsert_device(&self, device: DeviceRecord) -> Result<(), PortError>;
+
+    /// Forgets a device and every Live Activity registered under it. Idempotent.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the write could not be applied.
+    async fn remove_device(&self, token: &str) -> Result<(), PortError>;
+
+    /// Every registered device.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the read failed.
+    async fn devices(&self) -> Result<Vec<DeviceRecord>, PortError>;
+
+    /// Inserts or refreshes a Live Activity registration, keyed on `(device_token, item_id)`.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the write could not be applied.
+    async fn upsert_live_activity(&self, activity: LiveActivityRecord) -> Result<(), PortError>;
+
+    /// Forgets one Live Activity registration. Idempotent.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the write could not be applied.
+    async fn remove_live_activity(&self, device_token: &str, item: ItemId)
+    -> Result<(), PortError>;
+
+    /// The Live Activity registrations that track `item`, across devices.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the read failed.
+    async fn live_activities_for(&self, item: ItemId)
+    -> Result<Vec<LiveActivityRecord>, PortError>;
+
+    /// Forgets every Live Activity registration for `item` (after the final `end` push, or when
+    /// the item is deleted). Idempotent.
+    ///
+    /// # Errors
+    /// [`PortError::Store`] if the write could not be applied.
+    async fn remove_live_activities_for(&self, item: ItemId) -> Result<(), PortError>;
 }
 
 /// What can go wrong on a port call.

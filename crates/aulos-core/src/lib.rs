@@ -87,7 +87,10 @@ pub use health::{ComponentHealth, ComponentStatus, HealthRegistry, HealthView};
 pub use id::{BootId, GroupId, HiLoAllocator, IdError, ItemId, Ord0, Seq, SubId, UnixMs};
 pub use item::{EntryBlob, FileRef, FileSlot, Item, ItemView, Kind, ViewExtras};
 pub use paths::{PathError, Paths, RelDir, RelPath, contain, sanitize_path_component};
-pub use ports::{FieldUpdate, HookPhase, HookStore, PortError};
+pub use ports::{
+    ApnsEnvironment, DeviceRecord, DeviceStore, FieldUpdate, HookPhase, HookStore,
+    LiveActivityRecord, PortError,
+};
 pub use prefix::{Prefix, PrefixFixup};
 pub use progress::{ACTIVE_CEILING, Normalizer, PhaseTag, ProgressCell, RawProgress};
 pub use reload::{ReloadFailure, ReloadReport};
