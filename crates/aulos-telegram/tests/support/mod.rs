@@ -58,6 +58,7 @@ pub struct HarnessBuilder {
     env: Vec<(String, String)>,
     tg: Option<TelegramConfig>,
     allowed: Vec<i64>,
+    parked: bool,
 }
 
 impl Default for HarnessBuilder {
@@ -66,6 +67,7 @@ impl Default for HarnessBuilder {
             env: Vec::new(),
             tg: None,
             allowed: vec![CHAT, OTHER_CHAT],
+            parked: false,
         }
     }
 }
@@ -88,6 +90,17 @@ impl HarnessBuilder {
     #[must_use]
     pub fn allowed(mut self, ids: Vec<i64>) -> Self {
         self.allowed = ids;
+        self
+    }
+
+    /// Downloads that never finish, so an added item stays **live**.
+    ///
+    /// The dedupe index only holds non-terminal rows (DESIGN §8.5), and `EchoProvider` otherwise
+    /// completes a download before the next statement runs — which would make any test about
+    /// re-adding a queued URL a race against the engine's own tasks.
+    #[must_use]
+    pub fn parked_downloads(mut self) -> Self {
+        self.parked = true;
         self
     }
 
@@ -122,7 +135,12 @@ impl HarnessBuilder {
         // The real `ytdlp` catalog, so an `audio`/`m4a` selection validates. `FakeProvider`'s own
         // catalog is a two-format stub, which would reject anything the `cfg:` grammar can reach
         // beyond `any`/`best`.
-        registry.register(Arc::new(EchoProvider::new()) as Arc<dyn Provider>);
+        let echo = if self.parked {
+            EchoProvider::parked()
+        } else {
+            EchoProvider::new()
+        };
+        registry.register(Arc::new(echo) as Arc<dyn Provider>);
         let registry = Arc::new(RwLock::new(registry));
 
         let clock = Arc::new(FakeClock::default());
@@ -309,10 +327,19 @@ pub fn tg_view(id: ItemId, title: &str, status: Status, chat: i64) -> ItemView {
 /// An `Added` event for one view.
 #[must_use]
 pub fn added(view: &ItemView) -> DomainEvent {
-    DomainEvent::Added(
-        vec![Arc::new(view.clone())],
+    added_batch(
+        std::slice::from_ref(view),
         aulos_core::event::AddReason::Created,
     )
+}
+
+/// An `Added` event for a whole batch, under the reason its producer would have used.
+///
+/// Boot recovery publishes one event carrying the entire working set under
+/// `AddReason::Recovered` (DESIGN §8.9 step 7), which is a shape no `added()` call can express.
+#[must_use]
+pub fn added_batch(views: &[ItemView], reason: aulos_core::event::AddReason) -> DomainEvent {
+    DomainEvent::Added(views.iter().map(|v| Arc::new(v.clone())).collect(), reason)
 }
 
 /// A `StatusChanged` event for one view.
@@ -337,6 +364,8 @@ pub fn completed(view: &ItemView) -> DomainEvent {
 pub struct EchoProvider {
     id: aulos_provider::ProviderId,
     catalog: Arc<FormatCatalog>,
+    /// Never return from `download`, so the item never reaches a terminal status.
+    parked: bool,
 }
 
 impl EchoProvider {
@@ -345,6 +374,17 @@ impl EchoProvider {
         Self {
             id: aulos_provider::ProviderId::parse("echo").unwrap(),
             catalog: Arc::new(ytdlp_catalog()),
+            parked: false,
+        }
+    }
+
+    /// The same provider, but its downloads never finish. See
+    /// [`HarnessBuilder::parked_downloads`].
+    #[must_use]
+    pub fn parked() -> Self {
+        Self {
+            parked: true,
+            ..Self::new()
         }
     }
 }
@@ -380,6 +420,11 @@ impl Provider for EchoProvider {
         _ctx: aulos_provider::DownloadCtx<'_>,
         _sink: aulos_provider::ProgressSink,
     ) -> Result<aulos_provider::Outcome, aulos_provider::ProviderError> {
+        if self.parked {
+            // `pending` rather than a long sleep: it never touches the timer, so a
+            // `start_paused` runtime does not auto-advance around it.
+            std::future::pending::<()>().await;
+        }
         Ok(aulos_provider::Outcome::default())
     }
 }

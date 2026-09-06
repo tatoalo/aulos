@@ -20,7 +20,7 @@ use std::time::Duration;
 use aulos_core::catalog::{BotFormat, FormatCatalog};
 use aulos_core::clock::Clock;
 use aulos_core::config::{Config, TelegramBoard};
-use aulos_core::event::{DomainEvent, EventInbox};
+use aulos_core::event::{AddReason, DomainEvent, EventInbox};
 use aulos_core::id::ItemId;
 use aulos_core::item::{ItemView, Kind};
 use aulos_core::source::{SourceKind, SourceRef};
@@ -43,10 +43,11 @@ use crate::watch::WatchRegistry;
 /// the limiter is what keeps the API calls inside budget.
 pub const TICK: Duration = Duration::from_secs(1);
 
-/// How long a terminal line lingers on the board before it drops (DESIGN §12.4).
-pub const LINGER: Duration = Duration::from_secs(60);
-
-/// How long after the last job ends the board is replaced by its summary (DESIGN §12.4).
+/// How long after the last job ends the board is edited to its closing layout (DESIGN §12.4).
+///
+/// There is no companion "linger" any more: a terminal row keeps its place until the whole board
+/// retires. The ✅ is the receipt for a download the user asked for, and a row that vanished
+/// sixty seconds after it appeared read as the bot losing track of the job.
 pub const RETIRE_AFTER: Duration = Duration::from_secs(60);
 
 /// The `Incoming` channel depth. A full queue means the actor is busy, and Telegram will redeliver.
@@ -214,34 +215,34 @@ impl HealthCell {
     }
 }
 
-/// One job's row plus when it should leave the board.
-#[derive(Clone, Debug)]
-struct BoardEntry {
-    line: JobLine,
-    drop_at: Option<Instant>,
-}
-
 /// One chat's live board (DESIGN §12.1).
+///
+/// One burst of downloads is one message: the rows are inserted when the jobs are added and
+/// nothing but [`Self::message`] is ever sent, so a batch of three links costs exactly one
+/// `sendMessage` and however many edits the limiter allows.
 #[derive(Debug, Default)]
 struct ChatBoard {
     message: Option<MessageId>,
-    jobs: IndexMap<ItemId, BoardEntry>,
+    jobs: IndexMap<ItemId, JobLine>,
     last_rendered: String,
     dirty: bool,
     /// When the last job ended, or `None` while any is still running.
     idle_since: Option<Instant>,
-    finished: usize,
-    failed: usize,
-    canceled: usize,
+    /// Whether a board message was ever sent for this burst.
+    ///
+    /// Distinct from [`Self::message`], which is cleared when Telegram rejects an edit of it: a
+    /// board that never reached a tick retires silently (DESIGN §12.4), whereas one whose message
+    /// died mid-flight is still owed its closing layout.
+    drawn: bool,
 }
 
 impl ChatBoard {
     fn lines(&self) -> Vec<JobLine> {
-        self.jobs.values().map(|e| e.line.clone()).collect()
+        self.jobs.values().cloned().collect()
     }
 
     fn any_active(&self) -> bool {
-        self.jobs.values().any(|e| !e.line.status.is_terminal())
+        self.jobs.values().any(|l| !l.status.is_terminal())
     }
 }
 
@@ -578,6 +579,23 @@ impl TelegramActor {
         // attributable, playlist children included (they inherit the parent's `source`).
         let source = SourceRef::with_ref(SourceKind::Telegram, chat.to_string());
         match self.engine.add(plan.requests, source).await {
+            Ok(outcome) if self.cfg.board == TelegramBoard::Board => {
+                // DESIGN §12.3 step 6, board mode: the board drawn on the next tick **is** the
+                // acknowledgement — it names every link, with a ⏳ against each — so a separate
+                // "Queued N link(s)" text is one message of pure duplication.
+                //
+                // The one exception is a message whose links all matched live items: the board
+                // does not change at all, so silence would be indistinguishable from the bot
+                // having ignored the message.
+                if outcome.ids.is_empty() {
+                    let n = if outcome.duplicates.is_empty() {
+                        count
+                    } else {
+                        outcome.duplicates.len()
+                    };
+                    self.send(chat, &notify::already_queued(n), None).await;
+                }
+            }
             Ok(outcome) => {
                 let queued = count.saturating_sub(outcome.duplicates.len());
                 self.send(chat, &notify::queued(queued.max(outcome.ids.len())), None)
@@ -603,6 +621,23 @@ impl TelegramActor {
 
     async fn on_event(&mut self, event: &DomainEvent) {
         match event {
+            // A restart says nothing until something happens. Boot recovery re-publishes the whole
+            // recovered working set (DESIGN §8.9 step 7) purely to seed the realtime snapshot, and
+            // with `AULOS_TELEGRAM_WATCH_ALL` on by default §12.6 attributes every one of those
+            // rows to every allowed chat — so drawing a board here meant every boot posted the
+            // entire download history into each chat and, 60 s later, edited it into an
+            // "N downloads finished" summary the user had never asked for.
+            //
+            // The watch is still taken for anything not yet terminal: a download the engine
+            // resumes after the restart has to report its completion and its two §12.5 watchdog
+            // warnings, and those go only to chats the watch table knows about. A terminal row is
+            // history — nothing more will ever be published about it — so it is ignored entirely.
+            DomainEvent::Added(views, AddReason::Recovered) => {
+                let now = self.clock.instant();
+                for view in views.iter().filter(|v| !v.status.is_terminal()) {
+                    self.watches.watch(view, now);
+                }
+            }
             DomainEvent::Added(views, _) => {
                 let now = self.clock.instant();
                 for view in views {
@@ -645,7 +680,12 @@ impl TelegramActor {
         }
     }
 
-    /// The two terminal messages of DESIGN §12.5. `canceled` is deliberately silent.
+    /// A job ended.
+    ///
+    /// In `per_job` mode this is the two terminal messages of DESIGN §12.5, `canceled`
+    /// deliberately silent. In board mode it is **no message at all**: the row's glyph becomes
+    /// ✅/❌/🚫 on the next tick, which is the whole point of the board — one batch, one message,
+    /// no flurry of "Download complete" texts behind it (DESIGN §12.4).
     async fn on_completed(&mut self, view: &ItemView) {
         let Some(watched) = self.watches.finish(view.id) else {
             return;
@@ -656,18 +696,18 @@ impl TelegramActor {
         } else {
             Arc::clone(&view.title)
         };
-        let text = match view.status {
-            Status::Finished => Some(notify::finished(&title, view.filename.as_deref())),
-            Status::Error => {
-                let message = view
-                    .msg
-                    .as_deref()
-                    .filter(|m| !m.trim().is_empty())
-                    .or_else(|| view.error.as_ref().map(|e| &*e.message));
-                Some(notify::failed(&title, message))
+        let text = if self.cfg.board == TelegramBoard::Board {
+            None
+        } else {
+            match view.status {
+                Status::Finished => Some(notify::finished(&title, view.filename.as_deref())),
+                Status::Error => {
+                    let reason = failure_reason(view);
+                    Some(notify::failed(&title, reason.as_deref()))
+                }
+                // Parity: a cancellation is silent, the watch is simply dropped.
+                _ => None,
             }
-            // Parity: a cancellation is silent, the watch is simply dropped.
-            _ => None,
         };
 
         for chat in &watched.chats {
@@ -675,20 +715,13 @@ impl TelegramActor {
                 self.send(*chat, text, None).await;
             }
             self.board_upsert(*chat, view);
-            if let Some(board) = self.boards.get_mut(chat) {
-                match view.status {
-                    Status::Finished => board.finished += 1,
-                    Status::Error => board.failed += 1,
-                    _ => board.canceled += 1,
-                }
-                if let Some(entry) = board.jobs.get_mut(&view.id) {
-                    entry.drop_at = Some(now + LINGER);
-                }
-                // The retirement clock starts when the last job ends, not when the last line
-                // finally expires — otherwise the summary is two minutes late.
-                if !board.any_active() && board.idle_since.is_none() {
-                    board.idle_since = Some(now);
-                }
+            // The retirement clock starts when the last job ends. The row itself stays: it is the
+            // user's receipt, and it leaves only with the board.
+            if let Some(board) = self.boards.get_mut(chat)
+                && !board.any_active()
+                && board.idle_since.is_none()
+            {
+                board.idle_since = Some(now);
             }
         }
     }
@@ -709,9 +742,9 @@ impl TelegramActor {
             };
             self.send(warning.chat, &text, None).await;
             if let Some(board) = self.boards.get_mut(&warning.chat)
-                && let Some(entry) = board.jobs.get_mut(&warning.id)
+                && let Some(line) = board.jobs.get_mut(&warning.id)
             {
-                entry.line.mark = Some(warning.kind);
+                line.mark = Some(warning.kind);
                 board.dirty = true;
             }
         }
@@ -720,20 +753,14 @@ impl TelegramActor {
             return;
         }
 
-        // Expire lingering terminal lines, then decide which boards to redraw or retire.
+        // Decide which boards to redraw and which to retire. Nothing is swept: a terminal row
+        // stays on the board until the board itself retires (DESIGN §12.4).
         let mut retire: Vec<i64> = Vec::new();
         let chats: Vec<i64> = self.boards.keys().copied().collect();
         for chat in chats {
             let Some(board) = self.boards.get_mut(&chat) else {
                 continue;
             };
-            let before = board.jobs.len();
-            board
-                .jobs
-                .retain(|_, e| e.drop_at.is_none_or(|at| at > now));
-            if board.jobs.len() != before {
-                board.dirty = true;
-            }
             if board.any_active() {
                 board.idle_since = None;
             } else if board.idle_since.is_none() {
@@ -746,11 +773,20 @@ impl TelegramActor {
                 retire.push(chat);
             }
         }
-        for chat in retire {
-            self.retire(chat).await;
+        for chat in &retire {
+            self.retire(*chat).await;
         }
 
-        let chats: Vec<i64> = self.boards.keys().copied().collect();
+        // A board still here after `retire` is one whose closing edit did not land. It is not
+        // redrawn: its jobs are all over, so a live redraw would only spend the chat's budget on a
+        // header that says "0 active" under a moving clock — and delay the retry the next tick
+        // makes. Every other board gets its redraw.
+        let chats: Vec<i64> = self
+            .boards
+            .keys()
+            .copied()
+            .filter(|c| !retire.contains(c))
+            .collect();
         for chat in chats {
             self.redraw(chat).await;
         }
@@ -796,6 +832,7 @@ impl TelegramActor {
                         board.message = Some(id);
                         board.last_rendered = body;
                         board.dirty = false;
+                        board.drawn = true;
                     }
                 }
                 Err(e) => self.after_failure(chat, &e).await,
@@ -832,12 +869,33 @@ impl TelegramActor {
                     tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
                 }
                 Err(e) => {
+                    // A non-retryable rejection of an *edit* means this message id is unusable —
+                    // the user deleted the board, or the chat lost it — and Telegram maps that to
+                    // `TgError::Api` (see `transport::map_error`). Board mode sends no ✅/❌ text
+                    // of its own (DESIGN §12.5), so holding on to a dead id would mean re-editing
+                    // it every tick and losing every completion in the burst. Forget it and let
+                    // the next redraw open a fresh message with the same rows.
+                    if matches!(e, TgError::Api(_)) {
+                        self.forget_board_message(chat);
+                    }
                     self.after_failure(chat, &e).await;
                     return false;
                 }
             }
         }
         false
+    }
+
+    /// Drops a board's message id after Telegram refused to edit it, keeping the rows.
+    ///
+    /// `last_rendered` goes with it: it is the diff base for *that* message, and a fresh one has
+    /// to be sent in full.
+    fn forget_board_message(&mut self, chat: i64) {
+        if let Some(board) = self.boards.get_mut(&chat) {
+            board.message = None;
+            board.last_rendered.clear();
+            board.dirty = true;
+        }
     }
 
     /// `429` escalates the chat's interval and sleeps; anything else drops **this** edit — the next
@@ -852,20 +910,46 @@ impl TelegramActor {
         }
     }
 
-    /// Replaces a finished board with its summary and forgets it.
+    /// The board's last edit: the same rows under a closing header, then the board is forgotten
+    /// so the next burst opens a fresh message (DESIGN §12.4).
     async fn retire(&mut self, chat: i64) {
-        let Some(board) = self.boards.remove(&chat) else {
+        let Some(board) = self.boards.get(&chat) else {
             return;
         };
-        let text = render::retired_text(board.finished, board.failed, board.canceled);
         // Nothing was ever drawn (every job was too short to reach a tick) ⇒ say nothing.
-        if let Some(id) = board.message
-            && let Err(e) = self
-                .transport
-                .edit_message_text(chat, id, &text, None)
-                .await
-        {
-            tracing::debug!("could not retire the board for {chat}: {e}");
+        if !board.drawn {
+            self.boards.remove(&chat);
+            return;
+        }
+        let text = render::retired_text(&board.lines());
+        let message = board.message;
+        // The closing edit is an API call like any other: it spends the chat's budget and it goes
+        // through the DESIGN §12.4 ladder (3 attempts on a network failure, `429` respected and
+        // the interval doubled). Doing it raw meant one dropped connection left the user with a
+        // board that says "0 active" under a frozen `updated` clock for ever, because the actor
+        // had already forgotten it. So the board is dropped only once the edit lands; otherwise it
+        // stays and the next tick — its `idle_since` is still past `RETIRE_AFTER` — tries again.
+        if let Err(reason) = self.limiter.acquire(chat) {
+            tracing::trace!("board retirement for {chat} deferred: {reason:?}");
+            return;
+        }
+        let closed = match message {
+            Some(id) => self.edit(chat, id, &text).await,
+            // The board message was refused mid-flight (see `edit`) and its rows never reached the
+            // user in their final shape; the receipt is still owed, so post it as a new message.
+            None => match self.transport.send_message(chat, &text, None).await {
+                Ok(_) => {
+                    self.limiter.record_sent(chat);
+                    true
+                }
+                Err(e) => {
+                    self.after_failure(chat, &e).await;
+                    false
+                }
+            },
+        };
+        if closed {
+            self.boards.remove(&chat);
         }
     }
 
@@ -879,10 +963,12 @@ impl TelegramActor {
             return;
         }
         let board = self.boards.entry(chat).or_default();
-        let mark = board.jobs.get(&view.id).and_then(|e| e.line.mark);
+        // A watchdog marker is board state, not item state, so it survives the upsert.
+        let mark = board.jobs.get(&view.id).and_then(|l| l.mark);
         let line = JobLine {
             id: view.id,
             title: Arc::clone(&view.title),
+            url: Arc::clone(&view.url),
             status: view.status,
             percent: view.percent,
             speed: view.speed,
@@ -893,11 +979,11 @@ impl TelegramActor {
                     view.children_total.unwrap_or(0),
                 )
             }),
+            error: failure_reason(view),
             mark,
         };
-        let drop_at = board.jobs.get(&view.id).and_then(|e| e.drop_at);
         let terminal = view.status.is_terminal();
-        board.jobs.insert(view.id, BoardEntry { line, drop_at });
+        board.jobs.insert(view.id, line);
         board.dirty = true;
         if !terminal {
             board.idle_since = None;
@@ -938,6 +1024,19 @@ impl TelegramActor {
             tracing::error!("Failed to send Telegram message to {chat}: {e}");
         }
     }
+}
+
+/// Why an item failed: its `msg` when it has one, else its `error.message` (DESIGN §12.5).
+///
+/// One function for both surfaces — the `❌` row's detail line in board mode and the
+/// `❌ Download failed` text in `per_job` mode — so the two can never disagree about which field
+/// wins.
+fn failure_reason(view: &ItemView) -> Option<Arc<str>> {
+    view.msg
+        .as_ref()
+        .filter(|m| !m.trim().is_empty())
+        .map(Arc::clone)
+        .or_else(|| view.error.as_ref().map(|e| Arc::clone(&e.message)))
 }
 
 /// A no-token actor for a caller that only needs the types (the `doctor` CLI, a smoke test).

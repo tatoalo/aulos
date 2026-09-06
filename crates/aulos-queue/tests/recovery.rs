@@ -199,7 +199,20 @@ async fn group_counters_are_recomputed_from_the_children() {
     h.settle().await;
 
     // Recovery publishes the whole recovered working set as one `added` event, which is what
-    // seeds the aggregator's snapshot after a restart.
+    // seeds the aggregator's snapshot after a restart. Its reason is `recovered`, never
+    // `created`: a subscriber that reacts to an add — the Telegram actor, and any future
+    // `Notifier` (DESIGN §12.6) — has to be able to tell a restart from something happening.
+    let boot_reason = h
+        .events
+        .all()
+        .iter()
+        .find_map(|e| match &**e {
+            aulos_core::DomainEvent::Added(_, reason) => Some(*reason),
+            _ => None,
+        })
+        .expect("recovery published its working set");
+    assert_eq!(boot_reason, aulos_core::AddReason::Recovered);
+
     let view = h
         .events
         .all()

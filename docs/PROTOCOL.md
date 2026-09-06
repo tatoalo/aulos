@@ -1386,7 +1386,14 @@ An idle server sends **no `delta` frames at all**. Silence means nothing changed
 ```
 
 `reason` ∈ `"created"` (a user added these) | `"expanded"` (a playlist resolved into a group and
-children) | `"retried"` (an item was requeued).
+children) | `"retried"` (an item was requeued) | `"recovered"` (the server just restarted and
+re-published its recovered working set to seed the snapshot — nothing new happened).
+
+All four are the same upsert: `reason` is advisory, and a client that ignores it and upserts on
+`id` is correct. `"recovered"` exists for a subscriber that *reacts* to an add — a notifier that
+would otherwise announce the whole recovered history on every boot; a UI has no reason to treat it
+differently from `"created"`. Decode `reason` as a free string with a fallback, as §5 says for
+every enum on the wire.
 
 **Treat `added` as an upsert keyed on `id`, not as an insert.** This matters because of how a
 playlist resolves:

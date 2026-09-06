@@ -1,7 +1,12 @@
 //! The teloxide bot: `/start` and `/config` with inline keyboards, allowed chat ids, per-chat
 //! defaults persisted through the store, URL extraction behind the SSRF guard, the single live
-//! progress message per chat edited at most every few seconds, discrete completion/failure
-//! notifications, and the rate limiter that keeps all of it inside Telegram's budget.
+//! progress board per chat edited at most every few seconds, and the rate limiter that keeps all
+//! of it inside Telegram's budget.
+//!
+//! **A burst of downloads is one message.** In the default `board` mode the board is the
+//! acknowledgement, the progress and the completion: a row's glyph goes `⏳` → `⏬` → `✅`/`❌`/`🚫`
+//! and nothing discrete is sent behind it. `AULOS_TELEGRAM_BOARD=per_job` is the escape hatch and
+//! keeps every legacy message byte-identical.
 //!
 //! See DESIGN §12.
 //!

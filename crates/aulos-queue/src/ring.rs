@@ -534,11 +534,16 @@ pub const REASON_ORDER: [RemoveReason; 4] = [
 /// PROTOCOL §6.3 allows exactly one `added` frame after a `resume`, so the reasons have to
 /// collapse: the most specific wins, because `expanded` is what tells a client a playlist turned
 /// into a group. `reason` is cosmetic — the upsert is keyed on `id` either way.
+///
+/// `recovered` is the *least* specific — it says only "nothing new happened, this is the boot
+/// snapshot" — so a window that mixes it with anything else collapses to that other reason; only a
+/// window of nothing but recovery frames stays `recovered`.
 const fn merge_add_reason(current: Option<AddReason>, next: AddReason) -> AddReason {
     let Some(current) = current else { return next };
     match (current, next) {
         (AddReason::Expanded, _) | (_, AddReason::Expanded) => AddReason::Expanded,
         (AddReason::Retried, _) | (_, AddReason::Retried) => AddReason::Retried,
+        (AddReason::Recovered, AddReason::Recovered) => AddReason::Recovered,
         _ => AddReason::Created,
     }
 }
@@ -847,6 +852,16 @@ mod tests {
         assert_eq!(
             merge_add_reason(Some(AddReason::Created), AddReason::Retried),
             AddReason::Retried
+        );
+        assert_eq!(
+            merge_add_reason(Some(AddReason::Recovered), AddReason::Recovered),
+            AddReason::Recovered,
+            "a window of nothing but the boot batch stays `recovered`"
+        );
+        assert_eq!(
+            merge_add_reason(Some(AddReason::Recovered), AddReason::Created),
+            AddReason::Created,
+            "but anything that actually happened outranks it"
         );
     }
 

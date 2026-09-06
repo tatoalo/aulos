@@ -404,10 +404,37 @@ pub fn to_markup(keyboard: &Keyboard) -> teloxide::types::InlineKeyboardMarkup {
 // ---------------------------------------------------------------------------
 
 /// How long `getUpdates` holds the connection open, in seconds.
-pub const POLL_TIMEOUT_SECS: u32 = 30;
+///
+/// **This must stay comfortably below the HTTP client's own request timeout.**
+/// `teloxide::Bot::new` builds its `reqwest::Client` from
+/// `teloxide_core::net::default_reqwest_settings`, which sets a 17 s request timeout, so a longer
+/// server-side
+/// long poll can never complete on a quiet bot: the client aborts the request first and the loop
+/// sees a `Network` error, logs a WARN and then sleeps [`POLL_BACKOFF`] — one bogus warning every
+/// 20 s in production, plus up to 3 s of added latency for a message that arrives just after the
+/// abort. 10 s is teloxide's own polling default and leaves 7 s of headroom.
+pub const POLL_TIMEOUT_SECS: u32 = 10;
 
 /// How long the loop waits after a failed `getUpdates` before trying again.
 pub const POLL_BACKOFF: Duration = Duration::from_secs(3);
+
+/// An error rendered together with every `source()` under it.
+///
+/// `reqwest`'s `Display` is the useless half of the story — `error sending request for url (…)` —
+/// while the cause that names what actually failed (DNS, a TLS handshake, an elapsed client-side
+/// timeout) sits one or two `source()` hops down. Without the chain, a genuine network outage
+/// reads exactly like the client-timeout bug [`POLL_TIMEOUT_SECS`] documents, which is how that
+/// one survived in production.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(source) = cause {
+        out.push_str(": ");
+        out.push_str(&source.to_string());
+        cause = source.source();
+    }
+    out
+}
 
 /// Translates one `teloxide` update into the actor's vocabulary, or `None` for anything the bot
 /// does not act on.
@@ -484,7 +511,10 @@ pub async fn poll_updates(
             .and_then(|u| i32::try_from(u.id.0).ok())
             .map_or(0, |id| id.saturating_add(1)),
         Err(e) => {
-            tracing::warn!("could not drop pending Telegram updates: {e}");
+            tracing::warn!(
+                "could not drop pending Telegram updates: {}",
+                error_chain(&e)
+            );
             0
         }
     };
@@ -501,7 +531,7 @@ pub async fn poll_updates(
             result = request => match result {
                 Ok(batch) => batch,
                 Err(e) => {
-                    tracing::warn!("getUpdates failed: {e}");
+                    tracing::warn!("getUpdates failed: {}", error_chain(&e));
                     tokio::select! {
                         () = shutdown.cancelled() => break,
                         () = tokio::time::sleep(POLL_BACKOFF) => {}
@@ -662,6 +692,41 @@ mod tests {
                   "is_animated":false,"is_video":false,"type":"regular"}}}}}}"#
         ));
         assert_eq!(to_incoming(&sticker), None);
+    }
+
+    /// The polling WARN has to name the *cause*, not `reqwest`'s opaque top line: the 17 s
+    /// client-timeout regression that [`POLL_TIMEOUT_SECS`] documents looked exactly like a real
+    /// outage until the chain was printed.
+    #[test]
+    fn a_logged_error_carries_every_cause_under_it() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1
+                    .as_deref()
+                    .map(|l| l as &(dyn std::error::Error + 'static))
+            }
+        }
+
+        let deep = Layer(
+            "error sending request for url (https://api.telegram.org/GetUpdates)",
+            Some(Box::new(Layer(
+                "operation timed out",
+                Some(Box::new(Layer("connection closed", None))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&deep),
+            "error sending request for url (https://api.telegram.org/GetUpdates): \
+             operation timed out: connection closed"
+        );
+        assert_eq!(error_chain(&Layer("alone", None)), "alone");
     }
 
     #[test]

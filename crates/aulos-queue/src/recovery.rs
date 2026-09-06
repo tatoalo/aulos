@@ -195,13 +195,19 @@ impl Engine {
         //    whole recovered working set, never one per item: the router's inbox is bounded, and a
         //    per-item publish would deadlock a recovery of more than 4 096 rows against a router
         //    that has not been spawned yet.
+        //
+        //    The reason is `Recovered`, never `Created`: a subscriber that reacts to an add — the
+        //    Telegram actor, and any future `Notifier` (DESIGN §12.6) — must be able to tell this
+        //    batch from a real one, or every boot announces the whole recovered history to the
+        //    user. On the wire it stays an upsert like the others (PROTOCOL §5.5), so the
+        //    aggregator's snapshot is seeded exactly as before.
         let mut views: Vec<ItemId> = self.items.keys().copied().collect();
         views.sort_unstable_by_key(|id| self.items.get(id).map_or(0, |i| i.ord));
         let payload: Vec<std::sync::Arc<aulos_core::ItemView>> = views
             .into_iter()
             .filter_map(|id| self.view_of(id))
             .collect();
-        self.publish_added(payload, aulos_core::AddReason::Created)
+        self.publish_added(payload, aulos_core::AddReason::Recovered)
             .await;
 
         // 8. Re-enter resolution for what the §8.9 table re-queued out of `resolving`.

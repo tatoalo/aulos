@@ -1822,7 +1822,7 @@ pub enum CancelScope {
 }
 
 pub enum DomainEvent {
-    Added(Vec<Arc<ItemView>>, AddReason),   // AddReason ∈ Created | Expanded | Retried
+    Added(Vec<Arc<ItemView>>, AddReason),   // AddReason ∈ Created | Expanded | Retried | Recovered
     /// A persisted row changed. `from == to` is legal and is the engine's generic
     /// "re-diff this row" signal — used by `HookWrite` (§13.3) and by any write that changes a
     /// mutable field without changing the status. The Aggregator diffs against `last_sent`, so
@@ -3065,9 +3065,9 @@ pub struct TelegramActor {
 }
 struct ChatBoard {
     message_id: MessageId,
-    jobs: IndexMap<ItemId, JobLine>,      // insertion-ordered, 12 visible + "+N more"
+    jobs: IndexMap<ItemId, JobLine>,      // insertion-ordered, 12 visible + an overflow note
     last_edit: Instant, last_rendered: String, dirty: bool,
-    finished_at: Option<Instant>,         // retired 60 s after the last job ends
+    idle_since: Option<Instant>,          // retired 60 s after the last job ends
 }
 ```
 
@@ -3155,31 +3155,82 @@ legacy file is imported once (§7.6.5). Defaults on first access are the legacy 
    `source = { kind: "telegram", ref: "<chat_id>" }`. This replaces the `contextvars` hack and
    means every job the bot creates is attributable — including playlist children, which inherit
    the parent's `source`.
-6. Reply `Queued N link(s) with current chat config.` and, if any failed,
-   `Some links failed:\n- <url>: <msg>`.
+6. Acknowledge. In `per_job` mode that is the legacy reply,
+   `Queued N link(s) with current chat config.`. **In board mode there is no acknowledgement
+   text**: the board drawn on the next tick already names every link with a `⏳` against it, so a
+   separate reply is one message of pure duplication — the board *is* the acknowledgement (§12.4).
+   The single exception is a message whose links all matched live items: that changes nothing on
+   the board, so silence would be indistinguishable from the bot ignoring the message, and it
+   replies `Already queued: N link(s).`. In both modes, if the add itself failed the batch is
+   all-or-nothing and the reply is `Some links failed:\n- <url>: <msg>`.
 
 ### 12.4 Live progress board (new)
 
-One board message per chat, created on the first job of a burst and edited in place. Plain text,
-no Markdown, to avoid entity-escaping bugs:
+**A burst of downloads is one message.** One board per chat, sent on the first tick after the
+first job of the burst and *edited in place* for the rest of its life — through queueing,
+progress, completion and retirement. Nothing else is sent: there is no "Queued N link(s)" ack in
+front of it (§12.3 step 6) and no "✅ Download complete" behind it (§12.5). A row's **glyph** is
+its state, and a status change is a glyph change.
+
+Plain text, no Markdown, to avoid entity-escaping bugs:
 
 ```
-⬇️ Aulos — 3 active, 1 done
+⬇️ Aulos — 2 active, 1 queued, 1 done, 1 failed
 
-▓▓▓▓▓▓▓░░░  68%  Rick Astley - Never Gonna Give You…
-              3.1 MB/s · ETA 0:41
-▓▓░░░░░░░░  21%  Lo-fi beats [12/500]
-              1.4 MB/s · ETA 6:12
-⏳  0%  Big Buck Bunny            (queued)
+⏬  Rick Astley - Never Gonna Give You…
+    ▓▓▓▓▓▓▓░░░   68% · 3.1 MB/s · ETA 0:41
+⏬  Lo-fi beats [12/500]
+    ▓▓░░░░░░░░   21%
+⏳  Big Buck Bunny
 ✅  Veritasium - The Big Misconception
+❌  Some Broken Link
+    HTTP Error 403: Forbidden
 
 updated 14:02:11
 ```
 
-Bars are 10 blocks; group lines show `[done/total]` instead of a byte rate; at most 12 lines with
-`… +N more`; terminal lines linger 60 s with ✅/❌/🚫 then drop. The board is edited to
-`✅ 4 downloads finished · ❌ 1 failed` 60 s after the last job ends.
-`AULOS_TELEGRAM_BOARD ∈ board | per_job` (default `board`) is the escape hatch.
+| Row state | Head row | Indented detail row |
+|---|---|---|
+| `queued`, `resolving` | `⏳  {title}` | — |
+| `preparing`, `downloading` | `⏬  {title}` | `{bar}  {pct:>3}% · {speed}/s · ETA {eta}` |
+| a running **group** | `⏬  {title} [{done}/{total}]` | `{bar}  {pct:>3}%` — **no byte rate** |
+| `postprocessing` | `⏬  {title}` | `{bar}  {pct:>3}% · post-processing` |
+| `finished` | `✅  {title}` | — |
+| `error` | `❌  {title}` | the reason: `msg`, else `error.message`, else `Download failed` — first line only, 80 chars |
+| `canceled` | `🚫  {title}` | — |
+
+Rules, each one load-bearing:
+
+- Bars are 10 blocks. Unknown detail parts are omitted and the rest joined with ` · `, so a row
+  with neither a rate nor an ETA still shows its bar and percentage.
+- A group carries `[done/total]` **instead of** a byte rate: a channel of 500 videos has no single
+  speed, and "12 of 500 done" is the number the user wants.
+- Titles are truncated to 34 characters. A row whose title is still blank (resolution has not run)
+  shows its **URL** — the user posted the link, so they recognise it; a blank label would be worse
+  than a long one.
+- The header is `⬇️ Aulos — {n} active`, then `, {n} queued` when anything is waiting, then
+  `, {n} done`, then `, {n} failed` when anything failed.
+- **A terminal row never drops while the board lives.** The ✅ is the receipt for a download the
+  user asked for. At the 12-row cap the board hides the **oldest terminal** rows and says so in a
+  first line, `… +N finished earlier`, which keeps everything still happening on screen; only when
+  the live rows alone overrun the cap does it fall back to the tail collapse `… +N more`, which
+  fills its twelve slots from the **live** rows alone — past that point a receipt that pushed a
+  running download off the board would defeat the purpose of the board. A row removed from the
+  queue (`removed` frame) does leave the board.
+- Only the *body* is compared against `last_rendered`; the `updated HH:MM:SS` footer moves every
+  tick and would otherwise make every tick a change.
+- **Retirement.** 60 s after the last job ends the board takes one final edit — the same rows,
+  header `✅ All done — {n} finished` plus `, {n} failed` / `, {n} canceled` when non-zero, and
+  **no `updated` footer**, because the message has stopped being live — and the actor forgets it,
+  so the next burst opens a fresh message. That edit is an API call like any other: it spends the
+  chat's budget and takes the failure ladder below, and the board is forgotten only once it lands,
+  so a dropped connection costs a retry rather than the closing layout. A board that was never
+  drawn (every job too short to reach a tick) sends nothing at all. A board whose message Telegram
+  refuses to edit at all (`400`, the user deleted it) has its id abandoned and is reopened with a
+  fresh `sendMessage` — in board mode the rows are the only receipt there is (§12.5).
+
+`AULOS_TELEGRAM_BOARD ∈ board | per_job` (default `board`) is the escape hatch: `per_job` draws no
+board and keeps every legacy message byte-identical.
 
 Rate-limit design — this is the part that breaks naive implementations:
 
@@ -3196,18 +3247,29 @@ the least critical path in the system is redundant machinery, and the `governor`
 that knows about `last_rendered` and the per-chat interval. `healthz` exports
 `edits_throttled_total` so over-budget behaviour is observable.
 
-### 12.5 Discrete notifications (parity, kept)
+### 12.5 Discrete notifications
 
-| Event | Message |
-|---|---|
-| item finished | `✅ Download complete: {title}` + `\nFile: {filename}` when known |
-| item error | `❌ Download failed: {title}\n{msg or error or "Download failed"}` |
-| item canceled | silent (the watch is dropped) |
-| stall | `⚠️ Download seems stalled for {secs}s:\n{url}`, once per chat per job |
-| hard timeout | `⏱️ Download is taking longer than expected ({secs}s):\n{url}`, once per chat per job |
+The dividing line is **state vs. alert**. Anything the board can show is board state and in board
+mode is *a row, not a message*; anything the board cannot show — a rejection, a cap, a watchdog —
+stays a message in both modes. `per_job` mode has no board, so it sends every text below,
+byte-identical to legacy.
 
-Neither timeout cancels the download (parity). In board mode the two warnings are sent as
-**separate** messages — they are alerts, not state — and the board line gains a `⚠️`/`⏱️` marker.
+| Event | Message | `board` | `per_job` |
+|---|---|---|---|
+| queued | `Queued N link(s) with current chat config.` | — the board is the ack (§12.3) | sent |
+| all links already live | `Already queued: N link(s).` | sent | — (the legacy ack covers it) |
+| item finished | `✅ Download complete: {title}` + `\nFile: {filename}` when known | — the row becomes `✅` | sent |
+| item error | `❌ Download failed: {title}\n{msg or error or "Download failed"}` | — the row becomes `❌` and carries the reason | sent |
+| item canceled | silent (the watch is dropped) | — the row becomes `🚫` | silent |
+| too many links | `Too many links in one message (N). Maximum allowed: M.` | sent | sent |
+| rejected links | `Ignored invalid links:\n- <url> (<reason>)` | sent | sent |
+| the add failed | `Some links failed:\n- <url>: <msg>` | sent | sent |
+| stall | `⚠️ Download seems stalled for {secs}s:\n{url}`, once per chat per job | sent | sent |
+| hard timeout | `⏱️ Download is taking longer than expected ({secs}s):\n{url}`, once per chat per job | sent | sent |
+
+Neither timeout cancels the download (parity). The two warnings stay **separate** messages in both
+modes — they are alerts, not state, and a marker buried in a board the user is not looking at is
+not an alert — and in board mode the row *also* gains its `⚠️`/`⏱️` marker.
 
 Both clocks time the **download**, not the wait: they start when the item first reaches a running
 status and are held off (and reset) while it sits `Queued`/`Resolving` or is paused back into the
@@ -3235,6 +3297,19 @@ be registered as one more `EventRouter` subscriber (§2.2.1) with no change to a
 `AULOS_TELEGRAM_WATCH_ALL=true`. That knob defaults to **`true`**: on a single-user box, the
 legacy blind spot where web and subscription downloads were invisible to the bot is a bug, not a
 feature, and the board is rate-limited anyway. Set it to `false` for exact legacy behaviour.
+
+**A restart says nothing until something happens.** Boot recovery re-publishes the entire
+recovered working set as one `Added` event so the aggregator's snapshot is seeded (§8.9 step 7),
+and with `AULOS_TELEGRAM_WATCH_ALL` on the attribution rule above hands every one of those rows to
+every allowed chat. Reacting to that batch like a real add meant each boot drew a board listing
+the whole download history in every chat and, 60 s later, replaced it with an
+"N downloads finished" summary nobody had asked for. The batch therefore carries
+`AddReason::Recovered` (PROTOCOL §5.5 — on the wire it is one more upsert, so no client changes),
+and the actor treats it as follows: **no board line, no message**; a row that is *not* terminal
+still enters the watch table, so a download the engine resumes across the restart reports its
+completion and its §12.5 watchdog warnings normally; a terminal row is history and is ignored
+entirely. Anything published *after* recovery — a status change, a completion, a real add — is a
+live event and reports as usual. The same rule is the right default for any future `Notifier`.
 
 An APNs notifier later implements the same trait with `interested = |_| true` plus a device-token
 table, and changes nothing else. No device-token table, no APNs key and no separate webhook

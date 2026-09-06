@@ -32,6 +32,14 @@ pub enum AddReason {
     Expanded,
     /// A retry re-queued them.
     Retried,
+    /// Boot recovery re-published the working set so the realtime snapshot is seeded; nothing new
+    /// happened.
+    ///
+    /// The distinction exists because a subscriber cannot otherwise tell the recovery batch of
+    /// DESIGN §8.9 step 7 from a real add: the Telegram actor drew a board listing the entire
+    /// recovered history in every allowed chat on every boot, then replaced it with a summary
+    /// (DESIGN §12.4). On the wire it is one more upsert like the others (PROTOCOL §5.5).
+    Recovered,
 }
 
 /// Why a batch of ids disappeared.

@@ -1,9 +1,14 @@
-//! The live progress board (DESIGN §12.4) and the five discrete notification texts
-//! (DESIGN §12.5).
+//! The live progress board (DESIGN §12.4) and the discrete notification texts (DESIGN §12.5).
 //!
-//! Everything here is a pure function of a [`JobLine`] slice and a clock reading, so the whole
-//! layout — the bars, the overflow, the group aggregate, the linger markers — is snapshot-testable
-//! without a bot.
+//! In board mode a burst of downloads is **one** message: the rows are the acknowledgement, the
+//! progress and the completion, and the glyph at the head of each row is the whole story
+//! (`⏳` queued → `⏬` running → `✅`/`❌`/`🚫`). Nothing here is sent twice; the actor edits the
+//! same message until it retires it. `per_job` mode keeps the legacy discrete texts instead, so
+//! both vocabularies live in this module.
+//!
+//! Everything is a pure function of a [`JobLine`] slice and a clock reading, so the whole layout —
+//! the bars, the overflow, the group aggregate, the retirement — is snapshot-testable without a
+//! bot.
 //!
 //! **Plain text, no Markdown.** Titles come from providers and contain `_`, `*`, `[` and `` ` ``
 //! routinely; escaping them correctly for `MarkdownV2` is a bug factory, and a mis-escaped entity
@@ -20,13 +25,24 @@ pub const BAR_WIDTH: usize = 10;
 pub const BAR_FULL: char = '▓';
 /// The empty block.
 pub const BAR_EMPTY: char = '░';
-/// How many job lines the board shows before it collapses into `… +N more`.
+/// How many job rows the board shows before it collapses (DESIGN §12.4).
 pub const MAX_LINES: usize = 12;
 /// How many characters of a title survive. A longer one keeps this many and gains a `…`, so the
 /// rendered field is at most `MAX_TITLE_CHARS + 1` characters wide.
 pub const MAX_TITLE_CHARS: usize = 34;
-/// The indent of an active line's detail row.
-pub const DETAIL_INDENT: &str = "              ";
+/// How many characters of a failure reason survive on an `❌` row's detail line.
+pub const MAX_ERROR_CHARS: usize = 80;
+/// The indent of a row's detail line — the width of the glyph column, so the detail sits under the
+/// title rather than under the glyph.
+pub const DETAIL_INDENT: &str = "    ";
+
+/// The glyph that opens a row. The row's *only* state indicator (DESIGN §12.4): a batch is one
+/// message, so a status change is a glyph change and never a new text.
+const GLYPH_WAITING: &str = "⏳";
+const GLYPH_RUNNING: &str = "⏬";
+const GLYPH_FINISHED: &str = "✅";
+const GLYPH_ERROR: &str = "❌";
+const GLYPH_CANCELED: &str = "🚫";
 
 /// An out-of-band marker on a board line (DESIGN §12.5: the two warnings are alerts, not state).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,8 +69,11 @@ impl Mark {
 pub struct JobLine {
     /// Which item.
     pub id: ItemId,
-    /// Display title.
+    /// Display title. Empty until resolution names the item.
     pub title: Arc<str>,
+    /// The item's URL — what the row shows while [`JobLine::title`] is still blank. A row with no
+    /// label at all would be worse than a long URL: the user posted the link, so they recognise it.
+    pub url: Arc<str>,
     /// Its status.
     pub status: Status,
     /// `0.0..=100.0`.
@@ -65,23 +84,38 @@ pub struct JobLine {
     pub eta: Option<i64>,
     /// `Some((done, total))` for a group row, `None` for a plain item.
     pub group: Option<(u32, u32)>,
+    /// Why an `Error` row failed. The row's detail line, because in board mode there is no
+    /// `❌ Download failed` message to carry it (DESIGN §12.4).
+    pub error: Option<Arc<str>>,
     /// A stall or hard-timeout marker.
     pub mark: Option<Mark>,
 }
 
 impl JobLine {
-    /// A plain queued row.
+    /// A plain queued row with no URL fallback.
     #[must_use]
     pub fn new(id: ItemId, title: impl Into<Arc<str>>, status: Status) -> Self {
         Self {
             id,
             title: title.into(),
+            url: "".into(),
             status,
             percent: 0.0,
             speed: None,
             eta: None,
             group: None,
+            error: None,
             mark: None,
+        }
+    }
+
+    /// What the row is labelled with: the title, or the URL while there is no title yet.
+    #[must_use]
+    pub fn display_title(&self) -> &str {
+        if self.title.trim().is_empty() {
+            &self.url
+        } else {
+            &self.title
         }
     }
 }
@@ -90,12 +124,14 @@ impl JobLine {
 ///
 /// | Row | Shape |
 /// |---|---|
-/// | header | `⬇️ Aulos — {n} active, {n} done` plus `, {n} failed` when any failed |
-/// | running item | `{bar}  {pct}%  {title}` then an indented `{speed} · ETA {eta}` |
-/// | running group | `{bar}  {pct}%  {title} [{done}/{total}]` — the aggregate **instead of** a byte rate |
-/// | queued item | `⏳  {pct}%  {title}  (queued)` |
-/// | terminal item | `✅ \| ❌ \| 🚫  {title}` |
-/// | overflow | `… +{n} more` |
+/// | header | `⬇️ Aulos — {n} active[, {n} queued], {n} done[, {n} failed]` |
+/// | queued / resolving | `⏳  {title}` |
+/// | running item | `⏬  {title}` then an indented `{bar}  {pct}% · {speed}/s · ETA {eta}` |
+/// | running group | `⏬  {title} [{done}/{total}]` then `{bar}  {pct}%` — no byte rate |
+/// | postprocessing | `⏬  {title}` then `{bar}  {pct}% · post-processing` |
+/// | finished / canceled | `✅ \| 🚫  {title}` |
+/// | error | `❌  {title}` then an indented reason |
+/// | overflow | `… +{n} finished earlier` above, or `… +{n} more` below |
 /// | footer | `updated HH:MM:SS` |
 #[must_use]
 pub fn render_board(lines: &[JobLine], now_ms: UnixMs) -> String {
@@ -109,35 +145,129 @@ pub fn render_board(lines: &[JobLine], now_ms: UnixMs) -> String {
 /// the whole rate budget depends on (DESIGN §12.4). Only the body is state.
 #[must_use]
 pub fn render_body(lines: &[JobLine]) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str(&live_header(lines));
+    out.push_str("\n\n");
+    let rows = render_rows(lines);
+    if !rows.is_empty() {
+        out.push_str(&rows);
+        out.push('\n');
+    }
+    out
+}
+
+/// The retirement text the board is edited to 60 s after the last job ends (DESIGN §12.4).
+///
+/// The same rows, under a closing header and **without** the `updated` footer: the message stops
+/// being live, so a clock on it would only ever be wrong. It is the last edit the board receives —
+/// the actor forgets it immediately afterwards and the next burst opens a new message.
+#[must_use]
+pub fn retired_text(lines: &[JobLine]) -> String {
+    let mut out = retired_header(lines);
+    let rows = render_rows(lines);
+    if !rows.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&rows);
+    }
+    out
+}
+
+/// `⬇️ Aulos — 2 active, 3 queued, 1 done, 1 failed`, dropping the zero-valued middle terms.
+fn live_header(lines: &[JobLine]) -> String {
     let active = lines.iter().filter(|l| l.status.is_running()).count();
+    let queued = lines
+        .iter()
+        .filter(|l| matches!(l.status, Status::Queued | Status::Resolving))
+        .count();
     let done = lines
         .iter()
         .filter(|l| l.status == Status::Finished)
         .count();
     let failed = lines.iter().filter(|l| l.status == Status::Error).count();
 
-    let mut out = String::with_capacity(256);
-    out.push_str(&format!("⬇️ Aulos — {active} active, {done} done"));
+    let mut out = format!("⬇️ Aulos — {active} active");
+    if queued > 0 {
+        out.push_str(&format!(", {queued} queued"));
+    }
+    out.push_str(&format!(", {done} done"));
     if failed > 0 {
         out.push_str(&format!(", {failed} failed"));
     }
-    out.push_str("\n\n");
-
-    for line in lines.iter().take(MAX_LINES) {
-        out.push_str(&render_line(line));
-        out.push('\n');
-    }
-    if lines.len() > MAX_LINES {
-        out.push_str(&format!("… +{} more\n", lines.len() - MAX_LINES));
-    }
-
     out
 }
 
-/// One job's row (plus its detail row, when it has one).
+/// `✅ All done — 4 finished, 1 failed`.
+fn retired_header(lines: &[JobLine]) -> String {
+    let n = |s: Status| lines.iter().filter(|l| l.status == s).count();
+    let (finished, failed, canceled) = (n(Status::Finished), n(Status::Error), n(Status::Canceled));
+    let mut out = format!("✅ All done — {finished} finished");
+    if failed > 0 {
+        out.push_str(&format!(", {failed} failed"));
+    }
+    if canceled > 0 {
+        out.push_str(&format!(", {canceled} canceled"));
+    }
+    out
+}
+
+/// The visible rows plus their overflow notes, joined by newlines and with no trailing one.
+fn render_rows(lines: &[JobLine]) -> String {
+    let (above, rows, below) = visible(lines);
+    let mut out: Vec<String> = Vec::with_capacity(rows.len() + 2);
+    out.extend(above);
+    out.extend(rows.iter().map(|l| render_line(l)));
+    out.extend(below);
+    out.join("\n")
+}
+
+/// Which rows survive the `MAX_LINES` cap, and the note that stands in for the rest.
+///
+/// DESIGN §12.4: a terminal row never *drops* while the board lives — the ✅ is the receipt for a
+/// download the user asked for, and a batch of thirteen must not silently lose the first one. So
+/// overflow hides the **oldest terminal** rows and says how many, which keeps everything still
+/// happening on screen. Only when the live rows alone overrun the cap is there nothing left to
+/// trade, and the board falls back to the plain tail collapse — which then shows the oldest *live*
+/// rows, because a receipt that pushed a running download off the board would defeat the point.
+fn visible(lines: &[JobLine]) -> (Option<String>, Vec<&JobLine>, Option<String>) {
+    if lines.len() <= MAX_LINES {
+        return (None, lines.iter().collect(), None);
+    }
+    let live = lines.iter().filter(|l| !l.status.is_terminal()).count();
+    if live > MAX_LINES {
+        // The collapse takes its rows from the **live** ones only. `jobs` is insertion-ordered and
+        // a terminal row now lives as long as the board does, so a plain `take(MAX_LINES)` over the
+        // whole list would fill the twelve slots with the ✅ receipts of an earlier burst and hide
+        // every row still moving — the exact opposite of what this branch is for. The receipts are
+        // what gets traded away here: DESIGN §12.4 protects them only "while there is something
+        // left to trade", and once the live rows alone overrun the cap there is not.
+        let kept: Vec<&JobLine> = lines
+            .iter()
+            .filter(|l| !l.status.is_terminal())
+            .take(MAX_LINES)
+            .collect();
+        let hidden = lines.len() - kept.len();
+        return (None, kept, Some(format!("… +{hidden} more")));
+    }
+    let hidden = lines.len() - MAX_LINES;
+    let mut budget = hidden;
+    let kept: Vec<&JobLine> = lines
+        .iter()
+        .filter(|l| {
+            if budget > 0 && l.status.is_terminal() {
+                budget -= 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (Some(format!("… +{hidden} finished earlier")), kept, None)
+}
+
+/// One job's row (plus its indented detail line, when it has one).
 #[must_use]
 pub fn render_line(line: &JobLine) -> String {
-    let title = truncate(&line.title, MAX_TITLE_CHARS);
+    let title = truncate(line.display_title(), MAX_TITLE_CHARS);
     let mark = line.mark.map(Mark::glyph).unwrap_or_default();
     let suffix = if mark.is_empty() {
         String::new()
@@ -146,38 +276,59 @@ pub fn render_line(line: &JobLine) -> String {
     };
 
     match line.status {
-        Status::Finished => format!("✅  {title}"),
-        Status::Error => format!("❌  {title}"),
-        Status::Canceled => format!("🚫  {title}"),
-        Status::Queued | Status::Resolving => {
-            let note = if line.status == Status::Resolving {
-                "(resolving)"
-            } else {
-                "(queued)"
-            };
-            format!("⏳  {:.0}%  {title}  {note}{suffix}", line.percent)
-        }
+        Status::Finished => format!("{GLYPH_FINISHED}  {title}"),
+        Status::Canceled => format!("{GLYPH_CANCELED}  {title}"),
+        Status::Error => format!(
+            "{GLYPH_ERROR}  {title}\n{DETAIL_INDENT}{}",
+            error_detail(line.error.as_deref())
+        ),
+        Status::Queued | Status::Resolving => format!("{GLYPH_WAITING}  {title}{suffix}"),
         Status::Preparing | Status::Downloading | Status::Postprocessing => {
-            let head = format!(
-                "{}  {:>3.0}%  {title}",
-                bar(line.percent),
-                line.percent.clamp(0.0, 100.0)
-            );
-            match line.group {
-                // A group's aggregate replaces the byte rate: a channel of 500 videos has no
-                // single speed, and "12 of 500 done" is the number the user wants.
-                Some((d, t)) => format!("{head} [{d}/{t}]{suffix}"),
-                None => {
-                    let detail = detail_row(line.speed, line.eta);
-                    if detail.is_empty() {
-                        format!("{head}{suffix}")
-                    } else {
-                        format!("{head}{suffix}\n{DETAIL_INDENT}{detail}")
-                    }
-                }
-            }
+            let head = match line.group {
+                Some((d, t)) => format!("{GLYPH_RUNNING}  {title} [{d}/{t}]{suffix}"),
+                None => format!("{GLYPH_RUNNING}  {title}{suffix}"),
+            };
+            format!("{head}\n{DETAIL_INDENT}{}", progress_detail(line))
         }
     }
+}
+
+/// A running row's detail line: `▓▓▓▓▓▓▓░░░   68% · 3.1 MB/s · ETA 0:41`.
+///
+/// The bar and the percentage are always there; the rest is whatever is known. A group carries no
+/// byte rate at all (DESIGN §12.4: a channel of 500 videos has no single speed), and a
+/// postprocessing row says what it is doing instead — there are no bytes moving to report.
+#[must_use]
+pub fn progress_detail(line: &JobLine) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    parts.push(format!(
+        "{}  {:>3.0}%",
+        bar(line.percent),
+        line.percent.clamp(0.0, 100.0)
+    ));
+    if line.status == Status::Postprocessing {
+        parts.push("post-processing".to_owned());
+    } else if line.group.is_none() {
+        let rate = detail_row(line.speed, line.eta);
+        if !rate.is_empty() {
+            parts.push(rate);
+        }
+    }
+    parts.join(" · ")
+}
+
+/// A failed row's detail line: the reason, first line only, truncated.
+///
+/// yt-dlp failures are routinely a paragraph with a stack of `ERROR:` lines; a board row can carry
+/// one line of it, and the operator has the API and the logs for the rest.
+#[must_use]
+pub fn error_detail(reason: Option<&str>) -> String {
+    let reason = reason
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .unwrap_or("Download failed");
+    let first = reason.lines().next().unwrap_or(reason).trim();
+    truncate(first, MAX_ERROR_CHARS)
 }
 
 /// `3.1 MB/s · ETA 0:41`, or as much of it as is known.
@@ -191,24 +342,6 @@ pub fn detail_row(speed: Option<f64>, eta: Option<i64>) -> String {
         parts.push(format!("ETA {}", format_eta(e)));
     }
     parts.join(" · ")
-}
-
-/// The retirement text the board is edited to 60 s after the last job ends (DESIGN §12.4).
-#[must_use]
-pub fn retired_text(finished: usize, failed: usize, canceled: usize) -> String {
-    let word = if finished == 1 {
-        "download"
-    } else {
-        "downloads"
-    };
-    let mut out = format!("✅ {finished} {word} finished");
-    if failed > 0 {
-        out.push_str(&format!(" · ❌ {failed} failed"));
-    }
-    if canceled > 0 {
-        out.push_str(&format!(" · 🚫 {canceled} canceled"));
-    }
-    out
 }
 
 /// A ten-block bar.
@@ -282,9 +415,15 @@ pub fn format_bytes(bytes: f64) -> String {
     }
 }
 
-/// The five discrete notification texts (DESIGN §12.5), byte-identical to legacy.
+/// The discrete notification texts (DESIGN §12.5).
+///
+/// Which of these a chat sees depends on `AULOS_TELEGRAM_BOARD`. In `per_job` mode all of them
+/// fire, byte-identical to legacy. In `board` mode the four *state* texts — the queue
+/// acknowledgement and the two terminal messages — are rows on the board instead, and only the
+/// alerts that are not board state survive: [`notify::too_many_urls`], [`notify::ignored`],
+/// [`notify::failures`], [`notify::already_queued`] and the two watchdog warnings.
 pub mod notify {
-    /// `✅ Download complete: {title}` plus `\nFile: {filename}` when known.
+    /// `✅ Download complete: {title}` plus `\nFile: {filename}` when known. `per_job` only.
     #[must_use]
     pub fn finished(title: &str, filename: Option<&str>) -> String {
         match filename {
@@ -294,6 +433,7 @@ pub mod notify {
     }
 
     /// `❌ Download failed: {title}\n{msg}`, where `msg` falls back to `Download failed`.
+    /// `per_job` only.
     #[must_use]
     pub fn failed(title: &str, message: Option<&str>) -> String {
         let message = message
@@ -303,31 +443,42 @@ pub mod notify {
         format!("❌ Download failed: {title}\n{message}")
     }
 
-    /// `⚠️ Download seems stalled for {secs}s:\n{url}`.
+    /// `⚠️ Download seems stalled for {secs}s:\n{url}`. Both modes: an alert is not board state.
     #[must_use]
     pub fn stalled(secs: u64, url: &str) -> String {
         format!("⚠️ Download seems stalled for {secs}s:\n{url}")
     }
 
-    /// `⏱️ Download is taking longer than expected ({secs}s):\n{url}`.
+    /// `⏱️ Download is taking longer than expected ({secs}s):\n{url}`. Both modes.
     #[must_use]
     pub fn hard_timeout(secs: u64, url: &str) -> String {
         format!("⏱️ Download is taking longer than expected ({secs}s):\n{url}")
     }
 
-    /// `Queued {n} link(s) with current chat config.`
+    /// `Queued {n} link(s) with current chat config.` — the legacy acknowledgement, `per_job`
+    /// only. In board mode the board that appears on the next tick *is* the acknowledgement.
     #[must_use]
     pub fn queued(count: usize) -> String {
         format!("Queued {count} link(s) with current chat config.")
     }
 
-    /// `Too many links in one message ({got}). Maximum allowed: {max}.`
+    /// `Already queued: {n} link(s).`
+    ///
+    /// Board mode's one exception to "the board is the acknowledgement": when every URL in the
+    /// message matched a live item the board does not change at all, so silence would be
+    /// indistinguishable from the bot having ignored the message.
+    #[must_use]
+    pub fn already_queued(count: usize) -> String {
+        format!("Already queued: {count} link(s).")
+    }
+
+    /// `Too many links in one message ({got}). Maximum allowed: {max}.` Both modes.
     #[must_use]
     pub fn too_many_urls(got: usize, max: u32) -> String {
         format!("Too many links in one message ({got}). Maximum allowed: {max}.")
     }
 
-    /// `Ignored invalid links:\n- <url> (<reason>)`, one line per rejection.
+    /// `Ignored invalid links:\n- <url> (<reason>)`, one line per rejection. Both modes.
     #[must_use]
     pub fn ignored(rejected: &[(String, String)]) -> String {
         let body = rejected
@@ -338,7 +489,8 @@ pub mod notify {
         format!("Ignored invalid links:\n{body}")
     }
 
-    /// `Some links failed:\n- <url>: <msg>`, one line per failure.
+    /// `Some links failed:\n- <url>: <msg>`, one line per failure. Both modes: the batch is
+    /// all-or-nothing, so there is no board to put this on.
     #[must_use]
     pub fn failures(failed: &[(String, String)]) -> String {
         let body = failed
@@ -425,6 +577,36 @@ mod tests {
         assert_eq!(detail_row(Some(0.0), None), "", "a zero rate is not news");
     }
 
+    /// DESIGN §12.4: the glyph is the state, and the bar moved down to the detail line.
+    #[test]
+    fn a_running_row_is_a_glyph_a_title_and_an_indented_bar() {
+        let mut l = line("Big Buck Bunny", Status::Downloading, 68.0);
+        l.speed = Some(3_250_586.0);
+        l.eta = Some(41);
+        assert_eq!(
+            render_line(&l),
+            "⏬  Big Buck Bunny\n    ▓▓▓▓▓▓▓░░░   68% · 3.1 MB/s · ETA 0:41"
+        );
+
+        // Nothing known but the percentage: the bar still carries the row.
+        let bare = line("Big Buck Bunny", Status::Preparing, 0.0);
+        assert_eq!(
+            render_line(&bare),
+            "⏬  Big Buck Bunny\n    ░░░░░░░░░░    0%"
+        );
+    }
+
+    /// A postprocessing row has no bytes moving, so it says what it is doing instead.
+    #[test]
+    fn a_postprocessing_row_says_so_instead_of_a_rate() {
+        let mut l = line("Merging", Status::Postprocessing, 90.0);
+        l.speed = Some(3_250_586.0);
+        assert_eq!(
+            render_line(&l),
+            "⏬  Merging\n    ▓▓▓▓▓▓▓▓▓░   90% · post-processing"
+        );
+    }
+
     /// DESIGN §12.4: a group row carries `[done/total]` **instead of** a byte rate.
     #[test]
     fn a_group_row_carries_its_aggregate_instead_of_a_rate() {
@@ -433,9 +615,8 @@ mod tests {
         g.speed = Some(1_468_006.0);
         g.eta = Some(372);
         let rendered = render_line(&g);
-        assert_eq!(rendered, "▓▓░░░░░░░░   21%  Lo-fi beats [12/500]");
+        assert_eq!(rendered, "⏬  Lo-fi beats [12/500]\n    ▓▓░░░░░░░░   21%");
         assert!(!rendered.contains("MB/s"));
-        assert!(!rendered.contains('\n'), "no detail row for a group");
     }
 
     #[test]
@@ -445,24 +626,62 @@ mod tests {
             "✅  Veritasium"
         );
         assert_eq!(
-            render_line(&line("Broken", Status::Error, 40.0)),
-            "❌  Broken"
-        );
-        assert_eq!(
             render_line(&line("Dropped", Status::Canceled, 40.0)),
             "🚫  Dropped"
         );
     }
 
+    /// DESIGN §12.4: in board mode there is no `❌ Download failed` message, so the reason is the
+    /// row's detail line — one line of it, truncated.
     #[test]
-    fn a_queued_row_says_so_and_a_resolving_one_says_resolving() {
+    fn a_failed_row_carries_its_reason_on_the_detail_line() {
+        let mut l = line("Broken", Status::Error, 40.0);
+        l.error = Some("HTTP Error 403: Forbidden".into());
+        assert_eq!(render_line(&l), "❌  Broken\n    HTTP Error 403: Forbidden");
+
+        l.error = None;
+        assert_eq!(render_line(&l), "❌  Broken\n    Download failed");
+
+        // Only the first line, and only 80 characters of it.
+        l.error = Some("Unable to download webpage\nTraceback (most recent call last):".into());
+        assert_eq!(
+            render_line(&l),
+            "❌  Broken\n    Unable to download webpage"
+        );
+        let long: String = std::iter::repeat_n('x', 200).collect();
+        l.error = Some(long.as_str().into());
+        let detail = render_line(&l);
+        let last = detail.lines().last().expect("a detail line");
+        assert_eq!(
+            last.trim().chars().count(),
+            MAX_ERROR_CHARS + 1,
+            "80 + the ellipsis"
+        );
+        assert!(last.ends_with('…'));
+    }
+
+    /// A row the resolver has not named yet still has to be identifiable, and the user posted the
+    /// link themselves.
+    #[test]
+    fn a_row_with_no_title_yet_shows_its_url() {
+        let mut l = line("", Status::Queued, 0.0);
+        l.url = "https://a.test/watch/1".into();
+        assert_eq!(render_line(&l), "⏳  https://a.test/watch/1");
+        assert_eq!(l.display_title(), "https://a.test/watch/1");
+
+        l.title = "Now it has a name".into();
+        assert_eq!(render_line(&l), "⏳  Now it has a name");
+    }
+
+    #[test]
+    fn a_waiting_row_is_the_hourglass_whether_queued_or_resolving() {
         assert_eq!(
             render_line(&line("Big Buck Bunny", Status::Queued, 0.0)),
-            "⏳  0%  Big Buck Bunny  (queued)"
+            "⏳  Big Buck Bunny"
         );
         assert_eq!(
             render_line(&line("Not yet known", Status::Resolving, 0.0)),
-            "⏳  0%  Not yet known  (resolving)"
+            "⏳  Not yet known"
         );
     }
 
@@ -470,7 +689,8 @@ mod tests {
     fn a_marked_row_gains_its_glyph() {
         let mut l = line("Stuck", Status::Downloading, 12.0);
         l.mark = Some(Mark::Stalled);
-        assert!(render_line(&l).contains("⚠️"));
+        let head = render_line(&l);
+        assert!(head.starts_with("⏬  Stuck  ⚠️"), "{head}");
         l.mark = Some(Mark::Timeout);
         assert!(render_line(&l).contains("⏱️"));
         l.mark = None;
@@ -502,12 +722,13 @@ mod tests {
         );
         assert_eq!(
             board,
-            "⬇️ Aulos — 2 active, 1 done\n\
+            "⬇️ Aulos — 2 active, 1 queued, 1 done\n\
              \n\
-             ▓▓▓▓▓▓▓░░░   68%  Rick Astley - Never Gonna Give You…\n\
-             \u{20}             3.1 MB/s · ETA 0:41\n\
-             ▓▓░░░░░░░░   21%  Lo-fi beats [12/500]\n\
-             ⏳  0%  Big Buck Bunny  (queued)\n\
+             ⏬  Rick Astley - Never Gonna Give You…\n\
+             \u{20}   ▓▓▓▓▓▓▓░░░   68% · 3.1 MB/s · ETA 0:41\n\
+             ⏬  Lo-fi beats [12/500]\n\
+             \u{20}   ▓▓░░░░░░░░   21%\n\
+             ⏳  Big Buck Bunny\n\
              ✅  Veritasium - The Big Misconception\n\
              \n\
              updated 14:02:11"
@@ -515,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_reports_failures_when_there_are_any() {
+    fn the_header_counts_what_is_worth_counting() {
         let board = render_board(
             &[
                 line("a", Status::Downloading, 1.0),
@@ -524,12 +745,55 @@ mod tests {
             ],
             1_772_582_400_000,
         );
-        assert!(board.starts_with("⬇️ Aulos — 1 active, 1 done, 1 failed\n"));
+        assert!(
+            board.starts_with("⬇️ Aulos — 1 active, 1 done, 1 failed\n"),
+            "{board}"
+        );
+
+        // `queued` appears only when there is something queued, and it sits before `done`.
+        let board = render_board(
+            &[
+                line("a", Status::Downloading, 1.0),
+                line("b", Status::Queued, 0.0),
+                line("c", Status::Resolving, 0.0),
+            ],
+            1_772_582_400_000,
+        );
+        assert!(
+            board.starts_with("⬇️ Aulos — 1 active, 2 queued, 0 done\n"),
+            "{board}"
+        );
     }
 
-    /// DESIGN §12.4: at most twelve lines, then `… +N more`.
+    /// DESIGN §12.4: overflow hides the **oldest terminal** rows, so nothing still happening ever
+    /// falls off the board.
     #[test]
-    fn the_board_collapses_past_twelve_lines() {
+    fn overflow_hides_the_oldest_finished_rows_first() {
+        let mut lines: Vec<JobLine> = (0..10)
+            .map(|i| line(&format!("Done {i}"), Status::Finished, 100.0))
+            .collect();
+        lines.extend((0..5).map(|i| line(&format!("Live {i}"), Status::Downloading, 5.0)));
+
+        let board = render_board(&lines, 1_772_582_400_000);
+        assert!(board.contains("… +3 finished earlier"), "{board}");
+        for hidden in ["Done 0", "Done 1", "Done 2"] {
+            assert!(!board.contains(hidden), "{hidden} is hidden: {board}");
+        }
+        assert!(board.contains("Done 3"), "the fourth survives: {board}");
+        for i in 0..5 {
+            assert!(
+                board.contains(&format!("Live {i}")),
+                "a live row never drops: {board}"
+            );
+        }
+        // The note is the first line of the list, above the rows.
+        let body: Vec<&str> = board.lines().collect();
+        assert_eq!(body[2], "… +3 finished earlier");
+    }
+
+    /// Only when the live rows alone overrun the cap is there nothing left to trade.
+    #[test]
+    fn the_board_falls_back_to_a_tail_collapse_when_everything_is_live() {
         let lines: Vec<JobLine> = (0..20)
             .map(|i| line(&format!("Job {i}"), Status::Queued, 0.0))
             .collect();
@@ -537,10 +801,40 @@ mod tests {
         assert!(board.contains("Job 11"), "the twelfth is shown");
         assert!(!board.contains("Job 12"), "the thirteenth is not");
         assert!(board.contains("… +8 more"));
+        assert!(!board.contains("finished earlier"));
 
         // Exactly twelve does not overflow.
         let board = render_board(&lines[..12], 1_772_582_400_000);
         assert!(!board.contains("more"));
+    }
+
+    /// The case a board accumulates into once terminal rows stop expiring: twelve receipts already
+    /// on the board and thirteen new links behind them. The cap must be spent on the live rows —
+    /// a board reporting "13 queued" while showing twelve ✅ and nothing moving is useless.
+    #[test]
+    fn a_tail_collapse_spends_its_twelve_rows_on_the_live_ones_not_on_old_receipts() {
+        let mut lines: Vec<JobLine> = (0..12)
+            .map(|i| line(&format!("Done {i}"), Status::Finished, 100.0))
+            .collect();
+        lines.extend((0..13).map(|i| line(&format!("Live {i}"), Status::Queued, 0.0)));
+
+        let board = render_board(&lines, 1_772_582_400_000);
+        assert!(
+            board.starts_with("⬇️ Aulos — 0 active, 13 queued"),
+            "{board}"
+        );
+        for i in 0..12 {
+            assert!(
+                board.contains(&format!("Live {i}")),
+                "the live rows own the board: {board}"
+            );
+        }
+        assert!(!board.contains("Live 12"), "the thirteenth is collapsed");
+        assert!(
+            !board.contains("Done "),
+            "the old receipts give way: {board}"
+        );
+        assert!(board.contains("… +13 more"), "{board}");
     }
 
     #[test]
@@ -549,22 +843,42 @@ mod tests {
         assert_eq!(board, "⬇️ Aulos — 0 active, 0 done\n\n\nupdated 00:00:00");
     }
 
+    /// DESIGN §12.4: the last edit keeps the rows, changes the header and drops the clock.
     #[test]
-    fn the_retirement_text_counts_what_happened() {
+    fn the_retirement_text_keeps_the_rows_and_loses_the_footer() {
+        let mut bad = line("Bad", Status::Error, 40.0);
+        bad.error = Some("HTTP 403".into());
+        let lines = vec![
+            line("Good", Status::Finished, 100.0),
+            bad,
+            line("Dropped", Status::Canceled, 10.0),
+        ];
         assert_eq!(
-            retired_text(4, 1, 0),
-            "✅ 4 downloads finished · ❌ 1 failed"
+            retired_text(&lines),
+            "✅ All done — 1 finished, 1 failed, 1 canceled\n\
+             \n\
+             ✅  Good\n\
+             ❌  Bad\n\
+             \u{20}   HTTP 403\n\
+             🚫  Dropped"
         );
-        assert_eq!(retired_text(1, 0, 0), "✅ 1 download finished");
+        assert!(!retired_text(&lines).contains("updated"));
+
+        // The zero-valued terms are dropped, and the overflow rule still applies.
         assert_eq!(
-            retired_text(0, 0, 2),
-            "✅ 0 downloads finished · 🚫 2 canceled"
+            retired_text(&[line("Good", Status::Finished, 100.0)]),
+            "✅ All done — 1 finished\n\n✅  Good"
         );
+        let many: Vec<JobLine> = (0..15)
+            .map(|i| line(&format!("Done {i}"), Status::Finished, 100.0))
+            .collect();
+        assert!(retired_text(&many).contains("… +3 finished earlier"));
+        assert_eq!(retired_text(&[]), "✅ All done — 0 finished");
     }
 
-    /// DESIGN §12.5, byte-identical to legacy.
+    /// DESIGN §12.5, byte-identical to legacy. `per_job` mode still sends every one of these.
     #[test]
-    fn the_five_discrete_messages_are_byte_identical() {
+    fn the_discrete_messages_are_byte_identical() {
         assert_eq!(
             notify::finished("Clip", Some("Clip.mp4")),
             "✅ Download complete: Clip\nFile: Clip.mp4"
@@ -598,6 +912,7 @@ mod tests {
             notify::queued(3),
             "Queued 3 link(s) with current chat config."
         );
+        assert_eq!(notify::already_queued(2), "Already queued: 2 link(s).");
         assert_eq!(
             notify::too_many_urls(14, 10),
             "Too many links in one message (14). Maximum allowed: 10."

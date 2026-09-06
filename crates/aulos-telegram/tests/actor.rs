@@ -1,5 +1,5 @@
 //! The actor, end to end against a mocked transport: commands, the `cfg:` grammar, the message →
-//! jobs path, the board under the limiter, and the five discrete notifications.
+//! jobs path, the board under the limiter, and the notification texts of both board modes.
 //!
 //! No token, no network, no `teloxide::Bot`.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use aulos_core::ItemId;
 use aulos_core::config::TelegramBoard;
-use aulos_core::event::{DomainEvent, RemoveReason};
+use aulos_core::event::{AddReason, DomainEvent, RemoveReason};
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::Status;
-use aulos_telegram::{Call, Command, Incoming, MessageId, TelegramConfig, TgInitError};
-use support::{CHAT, Harness, OTHER_CHAT, added, changed, completed, tg_view, view};
+use aulos_telegram::{Call, Command, Incoming, MessageId, TelegramConfig, TgError, TgInitError};
+use support::{CHAT, Harness, OTHER_CHAT, added, added_batch, changed, completed, tg_view, view};
 
 fn command(chat: i64, command: Command) -> Incoming {
     Incoming::Command { chat, command }
@@ -300,10 +300,32 @@ async fn one_message_with_three_urls_produces_one_add_of_three_telegram_jobs() {
         "one batch, so the ords are contiguous: {ords:?}"
     );
 
+    // DESIGN §12.3 step 6, board mode: no acknowledgement text. The board that appears on the
+    // next tick lists all three links with a ⏳ against each, and *is* the acknowledgement.
     assert_eq!(
         h.transport.texts(),
-        vec!["Queued 3 link(s) with current chat config.".to_owned()]
+        Vec::<String>::new(),
+        "the board is the acknowledgement"
     );
+}
+
+/// The one text board mode still owes the user: a message whose links all matched live items
+/// changes nothing on the board, so silence would look like the bot ignoring it.
+#[tokio::test]
+async fn a_message_of_links_that_are_all_already_queued_says_so() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    h.handle(text(CHAT, "https://a.test/dup https://a.test/other"))
+        .await;
+    h.wait_for_items(2).await;
+    h.transport.clear();
+
+    h.handle(text(CHAT, "https://a.test/dup https://a.test/other"))
+        .await;
+    assert_eq!(
+        h.transport.texts(),
+        vec!["Already queued: 2 link(s).".to_owned()]
+    );
+    assert_eq!(h.items().await.len(), 2, "and nothing new was queued");
 }
 
 #[tokio::test]
@@ -324,12 +346,12 @@ async fn over_the_max_urls_limit_the_message_is_exact_and_the_rest_are_dropped()
         .join(" ");
     h.handle(text(CHAT, &body)).await;
 
-    let texts = h.transport.texts();
+    // Board mode: the cap warning is an alert, not board state, so it is still its own message —
+    // but the acknowledgement that used to follow it is now the board itself.
     assert_eq!(
-        texts[0],
-        "Too many links in one message (14). Maximum allowed: 10."
+        h.transport.texts(),
+        vec!["Too many links in one message (14). Maximum allowed: 10.".to_owned()]
     );
-    assert_eq!(texts[1], "Queued 10 link(s) with current chat config.");
     let rows = h.wait_for_items(10).await;
     assert_eq!(rows.len(), 10);
 }
@@ -345,14 +367,16 @@ async fn rejected_urls_are_reported_and_the_good_ones_still_queue() {
     ))
     .await;
 
-    let texts = h.transport.texts();
     assert_eq!(
-        texts[0],
-        "Ignored invalid links:\n\
-         - http://127.0.0.1/x (private/local IP targets are not allowed)\n\
-         - http://nas.local/y (local network hosts are not allowed)"
+        h.transport.texts(),
+        vec![
+            "Ignored invalid links:\n\
+             - http://127.0.0.1/x (private/local IP targets are not allowed)\n\
+             - http://nas.local/y (local network hosts are not allowed)"
+                .to_owned()
+        ],
+        "the rejection list survives; the acknowledgement is the board"
     );
-    assert_eq!(texts[1], "Queued 1 link(s) with current chat config.");
     let rows = h.wait_for_items(1).await;
     assert_eq!(rows[0].url.as_str(), "https://a.test/ok");
 }
@@ -544,12 +568,13 @@ async fn the_board_snapshot_covers_a_mixed_burst_and_the_overflow() {
     h.tick().await;
     assert_eq!(
         h.transport.calls()[0].text(),
-        "⬇️ Aulos — 2 active, 1 done\n\
+        "⬇️ Aulos — 2 active, 1 queued, 1 done\n\
          \n\
-         ▓▓▓▓▓▓▓░░░   68%  Rick Astley - Never Gonna Give You…\n\
-         \u{20}             3.1 MB/s · ETA 0:41\n\
-         ▓▓░░░░░░░░   21%  Lo-fi beats [12/500]\n\
-         ⏳  0%  Big Buck Bunny  (queued)\n\
+         ⏬  Rick Astley - Never Gonna Give You…\n\
+         \u{20}   ▓▓▓▓▓▓▓░░░   68% · 3.1 MB/s · ETA 0:41\n\
+         ⏬  Lo-fi beats [12/500]\n\
+         \u{20}   ▓▓░░░░░░░░   21%\n\
+         ⏳  Big Buck Bunny\n\
          ✅  Veritasium - The Big Misconception\n\
          \n\
          updated 00:00:00"
@@ -569,7 +594,20 @@ async fn the_board_snapshot_covers_a_mixed_burst_and_the_overflow() {
         .text()
         .to_owned();
     assert!(text.contains("… +8 more"), "{text}");
-    assert!(!text.contains("Job 8"), "the thirteenth line is collapsed");
+    // Past the cap with nothing left to trade the twelve slots go to the *live* rows, oldest
+    // first (DESIGN §12.4), so the ✅ receipt gives way rather than starving the board.
+    assert!(
+        text.contains("Job 8"),
+        "the twelfth live row is shown: {text}"
+    );
+    assert!(
+        !text.contains("Job 9"),
+        "the thirteenth live row is collapsed"
+    );
+    assert!(
+        !text.contains("Veritasium"),
+        "the receipt gives way: {text}"
+    );
 }
 
 /// `AULOS_TELEGRAM_BOARD=per_job` is the escape hatch: no board, only the discrete messages.
@@ -627,9 +665,10 @@ async fn a_removed_item_leaves_the_board() {
     );
 }
 
-/// Sixty seconds after the last job ends, the board becomes its summary.
+/// DESIGN §12.4: sixty seconds after the last job ends the board takes its closing layout — the
+/// same rows, a closing header, and no `updated` clock — and is then forgotten.
 #[tokio::test]
-async fn the_board_retires_into_a_summary() {
+async fn the_board_retires_into_its_closing_layout() {
     let mut h = Harness::new().await;
     let mut ok = tg_view(ItemId::new(), "Good", Status::Downloading, CHAT);
     let mut bad = tg_view(ItemId::new(), "Bad", Status::Downloading, CHAT);
@@ -640,19 +679,279 @@ async fn the_board_retires_into_a_summary() {
     ok.status = Status::Finished;
     ok.percent = 100.0;
     bad.status = Status::Error;
+    bad.msg = Some("HTTP 403".into());
     h.observe(&completed(&ok)).await;
     h.observe(&completed(&bad)).await;
     h.transport.clear();
 
     h.advance(Duration::from_secs(61)).await;
     let texts = h.transport.texts();
-    assert!(
-        texts
-            .iter()
-            .any(|t| t == "✅ 1 download finished · ❌ 1 failed"),
-        "expected the summary, got {texts:?}"
+    assert_eq!(
+        texts,
+        vec![
+            "✅ All done — 1 finished, 1 failed\n\
+             \n\
+             ✅  Good\n\
+             ❌  Bad\n\
+             \u{20}   HTTP 403"
+                .to_owned()
+        ],
+        "expected the closing layout, got {texts:?}"
     );
     assert_eq!(h.actor.health().boards, 0, "the board is forgotten");
+}
+
+/// Board mode sends no `✅ Download complete` of its own (DESIGN §12.5), so the board *is* the
+/// receipt. When Telegram refuses to edit it — the user deleted the message — the id is abandoned
+/// and the next redraw opens a fresh one, rather than the whole burst going unreported.
+#[tokio::test(start_paused = true)]
+async fn a_board_whose_message_is_gone_is_reopened_so_the_completion_still_lands() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "A clip", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    assert_eq!(h.transport.count(), 1, "the board was drawn");
+    h.transport.clear();
+
+    // The user deletes the board message; Telegram answers the edit with a plain API rejection.
+    h.transport.fail_next(vec![TgError::Api(
+        "Bad Request: message to edit not found".into(),
+    )]);
+    v.status = Status::Finished;
+    v.percent = 100.0;
+    h.observe(&completed(&v)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    assert_eq!(h.transport.count(), 0, "the edit was refused");
+
+    // The next redraw opens a new message carrying the same rows — the ✅ reaches the user.
+    h.advance(Duration::from_millis(3_100)).await;
+    let calls = h.transport.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "a fresh sendMessage, not another edit: {calls:?}"
+    );
+    assert!(matches!(calls[0], Call::Send { .. }), "{calls:?}");
+    assert!(
+        calls[0].text().contains("✅  A clip"),
+        "{:?}",
+        calls[0].text()
+    );
+}
+
+/// DESIGN §12.4: the closing edit is an API call like any other. A transient failure must not cost
+/// the user the closing layout, so the board is forgotten only once the edit lands.
+#[tokio::test(start_paused = true)]
+async fn a_failed_retirement_keeps_the_board_and_is_retried() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "Good", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    v.status = Status::Finished;
+    v.percent = 100.0;
+    h.observe(&completed(&v)).await;
+    h.transport.clear();
+
+    // Three network failures exhaust the ladder, so the retirement edit is dropped for this tick.
+    h.transport.fail_next(vec![
+        TgError::Network("connection reset".into()),
+        TgError::Network("connection reset".into()),
+        TgError::Network("connection reset".into()),
+    ]);
+    h.advance(Duration::from_secs(61)).await;
+    assert_eq!(h.transport.count(), 0, "every attempt failed");
+    assert_eq!(
+        h.actor.health().boards,
+        1,
+        "the board is kept for the retry"
+    );
+
+    // The next tick past the chat interval closes it for real.
+    h.advance(Duration::from_millis(3_100)).await;
+    assert_eq!(
+        h.transport.texts(),
+        vec!["✅ All done — 1 finished\n\n✅  Good".to_owned()],
+        "expected the closing layout, got {:?}",
+        h.transport.texts()
+    );
+    assert_eq!(h.actor.health().boards, 0, "now it is forgotten");
+}
+
+/// The whole story the board exists for (DESIGN §12.4): three links in one message become **one**
+/// message that is edited from ⏳ to ⏬ to ✅/❌/🚫 and finally to its closing layout. Not one
+/// acknowledgement, three progress texts and three completion texts.
+#[tokio::test]
+async fn a_batch_is_one_message_edited_in_place_from_queued_to_all_done() {
+    let mut h = Harness::new().await;
+    let mut one = tg_view(ItemId::new(), "One", Status::Queued, CHAT);
+    let mut two = tg_view(ItemId::new(), "Two", Status::Queued, CHAT);
+    let mut three = tg_view(ItemId::new(), "Three", Status::Queued, CHAT);
+
+    h.observe(&added_batch(
+        &[one.clone(), two.clone(), three.clone()],
+        AddReason::Created,
+    ))
+    .await;
+    h.tick().await;
+
+    // One `sendMessage`, three ⏳ rows.
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "one message for the batch: {calls:?}");
+    assert!(matches!(calls[0], Call::Send { .. }), "{calls:?}");
+    assert_eq!(
+        calls[0].text(),
+        "⬇️ Aulos — 0 active, 3 queued, 0 done\n\
+         \n\
+         ⏳  One\n\
+         ⏳  Two\n\
+         ⏳  Three\n\
+         \n\
+         updated 00:00:00"
+    );
+
+    // Work starts: the same message, edited, with the glyph flipped and a bar under the row.
+    h.transport.clear();
+    one.status = Status::Downloading;
+    one.percent = 40.0;
+    h.observe(&changed(&one, Status::Queued)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "still one message: {calls:?}");
+    assert!(matches!(calls[0], Call::Edit { .. }), "{calls:?}");
+    assert_eq!(
+        calls[0].text(),
+        "⬇️ Aulos — 1 active, 2 queued, 0 done\n\
+         \n\
+         ⏬  One\n\
+         \u{20}   ▓▓▓▓░░░░░░   40%\n\
+         ⏳  Two\n\
+         ⏳  Three\n\
+         \n\
+         updated 00:00:03"
+    );
+
+    // Three completions, three glyphs, **zero** messages.
+    h.transport.clear();
+    one.status = Status::Finished;
+    one.percent = 100.0;
+    two.status = Status::Error;
+    two.msg = Some("HTTP 403".into());
+    three.status = Status::Canceled;
+    for v in [&one, &two, &three] {
+        h.observe(&completed(v)).await;
+    }
+    assert_eq!(
+        h.transport.count(),
+        0,
+        "a completion is a glyph, not a message: {:?}",
+        h.transport.texts()
+    );
+
+    h.advance(Duration::from_millis(3_100)).await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "one edit, not three texts: {calls:?}");
+    assert_eq!(
+        calls[0].text(),
+        "⬇️ Aulos — 0 active, 1 done, 1 failed\n\
+         \n\
+         ✅  One\n\
+         ❌  Two\n\
+         \u{20}   HTTP 403\n\
+         🚫  Three\n\
+         \n\
+         updated 00:00:06"
+    );
+
+    // A minute later, exactly one final edit, and the board is gone.
+    h.transport.clear();
+    h.advance(Duration::from_secs(61)).await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "one closing edit: {calls:?}");
+    assert!(matches!(calls[0], Call::Edit { .. }), "{calls:?}");
+    assert_eq!(
+        calls[0].text(),
+        "✅ All done — 1 finished, 1 failed, 1 canceled\n\
+         \n\
+         ✅  One\n\
+         ❌  Two\n\
+         \u{20}   HTTP 403\n\
+         🚫  Three"
+    );
+    assert!(!calls[0].text().contains("updated"), "no live clock");
+    assert_eq!(h.actor.health().boards, 0, "the board is forgotten");
+}
+
+// ---------------------------------------------------------------------------
+// boot recovery
+// ---------------------------------------------------------------------------
+
+/// A restart says nothing until something happens.
+///
+/// Boot recovery re-publishes the whole recovered working set to seed the realtime snapshot
+/// (DESIGN §8.9 step 7). Before `AddReason::Recovered` existed the actor could not tell that batch
+/// from a real add, so every boot drew a board listing the entire download history in every
+/// allowed chat and, 60 s later, edited it into an unasked-for summary.
+#[tokio::test]
+async fn a_recovery_batch_draws_no_board_and_says_nothing() {
+    let mut h = Harness::new().await;
+    let done = tg_view(ItemId::new(), "Last week", Status::Finished, CHAT);
+    let resumed = tg_view(ItemId::new(), "Resumed", Status::Downloading, CHAT);
+
+    h.observe(&added_batch(&[done, resumed], AddReason::Recovered))
+        .await;
+    h.tick().await;
+
+    assert_eq!(
+        h.transport.count(),
+        0,
+        "a restart is silent: {:?}",
+        h.transport.texts()
+    );
+    assert_eq!(h.actor.health().boards, 0, "no board was created");
+    // The still-running row is watched anyway, or its completion after the restart would go
+    // unreported; the terminal one is history and is ignored entirely (DESIGN §12.6).
+    assert_eq!(h.actor.health().watched_jobs, 1);
+}
+
+/// The other half of the rule: what recovery *resumes* still reports, byte for byte.
+#[tokio::test]
+async fn a_download_resumed_after_a_restart_still_reports_its_completion() {
+    let mut h = Harness::builder()
+        .telegram(TelegramConfig {
+            board: TelegramBoard::PerJob,
+            ..TelegramConfig::for_test(vec![CHAT])
+        })
+        .build()
+        .await;
+
+    let done = tg_view(ItemId::new(), "Last week", Status::Finished, CHAT);
+    let mut resumed = tg_view(ItemId::new(), "Resumed", Status::Downloading, CHAT);
+    h.observe(&added_batch(
+        &[done.clone(), resumed.clone()],
+        AddReason::Recovered,
+    ))
+    .await;
+    assert_eq!(h.transport.count(), 0, "the boot batch itself is silent");
+
+    resumed.status = Status::Finished;
+    resumed.filename = Some("Resumed.mp4".into());
+    h.observe(&completed(&resumed)).await;
+    assert_eq!(
+        h.transport.texts(),
+        vec!["✅ Download complete: Resumed\nFile: Resumed.mp4".to_owned()],
+        "the §12.5 message is unchanged for a job the restart picked back up"
+    );
+
+    // The row that was already terminal at boot was never watched, so nothing is ever said about
+    // it — not even if the engine republishes it.
+    h.observe(&completed(&done)).await;
+    assert_eq!(
+        h.transport.texts().len(),
+        1,
+        "history stays silent: {:?}",
+        h.transport.texts()
+    );
 }
 
 // ---------------------------------------------------------------------------
