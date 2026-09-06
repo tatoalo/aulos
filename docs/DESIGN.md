@@ -3309,7 +3309,12 @@ and the actor treats it as follows: **no board line, no message**; a row that is
 still enters the watch table, so a download the engine resumes across the restart reports its
 completion and its §12.5 watchdog warnings normally; a terminal row is history and is ignored
 entirely. Anything published *after* recovery — a status change, a completion, a real add — is a
-live event and reports as usual. The same rule is the right default for any future `Notifier`.
+live event and reports as usual. One such event needs naming: a **retry** is a plain
+`StatusChanged` from a terminal status back to `queued` (PROTOCOL §4.2) with no `Added` behind
+it, and by then the row has no watch — `on_completed` dropped it, or it was terminal at boot. The
+actor treats that transition as a job starting over: it takes the watch and puts the row on the
+board exactly as an `Added` would, so a retry is never silent. The same rule is the right default
+for any future `Notifier`.
 
 An APNs notifier later implements the same trait with `interested = |_| true` plus a device-token
 table, and changes nothing else. No device-token table, no APNs key and no separate webhook

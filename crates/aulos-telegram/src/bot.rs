@@ -647,10 +647,23 @@ impl TelegramActor {
                     }
                 }
             }
-            DomainEvent::StatusChanged { id, view, .. } => {
+            DomainEvent::StatusChanged { id, from, view, .. } => {
+                let now = self.clock.instant();
+                // A retry re-queues a terminal row (`error`/`canceled` → `queued`, PROTOCOL §4.2)
+                // as a plain status change — the engine publishes no `Added` for it — and by then
+                // the watch is gone: `on_completed` dropped it, or the row was already terminal at
+                // boot and the recovery batch left it alone. It is a job starting over, so it is
+                // reported as one: watched and put on the board exactly as an `Added` would.
+                if from.is_terminal()
+                    && !view.status.is_terminal()
+                    && self.watches.get(*id).is_none()
+                {
+                    for chat in self.watches.watch(view, now) {
+                        self.board_upsert(chat, view);
+                    }
+                }
                 if let Some(watched) = self.watches.get(*id) {
                     let chats: Vec<i64> = watched.chats.iter().copied().collect();
-                    let now = self.clock.instant();
                     // The two watchdogs of DESIGN §12.5 time the *download*: an item still waiting
                     // behind `MAX_CONCURRENT_DOWNLOADS` (or paused back into the queue) is parked,
                     // so neither fires on it.

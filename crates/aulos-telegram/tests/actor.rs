@@ -956,6 +956,107 @@ async fn a_download_resumed_after_a_restart_still_reports_its_completion() {
 
 // ---------------------------------------------------------------------------
 // notifications and the watchdogs
+/// A retry is a plain status change (`error` → `queued`, PROTOCOL §4.2), and the watch on a row
+/// that was terminal at boot was never taken. The job is starting over, so it gets a row.
+#[tokio::test]
+async fn a_retry_of_a_row_that_was_terminal_at_boot_is_reported() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "Bad", Status::Error, CHAT);
+    h.observe(&added_batch(&[v.clone()], AddReason::Recovered))
+        .await;
+    h.tick().await;
+    assert_eq!(h.transport.count(), 0, "the boot batch says nothing");
+
+    v.status = Status::Queued;
+    h.observe(&changed(&v, Status::Error)).await;
+    h.tick().await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "the retry opens a board: {calls:?}");
+    assert!(matches!(calls[0], Call::Send { .. }));
+    assert!(calls[0].text().contains("⏳  Bad"), "{}", calls[0].text());
+    assert_eq!(
+        h.actor.health().watched_jobs,
+        1,
+        "and the row is watched again"
+    );
+
+    v.status = Status::Downloading;
+    v.percent = 40.0;
+    h.observe(&changed(&v, Status::Queued)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    let text = h
+        .transport
+        .edits()
+        .last()
+        .expect("an edit")
+        .text()
+        .to_owned();
+    assert!(text.contains("⏬  Bad"), "{text}");
+}
+
+/// The same after a completion in this lifetime: `on_completed` dropped the watch, and a retry
+/// of that row must not vanish from the chat.
+#[tokio::test]
+async fn a_retry_after_a_completion_is_reported_again() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "Flaky", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    v.status = Status::Error;
+    v.msg = Some("HTTP 403".into());
+    h.observe(&completed(&v)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    assert!(
+        h.transport
+            .edits()
+            .last()
+            .expect("an edit")
+            .text()
+            .contains("❌  Flaky"),
+        "the failure is on the board"
+    );
+    assert_eq!(h.actor.health().watched_jobs, 0, "the watch is gone");
+
+    v.status = Status::Queued;
+    v.msg = None;
+    h.observe(&changed(&v, Status::Error)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    let text = h
+        .transport
+        .edits()
+        .last()
+        .expect("an edit")
+        .text()
+        .to_owned();
+    assert!(
+        text.contains("⏳  Flaky"),
+        "the row is queued again: {text}"
+    );
+    assert!(!text.contains("❌"), "and no longer failed: {text}");
+    assert_eq!(h.actor.health().watched_jobs, 1);
+
+    v.status = Status::Finished;
+    h.observe(&completed(&v)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    let text = h
+        .transport
+        .edits()
+        .last()
+        .expect("an edit")
+        .text()
+        .to_owned();
+    assert!(text.contains("✅  Flaky"), "{text}");
+    assert_eq!(
+        h.transport
+            .texts()
+            .iter()
+            .filter(|t| t.starts_with("✅ Download complete"))
+            .count(),
+        0,
+        "board mode sends no discrete text"
+    );
+}
+
 // ---------------------------------------------------------------------------
 
 /// DESIGN §12.5: each discrete message fires **exactly once** per chat per job.
