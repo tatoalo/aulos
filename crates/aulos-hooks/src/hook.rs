@@ -22,6 +22,7 @@ use aulos_core::error::WireError;
 use aulos_core::id::ItemId;
 use aulos_core::item::{EntryBlob, ItemView};
 use aulos_core::ports::{HookPhase, HookStore};
+use aulos_core::selection::DownloadType;
 use aulos_core::status::TerminalStatus;
 use aulos_provider::sink::ProgressSink;
 use serde_json::{Map, Value};
@@ -48,6 +49,10 @@ pub struct BatchEntry {
     pub title: Arc<str>,
     /// The produced file, relative to the item's download root.
     pub filename: Option<Arc<str>>,
+    /// Which download root `filename` is relative to. Carried per entry because a debounced batch
+    /// can mix video and audio items, and [`HookCtx::file`] only ever describes the representative
+    /// one — the Jellyfin hook needs the path of **every** file the batch produced.
+    pub download_type: DownloadType,
     /// The terminal status the item has (`PostTerminal`) or is about to get (`PreTerminal`).
     pub status: TerminalStatus,
     /// The terminal error, when the outcome was a failure.
@@ -62,6 +67,7 @@ impl BatchEntry {
             id: view.id,
             title: Arc::clone(&view.title),
             filename: view.filename.clone(),
+            download_type: view.selection.download_type,
             status,
             error: view.error.clone(),
         }

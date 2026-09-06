@@ -179,6 +179,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("JELLYFIN_API_KEY", ""),
     ("JELLYFIN_SYNC_TIMEOUT_SECONDS", "20"),
     ("JELLYFIN_LIBRARY_ID", ""),
+    ("JELLYFIN_PATH_MAP", ""),
     ("JELLYFIN_METADATA_REFRESH_MODE", "Default"),
     ("JELLYFIN_IMAGE_REFRESH_MODE", "Default"),
     // --- Telegram ---
@@ -514,6 +515,96 @@ impl CorsOrigins {
     }
 }
 
+/// `JELLYFIN_PATH_MAP`: how an aulos path is spelled on the Jellyfin side (DESIGN §13.1).
+///
+/// aulos and Jellyfin almost never see the same media over the same path — the compose file in
+/// the field mounts one host directory at `/downloads` in the aulos container and at
+/// `/data/videos` in the Jellyfin one. `POST /Library/Media/Updated`, the only targeted mechanism
+/// that actually indexes a new file, is addressed **by path as Jellyfin sees it**, so it needs
+/// that translation and is useless without it.
+///
+/// Syntax: comma-separated `aulos_prefix=jellyfin_prefix` pairs, e.g.
+/// `"/downloads=/data/videos,/downloads/audio=/data/music"`. **Longest source prefix wins**, so
+/// the more specific second pair above beats the first for anything under `/downloads/audio`
+/// regardless of the order they are written in. A pair with a blank half is dropped with a
+/// warning; a path no pair covers is simply unmapped, and the caller falls back to a global scan.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct JellyfinPathMap {
+    /// The pairs, pre-sorted longest-source-prefix first so a linear scan is a longest match.
+    pairs: Vec<(Box<str>, Box<str>)>,
+}
+
+impl JellyfinPathMap {
+    /// Parses the comma list, dropping malformed pairs with a warning.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::new();
+        for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((from, to)) = item.split_once('=') else {
+                tracing::warn!(
+                    pair = item,
+                    "JELLYFIN_PATH_MAP entries are `aulos_prefix=jellyfin_prefix`; ignoring this one"
+                );
+                continue;
+            };
+            let (from, to) = (
+                from.trim().trim_end_matches('/'),
+                to.trim().trim_end_matches('/'),
+            );
+            if from.is_empty() || to.is_empty() {
+                tracing::warn!(
+                    pair = item,
+                    "a JELLYFIN_PATH_MAP entry has a blank half; ignoring it"
+                );
+                continue;
+            }
+            pairs.push((from.into(), to.into()));
+        }
+        // Longest source prefix first, so `map` can return on its first hit.
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        pairs.dedup_by(|a, b| a.0 == b.0);
+        Self { pairs }
+    }
+
+    /// Whether any pair was configured. An empty map means the targeted mode is off.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// How many pairs are configured.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// Translates one absolute aulos path, or `None` when no pair covers it.
+    ///
+    /// A prefix matches only at a path-component boundary, so `/downloads` never claims
+    /// `/downloads-old/x.mp4`.
+    #[must_use]
+    pub fn map(&self, path: &str) -> Option<String> {
+        for (from, to) in &self.pairs {
+            let Some(rest) = path.strip_prefix(&**from) else {
+                continue;
+            };
+            if rest.is_empty() {
+                return Some(to.to_string());
+            }
+            if let Some(rest) = rest.strip_prefix('/') {
+                return Some(format!("{to}/{rest}"));
+            }
+        }
+        None
+    }
+
+    /// The pairs, longest source prefix first.
+    #[must_use]
+    pub fn pairs(&self) -> &[(Box<str>, Box<str>)] {
+        &self.pairs
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -633,8 +724,12 @@ pub struct Config {
     pub jellyfin_api_key: Redact<String>,
     /// `JELLYFIN_SYNC_TIMEOUT_SECONDS`. Invalid warns and falls back to 20.
     pub jellyfin_sync_timeout_seconds: f64,
-    /// `JELLYFIN_LIBRARY_ID` — empty means refresh all libraries.
+    /// `JELLYFIN_LIBRARY_ID` — accepted, but it **cannot** scope discovery: Jellyfin has no
+    /// per-library scan endpoint (`docs/reference/jellyfin-refresh-experiment.md`). The hook warns
+    /// once at boot when it is set and scans globally regardless.
     pub jellyfin_library_id: Box<str>,
+    /// `JELLYFIN_PATH_MAP` — opt-in targeted mode: how aulos paths are spelled inside Jellyfin.
+    pub jellyfin_path_map: JellyfinPathMap,
     /// `JELLYFIN_METADATA_REFRESH_MODE`.
     pub jellyfin_metadata_refresh_mode: JellyfinRefreshMode,
     /// `JELLYFIN_IMAGE_REFRESH_MODE`.
@@ -984,6 +1079,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         jellyfin_api_key: Redact::new(g.str("JELLYFIN_API_KEY").to_owned()),
         jellyfin_sync_timeout_seconds: g.lenient_f64("JELLYFIN_SYNC_TIMEOUT_SECONDS", 20.0),
         jellyfin_library_id: g.str("JELLYFIN_LIBRARY_ID").into(),
+        jellyfin_path_map: JellyfinPathMap::parse(g.str("JELLYFIN_PATH_MAP")),
         jellyfin_metadata_refresh_mode: g.choice(
             "JELLYFIN_METADATA_REFRESH_MODE",
             JellyfinRefreshMode::parse,
@@ -2006,6 +2102,58 @@ mod tests {
         let c = ok(&[("BASE_DIR", "/app"), ("ROBOTS_TXT", "/etc/robots.txt")]);
         assert_eq!(c.robots_txt.unwrap(), PathBuf::from("/etc/robots.txt"));
         assert!(ok(&[]).robots_txt.is_none());
+    }
+
+    #[test]
+    fn the_path_map_is_empty_by_default_and_parses_pairs() {
+        assert!(ok(&[]).jellyfin_path_map.is_empty());
+        let m = ok(&[("JELLYFIN_PATH_MAP", "/downloads=/data/videos")]).jellyfin_path_map;
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m.map("/downloads/tube/clip.mp4").as_deref(),
+            Some("/data/videos/tube/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn the_longest_source_prefix_wins_whatever_order_it_is_written_in() {
+        // The general pair is written first; the specific one must still win.
+        let m = JellyfinPathMap::parse("/downloads=/data/videos,/downloads/audio=/data/music");
+        assert_eq!(
+            m.map("/downloads/audio/song.m4a").as_deref(),
+            Some("/data/music/song.m4a")
+        );
+        assert_eq!(
+            m.map("/downloads/tube/clip.mp4").as_deref(),
+            Some("/data/videos/tube/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn a_prefix_only_matches_at_a_component_boundary() {
+        let m = JellyfinPathMap::parse("/downloads=/data/videos");
+        assert_eq!(
+            m.map("/downloads-old/clip.mp4"),
+            None,
+            "not a sibling's path"
+        );
+        assert_eq!(m.map("/other/clip.mp4"), None);
+        assert_eq!(
+            m.map("/downloads").as_deref(),
+            Some("/data/videos"),
+            "the root itself maps"
+        );
+    }
+
+    #[test]
+    fn malformed_pairs_are_dropped_rather_than_poisoning_the_map() {
+        let m = JellyfinPathMap::parse(" /downloads/ = /data/videos/ , nonsense , =/x , /y= ,,");
+        assert_eq!(m.len(), 1, "{:?}", m.pairs());
+        assert_eq!(
+            m.map("/downloads/clip.mp4").as_deref(),
+            Some("/data/videos/clip.mp4"),
+            "trailing slashes on either half are trimmed"
+        );
     }
 
     #[test]

@@ -141,6 +141,18 @@ impl HookError {
         }
     }
 
+    /// The HTTP status this failure carries, when there was a response at all.
+    ///
+    /// `None` for a transport failure and for every non-HTTP variant — which is exactly what
+    /// `healthz.components.jellyfin.last_status` reports as `null`.
+    #[must_use]
+    pub const fn status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => *status,
+            _ => None,
+        }
+    }
+
     /// Whether another attempt could plausibly succeed.
     ///
     /// A misconfiguration, a missing tool, a bad template and a panic are all permanent for the

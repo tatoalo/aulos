@@ -992,7 +992,10 @@ async fn invoke(
 
 /// The absolute path of the produced file: the download root plus the item's relative `filename`,
 /// which already carries the request's `folder` (DESIGN §4.5).
-fn file_path(root: &Path, filename: Option<&str>) -> Option<PathBuf> {
+///
+/// `pub(crate)` because [`crate::jellyfin`] resolves the path of **every** entry in a debounced
+/// batch, not just the representative item's, and must do it exactly the way the dispatcher does.
+pub(crate) fn file_path(root: &Path, filename: Option<&str>) -> Option<PathBuf> {
     let name = filename?;
     // Validated rather than joined blindly: `filename` comes from a provider, and a `..` in it
     // would put a hook's writes outside the download root.
