@@ -1,119 +1,80 @@
 #!/usr/bin/env python3
-"""Render crates/aulos-api/web/icon-180.png — the same mark as icon.svg, rasterised.
+"""Regenerate the web UI's icons from the iOS app icon.
 
-Pillow is not a dependency of this repository, so the rasteriser is 80 lines of pure Python:
-supersample 3x with signed-distance coverage for the rounded square, the three strokes and the
-five tone holes, box-downsample, then write a PNG with zlib and the Sub filter (a diagonal
-gradient's horizontal deltas are near-constant, which is what keeps the file a couple of KB).
+    python3 tools/web/make-icon.py            # needs Pillow
 
-    python3 tools/web/make-icon.py
+Inputs and outputs, all relative to the repository root:
+
+    tools/web/icon-master-512.png          the iOS AppIcon (app_icon_1024.png), downscaled to 512 px
+    crates/aulos-api/web/icon-180.png      180 px, 128-colour palette — Apple touch icon, Safari
+                                           favicon and the header mark (`.mark` in app.css)
+    crates/aulos-api/web/icon.svg          the 128 px raster base64-embedded in an SVG and clipped
+                                           to the iOS corner radius — the favicon for Chrome/Firefox
+
+Both outputs are palette PNGs: the artwork's grainy background does not compress as truecolour,
+and a favicon that weighs 70 KB is a favicon that is fetched on every cold tab. The budgets below
+keep the two files where the old placeholder mark was, within a few KB.
+
+The touch icon is full-bleed on purpose: iOS masks it to its own rounded square, so a rounded or
+transparent corner here would only ever show up as a black notch.
 """
 
 from __future__ import annotations
 
-import binascii
-import math
+import base64
 import pathlib
-import struct
-import zlib
 
-SIZE = 180
-SS = 3                      # supersampling factor
-N = SIZE * SS
-OUT = pathlib.Path(__file__).resolve().parents[2] / "crates/aulos-api/web/icon-180.png"
+try:
+    from PIL import Image
+except ImportError as e:  # pragma: no cover - a tooling script
+    raise SystemExit("make-icon.py needs Pillow: pip install pillow") from e
 
-TOP = (0xE0, 0x78, 0x50)    # --accent
-BOTTOM = (0x8B, 0x3A, 0x4C)  # --accent-deep
-WHITE = (0xFF, 0xFF, 0xFF)
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+MASTER = ROOT / "tools/web/icon-master-512.png"
+PNG_OUT = ROOT / "crates/aulos-api/web/icon-180.png"
+SVG_OUT = ROOT / "crates/aulos-api/web/icon.svg"
 
-# The 24-grid mark from icon.svg, placed with translate(40.5 40.5) scale(4.125).
-SCALE = 4.125 * SS
-OFF = 40.5 * SS
-STROKE = 1.8 * SCALE / 2.0  # half-width, matching stroke-width="1.8"
-DOT = 0.6 * SCALE
-
-SEGMENTS = [((9, 3), (9, 21)), ((15, 3), (15, 21)), ((9, 3), (15, 3))]
-DOTS = [(9, 9), (9, 13), (15, 9), (15, 13), (15, 17)]
+PNG_BUDGET = 24_000
+SVG_BUDGET = 16_000
+CORNER = 40  # the iOS corner radius on a 180 px canvas, as the old mark used
 
 
-def g(p):
-    return (p[0] * SCALE + OFF, p[1] * SCALE + OFF)
+def raster(src: Image.Image, size: int, colours: int) -> bytes:
+    im = src.resize((size, size), Image.LANCZOS)
+    im = im.quantize(colours, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG)
+    import io
+
+    out = io.BytesIO()
+    im.save(out, "PNG", optimize=True)
+    return out.getvalue()
 
 
-SEGMENTS = [(g(a), g(b)) for a, b in SEGMENTS]
-DOTS = [g(p) for p in DOTS]
+def main() -> None:
+    src = Image.open(MASTER).convert("RGB")
+    if src.size != (512, 512):
+        raise SystemExit(f"{MASTER} must be 512x512, got {src.size}")
 
+    png = raster(src, 180, 128)
+    PNG_OUT.write_bytes(png)
+    print(f"{PNG_OUT} — {len(png)} bytes")
+    if len(png) > PNG_BUDGET:
+        raise SystemExit(f"icon-180.png must stay under {PNG_BUDGET} bytes")
 
-def dist_to_segment(px, py, a, b):
-    ax, ay = a
-    bx, by = b
-    dx, dy = bx - ax, by - ay
-    span = dx * dx + dy * dy
-    t = 0.0 if span == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / span))
-    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
-
-
-def render():
-    # Accumulate RGB sums per output pixel, then divide by SS*SS.
-    acc = [[0, 0, 0] for _ in range(SIZE * SIZE)]
-    inv = 1.0 / (N - 1)
-    for sy in range(N):
-        row_out = (sy // SS) * SIZE
-        for sx in range(N):
-            # Full bleed on purpose: iOS masks an apple-touch-icon to its own rounded square, so a
-            # rounded (or transparent) corner here would only ever show up as a black notch.
-            t = (sx * inv + sy * inv) / 2.0                       # the 135deg gradient
-            r = TOP[0] + (BOTTOM[0] - TOP[0]) * t
-            gg = TOP[1] + (BOTTOM[1] - TOP[1]) * t
-            b = TOP[2] + (BOTTOM[2] - TOP[2]) * t
-            px, py = sx + 0.5, sy + 0.5
-            on_mark = any(dist_to_segment(px, py, a, bb) <= STROKE for a, bb in SEGMENTS) or any(
-                math.hypot(px - cx, py - cy) <= DOT for cx, cy in DOTS
-            )
-            if on_mark:
-                r, gg, b = WHITE
-            cell = acc[row_out + (sx // SS)]
-            cell[0] += r
-            cell[1] += gg
-            cell[2] += b
-    n = SS * SS
-    return bytes(
-        int(round(c / n)) & 0xFF
-        for cell in acc
-        for c in cell
+    embedded = base64.b64encode(raster(src, 128, 96)).decode("ascii")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="Aulos">\n'
+        "  <!-- The iOS app icon (tools/web/icon-master-512.png), rasterised at 128 px and clipped to the\n"
+        "       iOS corner radius. Generated by tools/web/make-icon.py; do not edit by hand. -->\n"
+        f'  <clipPath id="r"><rect width="180" height="180" rx="{CORNER}" ry="{CORNER}"/></clipPath>\n'
+        f'  <image width="180" height="180" clip-path="url(#r)" xlink:href="data:image/png;base64,{embedded}"/>\n'
+        "</svg>\n"
     )
-
-
-def png(pixels: bytes) -> bytes:
-    raw = bytearray()
-    stride = SIZE * 3
-    for y in range(SIZE):
-        row = pixels[y * stride:(y + 1) * stride]
-        raw.append(1)  # filter: Sub
-        for i, v in enumerate(row):
-            left = row[i - 3] if i >= 3 else 0
-            raw.append((v - left) & 0xFF)
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + kind
-            + data
-            + struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
-        )
-
-    ihdr = struct.pack(">IIBBBBB", SIZE, SIZE, 8, 2, 0, 0, 0)
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-        + chunk(b"IEND", b"")
-    )
+    SVG_OUT.write_text(svg)
+    print(f"{SVG_OUT} — {len(svg)} bytes")
+    if len(svg) > SVG_BUDGET:
+        raise SystemExit(f"icon.svg must stay under {SVG_BUDGET} bytes")
 
 
 if __name__ == "__main__":
-    blob = png(render())
-    OUT.write_bytes(blob)
-    print(f"{OUT} — {len(blob)} bytes")
-    if len(blob) > 10_000:
-        raise SystemExit("icon-180.png must stay under 10 KB")
+    main()

@@ -84,5 +84,9 @@ integration check that the two halves of the contract meet on the real binary.
   `setAttribute('style', …)` — every measured value is written through the CSSOM instead, which
   `style-src 'self'` allows.
 
-`make-icon.py` regenerates `icon-180.png` from the same 24-grid mark as `icon.svg`
-(`python3 tools/web/make-icon.py`); it needs no third-party module.
+`make-icon.py` regenerates `icon.svg` and `icon-180.png` from `icon-master-512.png`, which is
+the iOS app icon (`Aulos/Assets.xcassets/AppIcon.appiconset/app_icon_1024.png` in the iOS
+repository, downscaled). `icon.svg` is that raster at 128 px, base64-embedded and clipped to the
+iOS corner radius, so Chrome and Firefox get a sharp favicon from one small file; Safari ignores
+SVG favicons and takes the PNG `rel="icon"` instead. The header mark is the PNG as a CSS
+background. `python3 tools/web/make-icon.py` needs Pillow (`pip install pillow`).

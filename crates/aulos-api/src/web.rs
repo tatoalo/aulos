@@ -14,8 +14,8 @@
 //! | `GET <p>` otherwise | the identity document, **unchanged** | `application/json` |
 //! | `GET <p>assets/app.css` | the stylesheet | `text/css; charset=utf-8` |
 //! | `GET <p>assets/app.js` | the ES module | `text/javascript; charset=utf-8` |
-//! | `GET <p>assets/icon.svg` | the icon | `image/svg+xml` |
-//! | `GET <p>assets/icon-180.png` | the Apple touch icon | `image/png` |
+//! | `GET <p>assets/icon.svg` | the favicon: the iOS app icon, embedded as a raster | `image/svg+xml` |
+//! | `GET <p>assets/icon-180.png` | the same icon as PNG — Apple touch icon, Safari favicon, header mark | `image/png` |
 //! | `GET <p>manifest.webmanifest` | the PWA manifest | `application/manifest+json` |
 //!
 //! # Why these routes are outside the auth middleware

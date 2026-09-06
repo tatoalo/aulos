@@ -59,7 +59,6 @@ function openExternal(u) {
 /* --------------------------------------------------------------- 2. icons */
 
 const P = {
-  logo: '<path d="M9 3v18"/><path d="M15 3v18"/><path d="M9 3h6"/><circle cx="9" cy="9" r=".6" fill="currentColor"/><circle cx="9" cy="13" r=".6" fill="currentColor"/><circle cx="15" cy="9" r=".6" fill="currentColor"/><circle cx="15" cy="13" r=".6" fill="currentColor"/><circle cx="15" cy="17" r=".6" fill="currentColor"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
   right: '<path d="M9 6l6 6-6 6"/>',
@@ -1111,7 +1110,6 @@ async function loadCapabilities() {
 }
 
 function wire() {
-  $('mark').innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P.logo.replace(/currentColor/g, '#FFFFFF')}</svg>`;
   $('url-ico').innerHTML = icon('link', 18, 1.8);
   $('empty-ico').innerHTML = icon('download', 26, 1.6);
   $('add-btn').firstElementChild.innerHTML = icon('plus', 18, 2.2);

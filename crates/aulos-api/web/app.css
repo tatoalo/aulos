@@ -106,14 +106,13 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 
+/* The iOS app icon, served next to this file; a CSS URL resolves against the stylesheet's own
+   `assets/` location, so the mark needs no `{{PREFIX}}` and stays inside `img-src 'self'`. */
 .mark {
   width: 40px;
   height: 40px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #E07850, #8B3A4C);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: #1C1B22 url(icon-180.png) center / cover no-repeat;
   flex-shrink: 0;
 }
 
