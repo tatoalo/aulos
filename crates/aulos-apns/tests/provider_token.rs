@@ -11,7 +11,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aulos_apns::{ApnsError, ProviderToken, REMINT_AFTER};
+use aulos_apns::{ApnsError, PUSH_CONCURRENCY, ProviderToken, REMINT_AFTER};
 use aulos_core::clock::{Clock, FakeClock};
 use common::{TEST_KEY_ID, TEST_KEY_P8, TEST_KEY_PUB, TEST_TEAM_ID, clock};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -99,6 +99,76 @@ fn the_token_is_cached_until_fifty_minutes_have_passed() {
     assert_ne!(first, fresh);
     assert_eq!(t.minted_total(), 2);
     assert_eq!(verify(&fresh).1.iat, c.now_ms() / 1_000);
+}
+
+#[test]
+fn a_burst_of_concurrent_callers_past_the_ttl_mints_exactly_one_token() {
+    // Eight push tasks fan out together (PUSH_CONCURRENCY), and a completion burst that straddles
+    // the 50-minute boundary used to have every one of them sign its own JWT: `bearer` dropped the
+    // guard before calling `remint`. Apple answers that with `429 TooManyProviderTokenUpdates`.
+    // A barrier releases the eight callers together, and the race is run repeatedly: the window
+    // the bug opened — read the cache, drop the guard, sign — is microseconds wide, so one round
+    // is not a reliable detector while thirty of them are.
+    for round in 0..64 {
+        let c = clock();
+        let t = Arc::new(token(Arc::clone(&c)));
+        let first = t.bearer().expect("mint");
+        c.advance(REMINT_AFTER + Duration::from_secs(1));
+
+        let gate = Arc::new(std::sync::Barrier::new(PUSH_CONCURRENCY));
+        let minted: Vec<Arc<str>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..PUSH_CONCURRENCY)
+                .map(|_| {
+                    let (t, gate) = (Arc::clone(&t), Arc::clone(&gate));
+                    scope.spawn(move || {
+                        gate.wait();
+                        t.bearer().expect("mint")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join"))
+                .collect()
+        });
+
+        assert_eq!(
+            t.minted_total(),
+            2,
+            "round {round}: the boot mint plus exactly one rotation"
+        );
+        for m in &minted {
+            assert_ne!(*m, first, "round {round}: everybody got the rotated token");
+            assert_eq!(m, &minted[0], "round {round}: and it is the same one");
+        }
+    }
+}
+
+#[test]
+fn a_forced_remint_yields_to_the_task_that_rotated_first() {
+    // The `403 InvalidProviderToken` recovery runs in every in-flight task at once. Only the task
+    // whose own bearer was rejected rotates; the rest get the winner's token and retry with it.
+    let c = clock();
+    let t = token(Arc::clone(&c));
+    let stale = t.bearer().expect("mint");
+
+    c.advance(Duration::from_secs(1));
+    let rotated = t.remint_if_current(&stale).expect("the first 403 rotates");
+    assert_ne!(rotated, stale);
+    assert_eq!(t.minted_total(), 2);
+
+    // A sibling task that also saw a 403 on the *stale* token must not mint a third.
+    let reused = t
+        .remint_if_current(&stale)
+        .expect("a sibling reuses the rotation");
+    assert_eq!(reused, rotated);
+    assert_eq!(t.minted_total(), 2, "no second signature");
+
+    // But a 403 on the token that is actually cached does rotate again.
+    c.advance(Duration::from_secs(1));
+    let again = t.remint_if_current(&rotated).expect("a genuine rejection");
+    assert_ne!(again, rotated);
+    assert_eq!(t.minted_total(), 3);
 }
 
 #[test]

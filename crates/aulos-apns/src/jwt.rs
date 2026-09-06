@@ -102,21 +102,30 @@ impl ProviderToken {
 
     /// The current bearer token, minting one if the cache is empty or older than [`REMINT_AFTER`].
     ///
+    /// The whole check-and-mint happens **under one guard**. Dropping the lock to sign would make
+    /// this a check-then-act race, and the eight concurrent push tasks of a completion fan-out
+    /// that straddles the 50-minute boundary would each mint a token — the exact behaviour Apple
+    /// answers with `429 TooManyProviderTokenUpdates`, and the one this cache exists to prevent.
+    /// Signing an ES256 JWT is microseconds and the lock is otherwise uncontended, so holding it
+    /// across the mint costs nothing worth measuring.
+    ///
     /// # Errors
     /// [`ApnsError::Mint`] if signing fails.
     pub fn bearer(&self) -> Result<Arc<str>, ApnsError> {
-        let now = self.clock.now_ms();
-        let ttl_ms = i64::try_from(REMINT_AFTER.as_millis()).unwrap_or(i64::MAX);
-        {
-            let cache = self.lock();
-            if let Some(c) = cache.as_ref()
-                && now.saturating_sub(c.minted_at_ms) < ttl_ms
-                && now >= c.minted_at_ms
-            {
-                return Ok(Arc::clone(&c.bearer));
-            }
+        let mut cache = self.lock();
+        if let Some(bearer) = Self::fresh(&cache, self.clock.now_ms()) {
+            return Ok(bearer);
         }
-        self.remint()
+        self.mint_into(&mut cache)
+    }
+
+    /// The cached token when it is still inside Apple's accepted band, else `None`.
+    fn fresh(cache: &Option<Cached>, now: UnixMs) -> Option<Arc<str>> {
+        let ttl_ms = i64::try_from(REMINT_AFTER.as_millis()).unwrap_or(i64::MAX);
+        cache
+            .as_ref()
+            .filter(|c| now >= c.minted_at_ms && now.saturating_sub(c.minted_at_ms) < ttl_ms)
+            .map(|c| Arc::clone(&c.bearer))
     }
 
     /// Signs a fresh token and replaces the cache, whatever its age.
@@ -127,6 +136,34 @@ impl ProviderToken {
     /// # Errors
     /// [`ApnsError::Mint`] if signing fails.
     pub fn remint(&self) -> Result<Arc<str>, ApnsError> {
+        let mut cache = self.lock();
+        self.mint_into(&mut cache)
+    }
+
+    /// Remints **only if** `used` is still the cached token.
+    ///
+    /// The `403` recovery of [`crate::ApnsClient::send`] runs in every push task at once, so a
+    /// genuinely stale JWT would otherwise have all eight in-flight tasks sign a replacement
+    /// instead of reusing the one the first task just installed. Comparing against the token that
+    /// actually got the `403` makes the rotation a compare-and-swap: the loser gets the winner's
+    /// token back and retries with it.
+    ///
+    /// # Errors
+    /// [`ApnsError::Mint`] if signing fails.
+    pub fn remint_if_current(&self, used: &str) -> Result<Arc<str>, ApnsError> {
+        let mut cache = self.lock();
+        if let Some(c) = cache.as_ref()
+            && &*c.bearer != used
+        {
+            // Another task already rotated it; that token has not been rejected yet.
+            return Ok(Arc::clone(&c.bearer));
+        }
+        self.mint_into(&mut cache)
+    }
+
+    /// Signs a token and installs it. The caller holds the guard, which is what makes the mint
+    /// atomic with respect to the freshness check that decided to call it.
+    fn mint_into(&self, cache: &mut Option<Cached>) -> Result<Arc<str>, ApnsError> {
         let now_ms = self.clock.now_ms();
         let claims = Claims {
             iss: Arc::clone(&self.team_id),
@@ -135,7 +172,7 @@ impl ProviderToken {
         let jwt = jsonwebtoken::encode(&self.header, &claims, &self.key)
             .map_err(|e| ApnsError::Mint(e.to_string().into()))?;
         let bearer: Arc<str> = Arc::from(jwt);
-        *self.lock() = Some(Cached {
+        *cache = Some(Cached {
             bearer: Arc::clone(&bearer),
             minted_at_ms: now_ms,
         });
