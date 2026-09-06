@@ -10,6 +10,10 @@
 //! | error bodies | a response stamped [`EnvelopeStamp`] gets its `error.request_id` filled in |
 //! | the access log | one line per request at INFO when `ENABLE_ACCESSLOG`, else DEBUG |
 //!
+//! The logged path is [`redact_path`]-ed. `api/v2/devices/{token}` (DESIGN §25.8) is the only
+//! route whose path segment is a secret, and the rule is per-segment rather than per-route so a
+//! future one cannot be added without it.
+//!
 //! [`EventHub::head`]: aulos_queue::EventHub::head
 
 use std::time::Instant;
@@ -63,7 +67,7 @@ pub async fn headers(State(state): State<ApiState>, mut req: Request, next: Next
     let started = Instant::now();
     let id = request_id_for(&req);
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
+    let path = redact_path(req.uri().path());
 
     // Handlers that want the id (none do today) can read it from the extensions rather than
     // re-deriving it, so there is exactly one id per request.
@@ -92,6 +96,43 @@ pub async fn headers(State(state): State<ApiState>, mut req: Request, next: Next
         tracing::debug!(%method, %path, status, latency_ms, request_id = %id, "request");
     }
     response
+}
+
+/// A path segment must be at least this long, and entirely hexadecimal, to be redacted. It is
+/// the devices routes' own `TOKEN_MIN`, so anything they would accept as a token is redacted.
+const SECRET_SEGMENT_MIN: usize = 32;
+
+/// How much of a redacted segment survives: enough to correlate two lines, not enough to push to.
+const SECRET_SEGMENT_KEEP: usize = 8;
+
+/// The path as it may be logged: every long hexadecimal segment shortened to its first
+/// [`SECRET_SEGMENT_KEEP`] characters.
+///
+/// `PUT api/v2/devices/9f3c…e21b` carries an APNs device token *in the URL*, and the access log
+/// writes every path — at INFO with `ENABLE_ACCESSLOG`, and at DEBUG otherwise, which is exactly
+/// the level an operator turns up to debug push. Nothing else on the v2 surface puts a secret in a
+/// path, and a ULID is not hexadecimal, so no ordinary route is touched.
+#[must_use]
+pub fn redact_path(path: &str) -> String {
+    if !path
+        .split('/')
+        .any(|s| s.len() >= SECRET_SEGMENT_MIN && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return path.to_owned();
+    }
+    path.split('/')
+        .map(|segment| {
+            if segment.len() >= SECRET_SEGMENT_MIN && segment.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                let mut short = segment[..SECRET_SEGMENT_KEEP].to_owned();
+                short.push('\u{2026}');
+                short
+            } else {
+                segment.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The request id, in the request extensions.
@@ -132,6 +173,32 @@ mod tests {
         let id = new_request_id();
         assert_eq!(id.len(), 26, "{id}");
         assert!(usable(&id));
+    }
+
+    #[test]
+    fn a_device_token_in_the_path_is_never_logged_in_full() {
+        let token = "9f3c1a2b".repeat(8); // a 64-hex APNs device token
+        let logged = redact_path(&format!("/api/v2/devices/{token}"));
+        assert!(!logged.contains(&token), "{logged}");
+        assert_eq!(logged, format!("/api/v2/devices/9f3c1a2b\u{2026}"));
+
+        let item = "01JBQ7Z5T9K3M2R8V4XW6Y0AAA";
+        let logged = redact_path(&format!("/api/v2/devices/{token}/live-activities/{item}"));
+        assert!(!logged.contains(&token), "{logged}");
+        assert!(logged.ends_with(item), "a ULID is not a secret: {logged}");
+    }
+
+    #[test]
+    fn an_ordinary_path_is_logged_verbatim() {
+        for path in [
+            "/api/v2/items",
+            "/api/v2/items/01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
+            "/healthz",
+            "/",
+            "",
+        ] {
+            assert_eq!(redact_path(path), path);
+        }
     }
 
     #[test]

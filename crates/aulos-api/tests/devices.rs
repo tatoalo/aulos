@@ -89,6 +89,38 @@ async fn a_device_registers_idempotently_and_deregisters_idempotently() {
 }
 
 #[tokio::test]
+async fn a_bundle_id_outside_apns_topic_is_refused() {
+    // `bundle_id` becomes the `apns-topic` of every push to this device, so a free-form value
+    // would let any holder of the API token choose which app the operator's ES256 provider key
+    // signs for. Only `APNS_TOPIC` (default `com.tatoalo.aulos`) and its extensions are accepted.
+    let rig = Rig::start("").await;
+    let path = format!("api/v2/devices/{}", token("ab"));
+
+    let mut foreign = registration(None);
+    foreign["bundle_id"] = json!("com.someone.else");
+    let (status, body) = put(&rig, &path, &foreign).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["error"]["field"], "bundle_id");
+    assert!(DeviceStore::devices(&rig.store).await.unwrap().is_empty());
+
+    // A near-miss that merely shares a prefix is not an extension either.
+    let mut lookalike = registration(None);
+    lookalike["bundle_id"] = json!("com.tatoalo.aulos2");
+    let (status, body) = put(&rig, &path, &lookalike).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["field"], "bundle_id");
+
+    // An extension of the topic — a widget or an App Clip — is accepted and kept verbatim.
+    let mut widget = registration(None);
+    widget["bundle_id"] = json!("com.tatoalo.aulos.clip");
+    let (status, body) = put(&rig, &path, &widget).await;
+    assert_eq!(status, 204, "{body}");
+    let stored = DeviceStore::devices(&rig.store).await.unwrap();
+    assert_eq!(&*stored[0].bundle_id, "com.tatoalo.aulos.clip");
+}
+
+#[tokio::test]
 async fn a_registration_rejects_a_bad_token_platform_or_environment() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::start(prefix).await;

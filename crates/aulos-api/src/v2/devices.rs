@@ -21,6 +21,12 @@
 //! `environment` outside the two gateways, a `bundle_id` that is not a reverse-DNS identifier — is
 //! a `400 validation_failed` naming the field, because a device registered under a wrong value
 //! would fail silently much later, inside APNs, as a `DeviceTokenNotForTopic` nobody is watching.
+//!
+//! `bundle_id` is checked against **`APNS_TOPIC`** as well as against its shape. It becomes the
+//! `apns-topic` of every push to that device, so leaving it free-form lets any holder of
+//! `AULOS_API_TOKEN` pick which app the operator's ES256 provider key signs for. The accepted
+//! values are `APNS_TOPIC` itself and its extensions (`<APNS_TOPIC>.something`, which is how an
+//! App Clip or a widget extension is named); anything else is a `400` on `bundle_id`.
 
 use aulos_core::{ApnsEnvironment, DeviceRecord, ItemId, LiveActivityRecord, PortError};
 use axum::extract::{Path, State};
@@ -70,7 +76,7 @@ pub async fn register(
     log_unknown(&root, &DEVICE_FIELDS);
 
     let platform = parse_platform(&root)?;
-    let bundle_id = parse_bundle_id(&root)?;
+    let bundle_id = parse_bundle_id(&root, &state.cfg.apns_topic)?;
     let environment = parse_environment(&root)?;
     // Absent means "yes": a device that registered at all wants to hear about its downloads, and
     // an older client that predates the switch must not go silent when the server learns it.
@@ -254,7 +260,10 @@ fn parse_platform(root: &Map<String, Value>) -> Result<Box<str>, ApiError> {
 }
 
 /// The app's bundle id, which becomes the `apns-topic`.
-fn parse_bundle_id(root: &Map<String, Value>) -> Result<Box<str>, ApiError> {
+///
+/// It must be shaped like a reverse-DNS identifier **and** be `topic` (`APNS_TOPIC`) or an
+/// extension of it. See the module docs for why the second half is not optional.
+fn parse_bundle_id(root: &Map<String, Value>, topic: &str) -> Result<Box<str>, ApiError> {
     let raw = root
         .get("bundle_id")
         .ok_or_else(|| ApiError::invalid("bundle_id", "bundle_id is required"))?;
@@ -266,14 +275,33 @@ fn parse_bundle_id(root: &Map<String, Value>) -> Result<Box<str>, ApiError> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
         && !raw.starts_with('.')
         && !raw.ends_with('.');
-    if shaped {
-        Ok(raw.into())
-    } else {
-        Err(ApiError::invalid(
+    if !shaped {
+        return Err(ApiError::invalid(
             "bundle_id",
             "bundle_id must be a reverse-DNS application identifier",
-        ))
+        ));
     }
+    if !topic_allows(topic, raw) {
+        return Err(ApiError::invalid(
+            "bundle_id",
+            format!("bundle_id must be {topic:?} or an extension of it (got {raw:?})"),
+        ));
+    }
+    Ok(raw.into())
+}
+
+/// Whether `APNS_TOPIC` covers this bundle id: the topic itself, or something under it.
+///
+/// A blank `APNS_TOPIC` means the operator has expressed no opinion, and every shaped bundle id
+/// is accepted — the pre-existing behaviour. Rejecting everything there would turn one blanked
+/// setting into "no device can register", reported as a `400` naming an empty string.
+fn topic_allows(topic: &str, bundle_id: &str) -> bool {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return true;
+    }
+    bundle_id == topic
+        || (bundle_id.starts_with(topic) && bundle_id[topic.len()..].starts_with('.'))
 }
 
 /// Which APNs gateway this device's tokens belong to.
@@ -393,10 +421,14 @@ mod tests {
         }
     }
 
+    /// The `APNS_TOPIC` default, which is what the tests validate against.
+    const TOPIC: &str = "com.tatoalo.aulos";
+
     #[test]
     fn a_bundle_id_is_a_reverse_dns_identifier() {
         assert_eq!(
-            &*parse_bundle_id(&object(r#"{"bundle_id":"com.tatoalo.aulos"}"#)).expect("shaped"),
+            &*parse_bundle_id(&object(r#"{"bundle_id":"com.tatoalo.aulos"}"#), TOPIC)
+                .expect("shaped"),
             "com.tatoalo.aulos"
         );
         for bad in [
@@ -411,9 +443,40 @@ mod tests {
                 Value::Object(map) => map,
                 other => panic!("not an object: {other}"),
             };
-            let err = parse_bundle_id(&map).expect_err("must be rejected");
+            let err = parse_bundle_id(&map, TOPIC).expect_err("must be rejected");
             assert_eq!(err.field.as_deref(), Some("bundle_id"));
         }
+    }
+
+    #[test]
+    fn a_bundle_id_outside_apns_topic_is_rejected() {
+        // A caller with the API token must not choose which app the operator's provider key
+        // signs pushes for. Only APNS_TOPIC and its extensions are accepted.
+        assert!(topic_allows(TOPIC, TOPIC));
+        assert!(topic_allows(TOPIC, "com.tatoalo.aulos.clip"));
+        assert!(topic_allows(
+            TOPIC,
+            "com.tatoalo.aulos.watchkitapp.complication"
+        ));
+        assert!(!topic_allows(TOPIC, "com.someone.else"));
+        assert!(!topic_allows(TOPIC, "com.tatoalo.aulos2"));
+        assert!(!topic_allows(TOPIC, "com.tatoalo"));
+        // A blanked APNS_TOPIC is "no opinion", not "reject everything".
+        assert!(topic_allows("", "com.someone.else"));
+        assert!(topic_allows("   ", "com.someone.else"));
+
+        let err = parse_bundle_id(&object(r#"{"bundle_id":"com.someone.else"}"#), TOPIC)
+            .expect_err("a foreign topic must be rejected");
+        assert_eq!(err.code, ErrorCode::ValidationFailed);
+        assert_eq!(err.field.as_deref(), Some("bundle_id"));
+        assert!(err.message.contains(TOPIC), "{}", err.message);
+
+        // The extension is kept verbatim, so a widget's own topic still reaches Apple.
+        assert_eq!(
+            &*parse_bundle_id(&object(r#"{"bundle_id":"com.tatoalo.aulos.clip"}"#), TOPIC)
+                .expect("an extension of the topic"),
+            "com.tatoalo.aulos.clip"
+        );
     }
 
     #[test]
