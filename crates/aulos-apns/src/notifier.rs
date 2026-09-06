@@ -147,7 +147,7 @@ impl ApnsNotifier {
                 counters: Counters::new(),
                 state: Mutex::new(State::default()),
                 permits: Semaphore::new(PUSH_CONCURRENCY),
-                tasks: watch::Sender::new(0),
+                tasks: Arc::new(watch::Sender::new(0)),
                 cancel: CancellationToken::new(),
                 update_interval: UPDATE_INTERVAL,
             }),
@@ -226,9 +226,13 @@ impl Notifier for ApnsNotifier {
     async fn on_event(&self, ev: &DomainEvent) {
         match ev {
             DomainEvent::StatusChanged { from, to, view, .. } => {
+                // The latch itself lives in `push_to_start`, which is where it is known that a
+                // start will actually be attempted: latching here would burn the item's one
+                // chance on a full task set or an unreadable device table, and `is_start_edge`
+                // never fires twice for one download.
                 if view.group_id.is_none()
                     && is_start_edge(*from, *to)
-                    && self.shared.mark_started(view.id)
+                    && !self.shared.already_started(view.id)
                 {
                     let shared = Arc::clone(&self.shared);
                     let view = Arc::clone(view);
@@ -281,8 +285,8 @@ struct Shared {
     state: Mutex<State>,
     permits: Semaphore,
     /// The outstanding-task count, as a watch so [`ApnsNotifier::quiesce`] cannot miss the last
-    /// decrement.
-    tasks: watch::Sender<usize>,
+    /// decrement. Behind an `Arc` so a [`TaskSlot`] can hold the counter alone.
+    tasks: Arc<watch::Sender<usize>>,
     cancel: CancellationToken,
     /// The Live Activity throttle window; also the registration cache lifetime.
     update_interval: Duration,
@@ -319,12 +323,32 @@ struct Track {
     records: Vec<LiveActivityRecord>,
     /// When `records` was read, or `None` when it has never been.
     fetched_at: Option<Instant>,
-    /// update token → (when the last update went out, what status it carried).
-    last_sent: HashMap<Box<str>, (Instant, Status)>,
+    /// update token → what the last update to it carried: when it went out, the status word, and
+    /// which [`Track::pending_seq`] it was.
+    ///
+    /// The sequence number is what makes the trailing edge terminate. "Up to date" has to be a
+    /// fact about the *view* a registration received, not about a clock: with two registrations
+    /// whose windows are offset by less than [`Shared::update_interval`], a purely time-based
+    /// guard re-throttles whichever one was just stamped, so `next` is `Some` on every pass and
+    /// the timer re-pushes the same content-state to Apple, alternately, forever.
+    last_sent: HashMap<Box<str>, Delivered>,
     /// The newest view that has not been delivered to every registration yet — the trailing edge.
     pending: Option<Arc<ItemView>>,
+    /// Bumped every time `pending` is replaced, so a registration can say which view it has.
+    pending_seq: u64,
     /// Whether a trailing-edge timer task owns this item.
     timer_armed: bool,
+}
+
+/// What one registration was last sent.
+#[derive(Clone, Copy, Debug)]
+struct Delivered {
+    /// When it went out, on the interval clock.
+    at: Instant,
+    /// The status word it carried.
+    status: Status,
+    /// The [`Track::pending_seq`] it carried.
+    seq: u64,
 }
 
 /// One addressee of a Live Activity push.
@@ -375,6 +399,12 @@ impl Shared {
     /// `true` when this call is the one that claimed the item's start push.
     fn mark_started(&self, id: ItemId) -> bool {
         self.lock_state().started.insert(id)
+    }
+
+    /// Whether the item's start push has already been claimed. The cheap pre-check that keeps a
+    /// pause/resume from costing a store read; [`Self::mark_started`] is the authority.
+    fn already_started(&self, id: ItemId) -> bool {
+        self.lock_state().started.contains(&id)
     }
 
     /// Drops every trace of these items.
@@ -489,6 +519,7 @@ impl Shared {
         };
         if let Some(v) = incoming {
             track.pending = Some(v);
+            track.pending_seq = track.pending_seq.wrapping_add(1);
         }
         let Some(view) = track.pending.clone() else {
             if from_timer {
@@ -498,15 +529,19 @@ impl Shared {
         };
 
         let now = Instant::now();
+        let seq = track.pending_seq;
         let mut targets = Vec::new();
         let mut next: Option<Instant> = None;
         for r in &track.records {
             match track.last_sent.get(&r.update_token) {
+                // This registration already has *this* view. Neither a target nor a reason to
+                // come back: without this arm the loop below never converges.
+                Some(sent) if sent.seq == seq => {}
                 // Throttled: same status, and the two seconds are not up.
-                Some((at, status))
-                    if *status == view.status && now < *at + self.update_interval =>
+                Some(sent)
+                    if sent.status == view.status && now < sent.at + self.update_interval =>
                 {
-                    let due = *at + self.update_interval;
+                    let due = sent.at + self.update_interval;
                     next = Some(next.map_or(due, |n: Instant| n.min(due)));
                 }
                 _ => {
@@ -524,7 +559,14 @@ impl Shared {
             }
         }
         for t in &targets {
-            track.last_sent.insert(t.token.clone(), (now, view.status));
+            track.last_sent.insert(
+                t.token.clone(),
+                Delivered {
+                    at: now,
+                    status: view.status,
+                    seq,
+                },
+            );
         }
 
         let arm = match next {
@@ -628,6 +670,17 @@ impl Shared {
             }
         };
         self.cache_bundle_ids(&devices);
+        if !devices
+            .iter()
+            .any(|d| d.live_activity_start_token.is_some())
+        {
+            // Nobody can receive a start yet. Leave the latch open so a device that registers its
+            // push-to-start token later still gets an activity on the next start edge.
+            return;
+        }
+        if !self.mark_started(view.id) {
+            return; // a sibling task claimed it first.
+        }
         let now = self.now_secs();
         let payload = payload::live_activity_start(&view, now);
         for d in &devices {
@@ -698,15 +751,21 @@ impl Shared {
     /// The `end` push for every registration, then `remove_live_activities_for`.
     async fn end_live_activities(self: &Arc<Self>, view: &Arc<ItemView>) {
         let id = view.id;
-        let records = match self.store.live_activities_for(id).await {
-            Ok(r) => r,
+        // A failed read is not "this item had no registrations". DESIGN §25.2 makes the end
+        // unconditional, nothing retries a `Completed`, and the only other sweep
+        // (`WriteOp::DeleteItems`) fires on removal — so a transient store error here would leave
+        // a progress ring spinning on the lock screen forever. Fall back to the cached
+        // registrations, which are at most one throttle window old.
+        let (records, read_failed) = match self.store.live_activities_for(id).await {
+            Ok(r) => (r, false),
             Err(e) => {
                 tracing::warn!(item = %id, error = %e, "APNs: live activities unreadable");
                 self.counters
                     .set_last_error(&format!("live activities unreadable: {e}"));
-                Vec::new()
+                (self.cached_records(id), true)
             }
         };
+        let mut cleared = true;
         if !records.is_empty() {
             if self.bundle_ids_stale(id) {
                 self.refresh_devices().await;
@@ -744,13 +803,31 @@ impl Shared {
                     },
                 );
             }
-            if let Err(e) = self.store.remove_live_activities_for(id).await {
-                tracing::warn!(item = %id, error = %e, "APNs: live activities could not be cleared");
-                self.counters
-                    .set_last_error(&format!("live activities not cleared: {e}"));
-            }
         }
-        self.forget(&[id]);
+        if (!records.is_empty() || read_failed)
+            && let Err(e) = self.store.remove_live_activities_for(id).await
+        {
+            cleared = false;
+            tracing::warn!(item = %id, error = %e, "APNs: live activities could not be cleared");
+            self.counters
+                .set_last_error(&format!("live activities not cleared: {e}"));
+        }
+        // Forgetting the item discards the notifier's only memory that it still owes this id an
+        // end. Keep the track when the read failed *and* the delete failed too, so a later
+        // `Removed` still sweeps it.
+        if cleared || !read_failed {
+            self.forget(&[id]);
+        }
+    }
+
+    /// The registrations this notifier last read for an item. The fallback the terminal path uses
+    /// when the store cannot be read.
+    fn cached_records(&self, id: ItemId) -> Vec<LiveActivityRecord> {
+        self.lock_state()
+            .items
+            .get(&id)
+            .map(|t| t.records.clone())
+            .unwrap_or_default()
     }
 
     // -- sending -------------------------------------------------------------
@@ -858,11 +935,23 @@ impl Shared {
                 .failed("the APNs task set is full; push dropped", false);
             return;
         }
-        let shared = Arc::clone(self);
+        // The decrement is a `Drop` guard, not a statement after the `await`: a push that panics
+        // would otherwise leak its slot for the life of the process, and 256 of those wedge every
+        // future push behind "the task set is full" and make `quiesce` never observe zero.
+        let slot = TaskSlot(Arc::clone(&self.tasks));
         tokio::spawn(async move {
+            let _slot = slot;
             fut.await;
-            shared.tasks.send_modify(|n| *n = n.saturating_sub(1));
         });
+    }
+}
+
+/// One accepted place in the bounded task set, released on drop — panic or not.
+struct TaskSlot(Arc<watch::Sender<usize>>);
+
+impl Drop for TaskSlot {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
     }
 }
 
@@ -888,6 +977,24 @@ mod tests {
         assert!(!is_start_edge(Status::Downloading, Status::Queued));
         assert!(!is_start_edge(Status::Downloading, Status::Postprocessing));
         assert!(!is_start_edge(Status::Queued, Status::Error));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_still_releases_its_slot() {
+        // The decrement used to be a statement after `fut.await`, so a panic inside a push leaked
+        // one of the 256 slots for the life of the process. 256 of those and every later push is
+        // rejected with "the task set is full" and `quiesce` never observes zero.
+        let tasks = Arc::new(watch::Sender::new(1usize));
+        let slot = TaskSlot(Arc::clone(&tasks));
+        let joined = tokio::spawn(async move {
+            let _slot = slot;
+            panic!("a push blew up");
+        });
+        assert!(
+            joined.await.is_err(),
+            "the task must actually have panicked"
+        );
+        assert_eq!(*tasks.borrow(), 0, "the slot goes back even on a panic");
     }
 
     #[test]

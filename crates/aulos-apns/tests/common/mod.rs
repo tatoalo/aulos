@@ -7,6 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(dead_code)] // each test binary uses a different slice of the harness
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aulos_core::clock::FakeClock;
@@ -228,6 +229,10 @@ pub struct FakeDeviceStore {
     devices: Mutex<Vec<DeviceRecord>>,
     activities: Mutex<Vec<LiveActivityRecord>>,
     calls: Mutex<Vec<Call>>,
+    /// When set, `devices()` answers a [`PortError`] instead of the table.
+    fail_devices: AtomicBool,
+    /// When set, `live_activities_for()` answers a [`PortError`].
+    fail_activities: AtomicBool,
 }
 
 impl FakeDeviceStore {
@@ -249,6 +254,16 @@ impl FakeDeviceStore {
         let mut a = self.activities.lock().unwrap();
         a.retain(|x| !(x.device_token == activity.device_token && x.item_id == activity.item_id));
         a.push(activity);
+    }
+
+    /// Makes `devices()` fail, the way a busy or locked store does.
+    pub fn fail_devices(&self, on: bool) {
+        self.fail_devices.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes `live_activities_for()` fail.
+    pub fn fail_activities(&self, on: bool) {
+        self.fail_activities.store(on, Ordering::SeqCst);
     }
 
     /// Every call, in order.
@@ -304,6 +319,11 @@ impl DeviceStore for FakeDeviceStore {
 
     async fn devices(&self) -> Result<Vec<DeviceRecord>, PortError> {
         self.record(Call::Devices);
+        if self.fail_devices.load(Ordering::SeqCst) {
+            return Err(PortError::Store(
+                "injected: the device table is unreadable".into(),
+            ));
+        }
         Ok(self.devices.lock().unwrap().clone())
     }
 
@@ -334,6 +354,11 @@ impl DeviceStore for FakeDeviceStore {
         item: ItemId,
     ) -> Result<Vec<LiveActivityRecord>, PortError> {
         self.record(Call::LiveActivitiesFor(item));
+        if self.fail_activities.load(Ordering::SeqCst) {
+            return Err(PortError::Store(
+                "injected: the live_activities table is unreadable".into(),
+            ));
+        }
         Ok(self
             .activities
             .lock()

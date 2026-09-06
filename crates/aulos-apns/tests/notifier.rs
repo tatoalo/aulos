@@ -703,6 +703,202 @@ async fn shutdown_drains_the_task_set() {
 }
 
 #[tokio::test]
+async fn a_second_activity_registered_mid_download_does_not_push_for_ever() {
+    // A household with a phone and an iPad, or one device after iOS rotated its update token.
+    // The two registrations' throttle windows are then offset by less than one interval, and a
+    // trailing edge that decides "up to date" from a timestamp alone can never converge: each
+    // pass re-stamps whichever record it just sent, pushing it back inside the other's window, so
+    // the timer re-delivers the *same* content-state at N pushes per interval, for ever.
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    rig.store
+        .add_device(device("bb22", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+
+    let frame = |percent: f64| base.clone().progress(percent, None, None, None, None);
+
+    // t = 0: the phone alone, and the leading frame goes straight out.
+    rig.notifier
+        .on_event(&changed(
+            Status::Downloading,
+            Status::Downloading,
+            &frame(10.0),
+        ))
+        .await;
+    rig.notifier.quiesce().await;
+
+    // Half a window in: throttled, so the trailing-edge timer takes it at t = WINDOW. That is what
+    // leaves "act-1" stamped mid-window rather than at the registration-cache boundary.
+    tokio::time::sleep(WINDOW / 2).await;
+    rig.notifier
+        .on_event(&changed(
+            Status::Downloading,
+            Status::Downloading,
+            &frame(20.0),
+        ))
+        .await;
+    rig.notifier.quiesce().await;
+
+    // The iPad starts its own activity. The notifier sees it on the next cache miss — half a
+    // window after the phone was last stamped, which is the offset that used to be fatal.
+    rig.store
+        .add_activity(activity("bb22", id, "act-2", ApnsEnvironment::Sandbox));
+    tokio::time::sleep(WINDOW / 2).await;
+    rig.notifier
+        .on_event(&changed(
+            Status::Downloading,
+            Status::Downloading,
+            &frame(30.0),
+        ))
+        .await;
+
+    // Let every trailing edge play out — deliberately without `quiesce`, which would simply hang
+    // for ever on the bug this pins.
+    tokio::time::sleep(WINDOW * 4).await;
+    let settled = rig.requests().await.len();
+    assert_eq!(
+        rig.notifier.in_flight(),
+        0,
+        "the trailing-edge timer must finish, not spin"
+    );
+
+    tokio::time::sleep(WINDOW * 4).await;
+    assert_eq!(
+        rig.requests().await.len(),
+        settled,
+        "there is nothing new to deliver, so nothing more may be sent"
+    );
+
+    let to_ipad = rig
+        .requests()
+        .await
+        .into_iter()
+        .filter(|(p, _, _)| p == "/3/device/act-2")
+        .count();
+    assert_eq!(
+        to_ipad, 1,
+        "the iPad gets the state once, not once per window"
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_start_lost_to_an_unreadable_device_table_is_retried() {
+    // The latch used to be taken in `on_event`, before it was known that a start would be
+    // attempted at all — so a store hiccup, or a full task set, burned the item's one chance and
+    // the Live Activity simply never appeared for that download.
+    let rig = Rig::new().await;
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.live_activity_start_token = Some("start-aa11".into());
+    rig.store.add_device(d);
+    rig.store.fail_devices(true);
+
+    let item = ItemBuilder::new("x").status(Status::Downloading);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    assert!(
+        rig.requests().await.is_empty(),
+        "nothing could be read, so nothing was sent"
+    );
+
+    rig.store.fail_devices(false);
+    let paused = item.clone().status(Status::Queued);
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Queued, &paused))
+        .await;
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1, "the next start edge retries");
+    assert_eq!(reqs[0].0, "/3/device/start-aa11");
+    assert_eq!(reqs[0].2["aps"]["event"], json!("start"));
+}
+
+#[tokio::test]
+async fn a_start_token_registered_late_still_gets_an_activity() {
+    // Nobody could receive a start, so the item must not be latched as started.
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let item = ItemBuilder::new("x").status(Status::Downloading);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    assert!(rig.requests().await.is_empty());
+
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.live_activity_start_token = Some("start-aa11".into());
+    rig.store.add_device(d);
+
+    let paused = item.clone().status(Status::Queued);
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Queued, &paused))
+        .await;
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].0, "/3/device/start-aa11");
+}
+
+#[tokio::test]
+async fn a_store_hiccup_at_completion_still_ends_the_activity() {
+    // DESIGN §25.2 makes the end unconditional: a cancelled or finished download must never leave
+    // a progress ring spinning on the lock screen. A failed read used to be indistinguishable from
+    // "this item had no registrations", and nothing retries a `Completed`.
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let item = ItemBuilder::new("x").status(Status::Downloading);
+    let id = item.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+
+    // One update, so the notifier has the registration cached.
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    let before = rig.requests().await.len();
+    assert_eq!(before, 1);
+
+    rig.store.fail_activities(true);
+    let done = item.clone().status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    let end = reqs[before..]
+        .iter()
+        .find(|(p, _, _)| p == "/3/device/act-1")
+        .expect("an end push, sent from the cached registrations");
+    assert_eq!(end.2["aps"]["event"], json!("end"));
+    assert!(
+        rig.store
+            .calls()
+            .contains(&Call::RemoveLiveActivitiesFor(id)),
+        "and the rows are still swept"
+    );
+    assert!(rig.store.activity_tokens().is_empty());
+}
+
+#[tokio::test]
 async fn it_is_interested_in_every_item() {
     let rig = Rig::new().await;
     let item = ItemBuilder::new("x");
