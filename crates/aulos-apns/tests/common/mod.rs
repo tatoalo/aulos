@@ -104,13 +104,23 @@ impl ItemBuilder {
                 started_at: None,
                 finished_at: None,
                 attempt: 0,
-                source: SourceRef::bare(SourceKind::ApiV2),
+                // The default is `ios` because that is the only kind this notifier pushes for
+                // (DESIGN §25.2): a rig item is standing in for something the app added. Use
+                // [`Self::source`] for the tests that are about the gate itself.
+                source: SourceRef::bare(SourceKind::Ios),
                 children_total: None,
                 clear_after: None,
             },
             cell: ProgressCell::new(tokio::time::Instant::now()),
             extras: ViewExtras::default(),
         }
+    }
+
+    /// Sets who added the item — the routing key `APNS_PUSH_ALL=false` gates on (DESIGN §25.2).
+    #[must_use]
+    pub fn source(mut self, kind: SourceKind) -> Self {
+        self.item.source = SourceRef::bare(kind);
+        self
     }
 
     /// Fixes the id, so a test can talk about the same item twice.

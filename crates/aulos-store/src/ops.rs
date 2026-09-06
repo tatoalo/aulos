@@ -76,8 +76,12 @@ pub enum WriteOp {
         at: UnixMs,
     },
 
-    /// Re-attribution: boot recovery writes `kind: "restart"` (DESIGN §8.9), a retry writes
-    /// `kind: "retry"` (DESIGN §4.4). `source` is on the wire, so it needs a write path of its own.
+    /// Re-attribution. `source` is on the wire, so it needs a write path of its own.
+    ///
+    /// Nothing in the engine writes it any more: a retry and a boot recovery both used to
+    /// overwrite the origin with `kind: "retry"`/`"restart"`, and DESIGN §4.4 stopped them because
+    /// per-origin routing needs to know who asked. The op stays because the column is still
+    /// writable and rows an older build wrote still carry those two values.
     SetSource {
         /// The row.
         id: ItemId,
@@ -360,14 +364,18 @@ impl WriteOp {
     ];
 }
 
-/// The `Retry` triple of DESIGN §7.1/§8.8, as one helper so the three surfaces that retry an item
-/// cannot each get it slightly wrong.
+/// The `Retry` pair of DESIGN §7.1/§8.8, as one helper so the surfaces that retry an item cannot
+/// each get it slightly wrong.
 ///
-/// `SetStatus { Queued, msg: Clear, error: Clear, auto_start: Some(true) }` + `BumpAttempt` +
-/// `SetSource { kind: "retry" }`. The status write is what nulls `finished_at` while keeping
-/// `started_at`.
+/// `SetStatus { Queued, msg: Clear, error: Clear, auto_start: Some(true) }` + `BumpAttempt`. The
+/// status write is what nulls `finished_at` while keeping `started_at`.
+///
+/// It used to be a *triple*, ending in `SetSource { kind: "retry" }`. It no longer touches
+/// `source` at all: DESIGN §4.4 makes the origin permanent, because a retried Telegram item still
+/// has to report to its chat and a retried iOS item still has to reach the phone. `attempt` is
+/// what says "this is a retry" now, and `BumpAttempt` is right here.
 #[must_use]
-pub fn retry_ops(id: ItemId, at: UnixMs, source: SourceRef) -> Vec<WriteOp> {
+pub fn retry_ops(id: ItemId, at: UnixMs) -> Vec<WriteOp> {
     vec![
         WriteOp::SetStatus {
             id,
@@ -378,14 +386,12 @@ pub fn retry_ops(id: ItemId, at: UnixMs, source: SourceRef) -> Vec<WriteOp> {
             at,
         },
         WriteOp::BumpAttempt { id },
-        WriteOp::SetSource { id, source },
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aulos_core::SourceKind;
 
     #[test]
     fn names_are_unique_and_complete() {
@@ -396,12 +402,13 @@ mod tests {
     }
 
     #[test]
-    fn retry_is_the_documented_triple() {
+    fn retry_is_the_documented_pair_and_never_re_attributes() {
         let id = ItemId::new();
-        let ops = retry_ops(id, 42, SourceRef::bare(SourceKind::Retry));
+        let ops = retry_ops(id, 42);
+        // No `set_source`: DESIGN §4.4 keeps the origin across a retry.
         assert_eq!(
             ops.iter().map(WriteOp::name).collect::<Vec<_>>(),
-            ["set_status", "bump_attempt", "set_source"]
+            ["set_status", "bump_attempt"]
         );
         for op in &ops {
             assert_eq!(op.item(), Some(id));

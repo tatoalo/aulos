@@ -6,7 +6,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aulos_core::{ErrorCode, Kind, RemoveReason, Status};
+use aulos_core::{ErrorCode, Kind, RemoveReason, SourceKind, SourceRef, Status};
 use aulos_provider::fake::FakeProvider;
 use aulos_queue::{Action, SkipReason};
 use support::{Harness, expanding, request};
@@ -471,6 +471,50 @@ async fn an_explicit_retry_clears_the_error_and_re_runs() {
 
     let refused = h.handle.actions(Action::Retry, vec![id], None).await;
     assert_eq!(refused.skipped[0].reason, SkipReason::NotRetryable);
+}
+
+/// DESIGN §4.4: neither retry path re-attributes the item.
+///
+/// Both used to stamp `kind: "retry"` over `source`, which threw away the one copy of the Telegram
+/// chat id the server has — a retried download would then finish and report to nobody. The rule is
+/// per-origin routing's whole basis: notifications go back to whoever asked, and a retry does not
+/// change who asked.
+#[tokio::test]
+async fn neither_retry_path_takes_the_chat_away_from_a_telegram_item() {
+    let h = Harness::builder()
+        .provider(Arc::new(failing("network")))
+        .env("AULOS_AUTO_RETRY_MAX", "1")
+        .build()
+        .await;
+    let chat = SourceRef::with_ref(SourceKind::Telegram, "-100987");
+    let id = h
+        .handle
+        .add(vec![request("https://fake.test/watch/flaky")], chat.clone())
+        .await
+        .expect("the add must be accepted")
+        .ids[0];
+
+    // 1. The automatic backoff retry (DESIGN §8.8).
+    let armed = h.until(id, "an armed retry", |i| i.attempt == 1).await;
+    assert_eq!(armed.status, Status::Queued);
+    assert_eq!(
+        armed.source, chat,
+        "the backoff must not re-attribute the row"
+    );
+
+    // 2. The manual one, from the terminal status the exhausted backoff leaves behind.
+    h.advance(Duration::from_secs(120)).await;
+    let dead = h.until_status(id, Status::Error).await;
+    assert_eq!(dead.source, chat);
+    let applied = h.handle.actions(Action::Retry, vec![id], None).await;
+    assert_eq!(applied.applied, vec![id], "{applied:?}");
+    let retried = h.until(id, "the manual retry", |i| i.attempt == 2).await;
+    assert_eq!(retried.source.kind, SourceKind::Telegram);
+    assert_eq!(
+        retried.source.reference.as_deref(),
+        Some("-100987"),
+        "the chat that asked is still the chat that gets told"
+    );
 }
 
 /// PROTOCOL §4.2: "`start` … on a terminal item it is a `retry`". The shipped client offers a

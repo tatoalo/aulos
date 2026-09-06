@@ -9,6 +9,30 @@
 //! | `Completed` | a Live Activity **end**, then `remove_live_activities_for`; plus one alert per device with `alerts == true`, for a top-level item or a group |
 //! | `Removed` | forget the item's cached state |
 //!
+//! # Only the items the phone asked for (DESIGN §12.6, §25.2)
+//!
+//! The operator's rule is that a download reports on the channel that added it: an add from the
+//! iOS app pushes, an add from Telegram is Telegram's to announce, and a `curl` add reports
+//! nowhere. The gate is `view.source.kind == Ios`, which is one check because a playlist child
+//! inherits its parent's source and `source` is written once at the add and never rewritten
+//! (DESIGN §4.4). `APNS_PUSH_ALL=true` turns the gate off and restores the old fan-out.
+//!
+//! It gates the two pushes that fan out to **devices** — the push-to-start, and the alert. The
+//! Live Activity **update** and **end** are addressed to a registration the app made for that one
+//! item, so they follow the registration instead:
+//!
+//! - an activity only exists because the app asked for one, so pushing it is never a fan-out the
+//!   operator's rule was aimed at, and refusing to is a ring frozen at its first frame;
+//! - the update path is also the only thing that keeps the record cache warm, and the terminal
+//!   `end` falls back on that cache when the store cannot be read — gating it would leave the
+//!   fallback permanently empty for exactly the non-iOS items the ungated end exists to protect;
+//! - and the knob can be flipped while an activity is live, which is the case that made the end
+//!   unconditional in the first place: an activity that is never ended leaves a progress ring
+//!   spinning on the lock screen with nothing to close it (§25.2).
+//!
+//! For the same reason the completion **alert** fires for an item that had a registration even
+//! when its `source` is not `ios`: the phone was showing that download.
+//!
 //! # Three rules that are easy to get wrong
 //!
 //! - **A group gets one alert; its children get none.** `Completed` for an item with a
@@ -49,6 +73,7 @@ use aulos_core::event::{DomainEvent, Notifier};
 use aulos_core::id::ItemId;
 use aulos_core::item::ItemView;
 use aulos_core::ports::{ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord};
+use aulos_core::source::SourceKind;
 use aulos_core::status::Status;
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
@@ -127,16 +152,21 @@ impl ApnsNotifier {
             &cfg.apns_topic,
             store,
             clock,
+            cfg.apns_push_all,
         )))
     }
 
     /// Builds the notifier around an already-configured client. This is what the tests use.
+    ///
+    /// `push_all` is `APNS_PUSH_ALL`: `false` (the default) pushes only for items whose
+    /// `source.kind` is `ios`.
     #[must_use]
     pub fn with_client(
         client: ApnsClient,
         default_topic: &str,
         store: Arc<dyn DeviceStore>,
         clock: Arc<dyn Clock>,
+        push_all: bool,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -144,6 +174,7 @@ impl ApnsNotifier {
                 store,
                 clock,
                 default_topic: Arc::from(default_topic),
+                push_all,
                 counters: Counters::new(),
                 state: Mutex::new(State::default()),
                 permits: Semaphore::new(PUSH_CONCURRENCY),
@@ -217,20 +248,33 @@ impl Notifier for ApnsNotifier {
         ID
     }
 
-    /// Every item. A device registration is per user, not per source, so there is nothing to
-    /// filter on (DESIGN §12.6).
-    fn interested(&self, _item: &ItemView) -> bool {
-        true
+    /// Only what the phone asked for: `source.kind == "ios"`, unless `APNS_PUSH_ALL` is on
+    /// (DESIGN §12.6, §25.2).
+    ///
+    /// This is the predicate for the two pushes that fan out to *devices*: the Live Activity
+    /// push-to-start, and the completion alert for an item nothing else on the phone is tracking.
+    /// The Live Activity **update** and **end** are deliberately not gated on it — both address a
+    /// registration the app made for this very item, so the item's origin is not the question, and
+    /// a caller that filtered event *delivery* on this method would strand exactly those two: a
+    /// ring frozen at its first frame, and then one nothing ever closes. [`Self::on_event`] is the
+    /// authority; this stays advisory (logs, and a router that only wants a hint).
+    fn interested(&self, item: &ItemView) -> bool {
+        self.shared.pushes_for(item)
     }
 
     async fn on_event(&self, ev: &DomainEvent) {
         match ev {
             DomainEvent::StatusChanged { from, to, view, .. } => {
+                // The start push is the only thing on this path that fans out to devices rather
+                // than to a registration the app already made, so it is the only thing the source
+                // gate covers here (DESIGN §25.2).
+                //
                 // The latch itself lives in `push_to_start`, which is where it is known that a
                 // start will actually be attempted: latching here would burn the item's one
                 // chance on a full task set or an unreadable device table, and `is_start_edge`
                 // never fires twice for one download.
-                if view.group_id.is_none()
+                if self.shared.pushes_for(view)
+                    && view.group_id.is_none()
                     && is_start_edge(*from, *to)
                     && !self.shared.already_started(view.id)
                 {
@@ -239,6 +283,12 @@ impl Notifier for ApnsNotifier {
                     self.shared
                         .spawn(async move { shared.push_to_start(view).await });
                 }
+                // Ungated, exactly like the end (DESIGN §25.2). Two reasons, and the second is the
+                // one that used to be a bug: an update can only ever reach an activity the app
+                // registered for *this* item, and this call is the only thing that keeps the
+                // record cache warm — the cache the terminal path falls back on when
+                // `live_activities_for` fails. Gating it here left that fallback permanently empty
+                // for precisely the non-iOS items the ungated end exists to protect.
                 self.shared.live_activity_update(Arc::clone(view)).await;
             }
             DomainEvent::Completed(view) => {
@@ -281,6 +331,9 @@ struct Shared {
     clock: Arc<dyn Clock>,
     /// `APNS_TOPIC`: the bundle id used when a device did not report its own.
     default_topic: Arc<str>,
+    /// `APNS_PUSH_ALL`: `false` restricts alerts and Live Activity starts/updates to items the
+    /// iOS app added (DESIGN §25.2).
+    push_all: bool,
     counters: Arc<Counters>,
     state: Mutex<State>,
     permits: Semaphore,
@@ -388,6 +441,19 @@ struct Step {
 }
 
 impl Shared {
+    // -- the source gate ----------------------------------------------------
+
+    /// Whether this item is one the phone should hear about *unprompted* — the gate on the two
+    /// pushes that fan out to devices, the push-to-start and the alert (DESIGN §12.6, §25.2).
+    ///
+    /// One test on `source.kind` covers a playlist too: the engine copies the parent's `SourceRef`
+    /// onto every child, and nothing ever rewrites it (DESIGN §4.4, §8.8, §8.9). A Live Activity
+    /// update or end is not asked about here: it goes to a registration the app made for that one
+    /// item, so the registration is the permission.
+    fn pushes_for(&self, view: &ItemView) -> bool {
+        self.push_all || view.source.kind == SourceKind::Ios
+    }
+
     // -- state helpers ------------------------------------------------------
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -707,8 +773,19 @@ impl Shared {
     // -- the terminal path ---------------------------------------------------
 
     async fn complete(self: Arc<Self>, view: Arc<ItemView>) {
-        self.end_live_activities(&view).await;
+        // Unconditional, even for an item this notifier does not alert on: `APNS_PUSH_ALL` can be
+        // flipped while an activity is live, and nothing else ever closes one (§25.2).
+        let tracked = self.end_live_activities(&view).await;
 
+        // The alert obeys the source gate — a Telegram or web add is announced by whoever asked
+        // for it, not by the phone (DESIGN §12.6) — with one addition: an item the app was holding
+        // a Live Activity for *is* the phone's to announce, whatever `source` says. A registration
+        // exists only because the app asked for one, and `source` is written once at the add and
+        // never rewritten (§4.4), so it is the registration, not the row, that knows the phone is
+        // watching this download.
+        if !self.pushes_for(&view) && !tracked {
+            return;
+        }
         // A child of a group is silent: the group gets the one alert.
         if view.group_id.is_some() {
             return;
@@ -749,7 +826,10 @@ impl Shared {
     }
 
     /// The `end` push for every registration, then `remove_live_activities_for`.
-    async fn end_live_activities(self: &Arc<Self>, view: &Arc<ItemView>) {
+    ///
+    /// Returns whether the item had any registration at all — which is what tells the caller the
+    /// phone was watching this download even when its `source` says somebody else added it.
+    async fn end_live_activities(self: &Arc<Self>, view: &Arc<ItemView>) -> bool {
         let id = view.id;
         // A failed read is not "this item had no registrations". DESIGN §25.2 makes the end
         // unconditional, nothing retries a `Completed`, and the only other sweep
@@ -818,6 +898,7 @@ impl Shared {
         if cleared || !read_failed {
             self.forget(&[id]);
         }
+        !records.is_empty()
     }
 
     /// The registrations this notifier last read for an item. The fallback the terminal path uses

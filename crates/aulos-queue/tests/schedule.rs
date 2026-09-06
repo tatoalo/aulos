@@ -90,7 +90,12 @@ async fn the_four_priority_classes_are_served_in_order() {
     assert_eq!(applied.applied, vec![failed], "a failed item is retryable");
     let retried = h.item(failed).await.unwrap();
     assert_eq!(retried.attempt, 1, "attempt increments (DESIGN §8.8)");
-    assert_eq!(retried.source.kind, SourceKind::Retry);
+    // The retry is derived from `attempt`, not from a rewritten origin (DESIGN §4.4).
+    assert_eq!(retried.source.kind, SourceKind::ApiV2, "the origin is kept");
+    assert_eq!(
+        Priority::of(retried.source.kind, false, retried.attempt > 0),
+        Priority::Retry
+    );
 
     for id in [subscription, interactive] {
         h.until(id, "queued", |i| i.status == Status::Queued).await;
@@ -267,11 +272,11 @@ async fn a_subscription_add_is_its_own_class() {
     assert_eq!(row.source.kind, SourceKind::Subscription);
     assert_eq!(row.source.reference.as_deref(), Some("sub-1"));
     assert_eq!(
-        Priority::of(SourceKind::Subscription, false),
+        Priority::of(SourceKind::Subscription, false, false),
         Priority::Subscription
     );
     assert_eq!(
-        Priority::of(SourceKind::Subscription, true),
+        Priority::of(SourceKind::Subscription, true, false),
         Priority::Bulk,
         "but a subscription's playlist child is Bulk"
     );

@@ -13,11 +13,13 @@ use axum::http::{HeaderName, HeaderValue, Method, header};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// The request headers a browser client may send (`Authorization` for the bearer token,
-/// `X-Request-Id` so a web client can correlate its own logs).
-const ALLOWED_HEADERS: [HeaderName; 3] = [
+/// `X-Request-Id` so a web client can correlate its own logs, `X-Aulos-Client` because PROTOCOL
+/// §1.3 promises that header can never make a request fail — a preflight rejection would).
+const ALLOWED_HEADERS: [HeaderName; 4] = [
     header::CONTENT_TYPE,
     header::AUTHORIZATION,
     crate::trace::REQUEST_ID,
+    crate::v2::downloads::CLIENT_HEADER,
 ];
 
 /// The response headers a browser client must be able to read.

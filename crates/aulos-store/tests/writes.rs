@@ -619,13 +619,14 @@ async fn set_status_implements_the_timestamp_table() {
     assert_eq!(updated, 50);
 }
 
-/// The retry triple: `error → queued` clears the error, nulls `finished_at`, keeps `started_at`,
-/// bumps `attempt` and re-attributes the item (DESIGN §7.1, §8.8).
+/// The retry pair: `error → queued` clears the error, nulls `finished_at`, keeps `started_at` and
+/// bumps `attempt` — and leaves the origin alone (DESIGN §7.1, §8.8, §4.4).
 #[tokio::test]
-async fn a_retry_clears_the_error_and_keeps_started_at() {
+async fn a_retry_clears_the_error_and_keeps_started_at_and_the_origin() {
     let h = support::harness();
     let s = &h.store;
-    let id = seeded(s).await.id;
+    let seed = seeded(s).await;
+    let id = seed.id;
 
     apply(
         s,
@@ -651,12 +652,7 @@ async fn a_retry_clears_the_error_and_keeps_started_at() {
     )
     .await;
 
-    let row = apply(
-        s,
-        id,
-        retry_ops(id, 300, SourceRef::bare(SourceKind::Retry)),
-    )
-    .await;
+    let row = apply(s, id, retry_ops(id, 300)).await;
     assert_eq!(row.status, Status::Queued);
     assert_eq!(row.error, None, "a retry must not leave a stale error");
     assert_eq!(row.msg, None);
@@ -664,7 +660,8 @@ async fn a_retry_clears_the_error_and_keeps_started_at() {
     assert_eq!(row.finished_at, None);
     assert_eq!(row.started_at, Some(100));
     assert_eq!(row.attempt, 1);
-    assert_eq!(row.source.kind, SourceKind::Retry);
+    // DESIGN §4.4: the origin outlives the retry, so per-origin routing still knows who asked.
+    assert_eq!(row.source, seed.source);
 }
 
 // ---------------------------------------------------------------------------

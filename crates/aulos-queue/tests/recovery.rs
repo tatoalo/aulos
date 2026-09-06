@@ -64,7 +64,10 @@ fn group_with(ord: i64, children: &[Status]) -> Vec<Item> {
 async fn every_status_follows_the_design_8_9_table_under_resume() {
     // The row at `ord = 0` is the *blocker*: recovery schedules in `ord` order and there is one
     // download slot, so it takes it and every other row stays exactly where recovery put it.
-    let seed = vec![
+    // It carries `attempt = 1` because the rows recovery re-queues come back with one too, which
+    // puts them at `Priority::Retry` (DESIGN §8.2) — the blocker has to share that class to still
+    // win, and inside a class the order is `ord`, where it is first.
+    let mut seed = vec![
         row(0, Status::Queued, true),
         row(1, Status::Resolving, true),
         row(2, Status::Preparing, true),
@@ -76,6 +79,7 @@ async fn every_status_follows_the_design_8_9_table_under_resume() {
         row(8, Status::Error, true),
         row(9, Status::Canceled, true),
     ];
+    seed[0].attempt = 1;
     let ids: Vec<ItemId> = seed.iter().skip(1).map(|i| i.id).collect();
     let blocker = seed[0].id;
     let (h, report) = Harness::builder()
@@ -108,12 +112,16 @@ async fn every_status_follows_the_design_8_9_table_under_resume() {
         "a lost resolve is not a failed attempt"
     );
 
-    // The three in-flight statuses → `queued`, `BumpAttempt`, `SetSource { restart }`.
+    // The three in-flight statuses → `queued`, `BumpAttempt`, and the origin left alone.
     for id in &ids[1..4] {
         let item = h.item(*id).await.unwrap();
         assert_eq!(item.status, Status::Queued, "{id}");
         assert_eq!(item.attempt, 1, "{id}: BumpAttempt");
-        assert_eq!(item.source.kind, SourceKind::Restart, "{id}");
+        assert_eq!(
+            item.source.kind,
+            SourceKind::ApiV2,
+            "{id}: a crash is not a change of origin (DESIGN §4.4)"
+        );
         assert_eq!(item.msg.as_deref(), Some("Re-queued after restart"));
     }
 
@@ -137,6 +145,43 @@ async fn every_status_follows_the_design_8_9_table_under_resume() {
         assert_eq!(item.attempt, 0);
         assert_eq!(item.source.kind, SourceKind::ApiV2, "no re-attribution");
     }
+}
+
+/// DESIGN §4.4: a restart is not a change of origin.
+///
+/// Boot recovery used to stamp `kind: "restart"` over the row, which erased the one thing
+/// per-origin routing needs — the Telegram chat that asked for the download lives in `source.ref`,
+/// and there is no second copy of it anywhere. A resumed download would then report to nobody.
+#[tokio::test]
+async fn a_recovered_running_item_keeps_the_chat_that_asked_for_it() {
+    let mut running = row(1, Status::Downloading, true);
+    running.source = SourceRef::with_ref(SourceKind::Telegram, "-100987");
+    let mut ios = row(2, Status::Postprocessing, true);
+    ios.source = SourceRef::bare(SourceKind::Ios);
+    let (telegram_id, ios_id) = (running.id, ios.id);
+
+    // `pause` parks both rows instead of resuming them, so the assertions read a settled row
+    // rather than racing the scheduler.
+    let (h, report) = Harness::builder()
+        .provider(Arc::new(hanging()))
+        .env("AULOS_RESTART_POLICY", "pause")
+        .seed(vec![running, ios])
+        .build_reporting()
+        .await;
+    assert_eq!(report.expect("recovery ran").requeued_running, 2);
+
+    let recovered = h.item(telegram_id).await.unwrap();
+    assert_eq!(recovered.status, Status::Queued);
+    assert_eq!(recovered.attempt, 1, "it did lose an attempt");
+    assert_eq!(recovered.source.kind, SourceKind::Telegram);
+    assert_eq!(recovered.source.reference.as_deref(), Some("-100987"));
+
+    let recovered = h.item(ios_id).await.unwrap();
+    assert_eq!(
+        recovered.source.kind,
+        SourceKind::Ios,
+        "and the phone still owns its download"
+    );
 }
 
 #[tokio::test]
@@ -173,6 +218,9 @@ async fn the_pause_policy_parks_the_in_flight_items_instead() {
 #[tokio::test]
 async fn group_counters_are_recomputed_from_the_children() {
     let mut seed = vec![row(0, Status::Queued, true)];
+    // `attempt = 1` puts the blocker in the same `Priority::Retry` class recovery's bumped
+    // `attempt` puts the interrupted child in (DESIGN §8.2), where its `ord = 0` wins.
+    seed[0].attempt = 1;
     let blocker = seed[0].id;
     seed.extend(group_with(
         1,

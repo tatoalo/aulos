@@ -498,8 +498,10 @@ DESIGN §7.1–7.4.
   source, DESIGN §11.4) backed by an index on `(status, ord)`. The variants added since the first
   draft are the ones the feature set actually needs and none of them is optional:
   `SetAutoStart` (pause/start change **only** `auto_start`, DESIGN §8.7 — with no such variant the
-  whole pause feature is unimplementable against this API), `SetSource` (boot recovery writes
-  `kind:"restart"`, a retry writes `kind:"retry"`, and `source` is on the wire),
+  whole pause feature is unimplementable against this API), `SetSource` (`source` is on the wire and needs a
+  write path of its own; boot recovery used to write `kind:"restart"` and a retry `kind:"retry"`,
+  until DESIGN §4.4 made the origin permanent — the variant stays, nothing in the engine writes it
+  any more, and rows an older build wrote still carry those two values),
   `SetSize` (a hook that rewrites the produced file changes the size but not the filename,
   DESIGN §13.3) and `DropEntryBlob` (the NFO hook, DESIGN §13.2).
 - `SetStatus` takes `FieldUpdate<Box<str>>` / `FieldUpdate<WireError>` (`Keep | Clear | Set`) and an
@@ -1813,8 +1815,9 @@ Telegram, against a mocked bot transport:
   **no** API call; an injected `RetryAfter(7)` sleeps and doubles the interval, and three
   successes halve it back; the global cap holds under 5 chats.
 - The five discrete messages fire exactly once each per chat per job.
-- `AULOS_TELEGRAM_WATCH_ALL=false` reproduces the legacy blind spot; `true` reports an API-sourced
-  job.
+- `AULOS_TELEGRAM_WATCH_ALL=false` (the default) keeps a web add off the board; `true` reports it.
+  A subscription is reported either way, and an `ios`-sourced item only with the knob on
+  (DESIGN §12.6).
 
 ### Definition of done
 

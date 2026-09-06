@@ -469,7 +469,7 @@ pub struct DownloadRequest {
 ```rust
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SourceRef {
-    pub kind: SourceKind,          // "api_v2" | "api_v1" | "telegram" | "subscription" | "restart" | "retry"
+    pub kind: SourceKind,          // "api_v2" | "api_v1" | "ios" | "telegram" | "subscription" | "restart" | "retry"
     pub r#ref: Option<Box<str>>,   // chat id, subscription id, or request id — always the key, may be null
 }
 ```
@@ -478,6 +478,25 @@ This replaces the internally-tagged enums both other candidates used. Two fields
 present, no per-variant payload, no hand-written Swift `Decodable`, no nested switch. The
 subscription *name* and the Telegram *message id* are not on the wire; they are in the DB row and
 in logs, which is where they are actually used.
+
+**`source` is written once, at the add, and never rewritten.** Retries (§8.8) and boot recovery
+(§8.9) used to overwrite it with `kind: "retry"` / `kind: "restart"`; they do not any more. The
+reason is per-origin notification routing (§12.6, §25): the *only* copy of the Telegram chat that
+asked for a download is `source.ref`, and `source.kind` is what tells APNs whether the phone asked
+for this item at all. Re-attributing on a retry erased both, so a resumed download reported to
+nobody, and "notify iOS only for items the iOS app added" was unimplementable. `attempt > 0` is
+what says "this is a retry" — to `Priority::of` (§8.2) and to a client — and it survives a restart
+because it is a column. `restart` and `retry` remain in the enum as **legacy** values so rows an
+older build wrote still decode; nothing writes them.
+
+**`ios` is the iOS app, share extension included.** It is set by the `X-Aulos-Client` request
+header (PROTOCOL §1.3): the token before the first `/` is matched ASCII-case-insensitively against
+`ios`, and anything else — including no header — is `api_v2`. The header is read in one place,
+`aulos-api::v2::downloads::add`, which serves both the single and the batch body. Deliberately not
+a request *field*: attribution is a property of the caller, not of one item in a batch, and a
+header cannot collide with the §4.3 add-request key set. Deliberately not derived from the
+`User-Agent` either — that string is set by whatever HTTP stack the app links against, and
+`URLSession`'s default would have made every Shortcuts user an iOS user.
 
 ### 4.5 The persisted item
 
@@ -1289,8 +1308,9 @@ pub enum WriteOp {
     /// Pause / Start. The **only** thing that changes is `auto_start` (§8.7): the status stays
     /// `queued`, so this is not a `SetStatus`.
     SetAutoStart { id: ItemId, auto_start: bool, at: UnixMs },
-    /// Re-attribution: boot recovery writes `kind:"restart"` (§8.9), a retry writes
-    /// `kind:"retry"` (§4.4). `source` is on the wire, so it needs a write path of its own.
+    /// Re-attribution. `source` is on the wire, so it needs a write path of its own. Nothing in
+    /// the engine writes it any more — §4.4 made the origin permanent — but the column is still
+    /// writable and old rows still carry `restart`/`retry`.
     SetSource { id: ItemId, source: SourceRef },
     SetResolved { id: ItemId, provider: ProviderId, media_id: Option<Box<str>>,
                   title: Box<str>, entry: Option<EntryBlob>, canonical_key: Box<str> },
@@ -1372,7 +1392,8 @@ ends up null on a finished item:
 
 Consequently `Retry` (§8.8) is exactly
 `SetStatus { status: Queued, msg: Clear, error: Clear, auto_start: Some(true), at: now }` +
-`BumpAttempt` + `SetSource { kind: "retry" }`, and `Pause` is a single `SetAutoStart` when the item
+`BumpAttempt` — and **no** `SetSource`, because §4.4 keeps the origin across a retry — while
+`Pause` is a single `SetAutoStart` when the item
 was `queued`, or `SetStatus { status: Queued, auto_start: Some(false), … }` when a running job had
 to be killed first (§8.7).
 
@@ -1882,13 +1903,21 @@ pub enum Priority { Retry = 0, Interactive = 1, Subscription = 2, Bulk = 3 }
 
 | Source of the item | Priority |
 |---|---|
-| a retry (manual or automatic) | `Retry` |
-| a direct add from API v2, API v1 or Telegram, not part of a group | `Interactive` |
+| a retry (manual or automatic) — `item.attempt > 0` | `Retry` |
+| a direct add from the iOS app, API v2, API v1 or Telegram, not part of a group | `Interactive` |
 | a subscription check | `Subscription` |
 | a playlist/channel child (any group member) | `Bulk` |
 
 This is why a link you just pasted starts next instead of queueing behind 486 playlist children.
 Within a class the order is `ord` ascending, i.e. FIFO, i.e. legacy behaviour.
+
+The first row reads `attempt`, not `source`, and that is the whole reason
+`Priority::of(source, in_group, retried)` takes three arguments: §4.4 stopped a retry from
+overwriting `source`, so the fact of being a retry has to arrive some other way, and `attempt` is
+already the column that carries it across a restart. Boot recovery bumps `attempt` only on the
+handful of rows that were genuinely in flight, so exactly those resume at `Retry` and the queued
+backlog behind them keeps `attempt == 0` and stays `Bulk` — restarting a 500-child playlist still
+does not promote 497 waiting children to anything.
 
 ### 8.3 Add path (async, BRIEF §5)
 
@@ -2134,6 +2163,11 @@ jitter, at `Priority::Retry`. `auth_required`, `bot_check`, `geo_restricted`, `u
 `AULOS_AUTO_RETRY_MAX=0` disables the feature entirely. This is new behaviour (legacy had none)
 and is why `attempt` is on the item and on the wire.
 
+Neither retry path writes `source`. Both used to stamp `kind: "retry"` over it, and §4.4 says why
+they stopped: that field is where a Telegram item's chat id lives and how an iOS item is recognised,
+so overwriting it meant a retried download reported to nobody. `attempt` is the retry's only mark,
+which is also what `Priority::of` reads (§8.2).
+
 `not_yet_live` is listed as "retry likely to help, later" in PROTOCOL.md §1.6 but is **never**
 auto-retried here, and that is not an inconsistency: an upcoming livestream is not a failed item at
 all in this design — it is `queued(auto_start=false)` with a `not_yet_live` error (§8.4), so there
@@ -2150,7 +2184,7 @@ sees a consistent snapshot.
 | Found status | Action | Reason |
 |---|---|---|
 | `resolving` | → `queued`, `msg="Re-queued after restart"` | the resolve task is gone |
-| `preparing`/`downloading`/`postprocessing` | → `queued` (`SetStatus`), `BumpAttempt`, and `SetSource { kind: "restart" }` (§7.1) | legacy restarted these all at once; the scheduler now admits them `MAX_CONCURRENT_DOWNLOADS` at a time |
+| `preparing`/`downloading`/`postprocessing` | → `queued` (`SetStatus`) and `BumpAttempt` (§7.1); `source` is **not** touched | legacy restarted these all at once; the scheduler now admits them `MAX_CONCURRENT_DOWNLOADS` at a time. A crash is not a change of origin (§4.4), so the recovered row still belongs to the chat — or the phone — that asked for it; the bumped `attempt` is what puts it back at `Priority::Retry` |
 | `queued`, `auto_start=true` | left as-is, pushed to its priority deque ordered by `ord` | |
 | `queued`, `auto_start=false` | left as-is, not scheduled | the legacy `pending` bucket |
 | terminal | untouched; `clear_after` re-armed; the most recent `AULOS_MEM_DONE_ITEMS` loaded into the cache | |
@@ -3306,9 +3340,10 @@ not an alert — and in board mode the row *also* gains its `⚠️`/`⏱️` ma
 
 Both clocks time the **download**, not the wait: they start when the item first reaches a running
 status and are held off (and reset) while it sits `Queued`/`Resolving` or is paused back into the
-queue. An item merely waiting behind `MAX_CONCURRENT_DOWNLOADS` is not stalled, and with
-`AULOS_TELEGRAM_WATCH_ALL` on by default a large playlist or subscription batch would otherwise
-fire one bogus warning per queued item into every allowed chat.
+queue. An item merely waiting behind `MAX_CONCURRENT_DOWNLOADS` is not stalled, and a
+subscription batch (which fans out to every allowed chat regardless of the knob, §12.6) — or any
+playlist, with `AULOS_TELEGRAM_WATCH_ALL` on — would otherwise fire one bogus warning per queued
+item into every allowed chat.
 
 ### 12.6 The `Notifier` seam (for APNs later)
 
@@ -3326,10 +3361,35 @@ in `aulos-telegram` — so a future APNs notifier can live in its own crate, imp
 be registered as one more `EventRouter` subscriber (§2.2.1) with no change to any existing crate.
 `TelegramNotifier` is the first implementation and lives in `aulos-telegram`.
 
-`TelegramNotifier` is interested iff `item.source.kind == "telegram"` **or**
-`AULOS_TELEGRAM_WATCH_ALL=true`. That knob defaults to **`true`**: on a single-user box, the
-legacy blind spot where web and subscription downloads were invisible to the bot is a bug, not a
-feature, and the board is rate-limited anyway. Set it to `false` for exact legacy behaviour.
+**An item reports on the channel that asked for it.** That is the whole routing rule, and it is
+the operator's own: *"notifications on iOS only if the item was added via the iOS app; if I add a
+video via Telegram, no need to receive a notif via the app, Telegram will suffice, and vice
+versa."* `TelegramNotifier` therefore routes on `item.source.kind`:
+
+| `source.kind` | Chats | Why |
+|---|---|---|
+| `telegram` | the one chat in `source.ref`, when it is allow-listed — never the whole list | that chat asked for it |
+| `subscription` | **every** allowed chat, whatever `AULOS_TELEGRAM_WATCH_ALL` says | an auto-download has no originating channel and Telegram is the only push surface for background work; gating it would make subscriptions silent everywhere, which nothing else covers |
+| `api_v2`, `api_v1`, `ios`, and the legacy `restart`/`retry` rows | every allowed chat, **only** with `AULOS_TELEGRAM_WATCH_ALL=true` | a web or `curl` add has no channel to report to, and an `ios` add is APNs' to announce (§25) — reporting it here too is the duplicate the rule exists to stop |
+
+`AULOS_TELEGRAM_WATCH_ALL` defaults to **`false`** (decision 26 as amended, decision 43). The BRIEF
+picked `true` when the bot was the only notifier there was and the legacy blind spot — web *and*
+subscription downloads invisible — was simply a bug. Half of that is now fixed unconditionally
+(subscriptions fan out with the knob off), and the other half has a better answer than fanning out:
+the phone. `true` remains the escape hatch for an operator who drives the server from `curl` and
+wants the board to show everything anyway.
+
+`interested()` is defined as "`chats_for()` would name somebody", not as a second, parallel
+condition. The two disagreeing is a real failure mode rather than a tidiness point: a `true` that
+produces an empty chat set registers a watch nothing can ever deliver, and §12.5's watchdogs then
+tick for that job forever.
+
+That test is the reason `source` is immutable (§4.4). `SourceKind` is the routing key for every
+notifier — `"telegram"` here, `"ios"` in §25 — and its `ref` is the only copy of the chat id, so a
+retry or a boot recovery that re-attributed the row to `"retry"` / `"restart"` silently made the
+item unroutable. The full kind list a notifier may see is
+`api_v2 | api_v1 | ios | telegram | subscription | restart | retry`; the last two only ever come
+off rows an older build wrote, and they route as "anything else" — the knob decides.
 
 **A restart says nothing until something happens.** Boot recovery re-publishes the entire
 recovered working set as one `Added` event so the aggregator's snapshot is seeded (§8.9 step 7),
@@ -3349,14 +3409,21 @@ actor treats that transition as a job starting over: it takes the watch and puts
 board exactly as an `Added` would, so a retry is never silent. The same rule is the right default
 for any future `Notifier`.
 
-An APNs notifier later implements the same trait with `interested = |_| true` plus a device-token
-table, and changes nothing else. No device-token table, no APNs key and no separate webhook
+An APNs notifier later implements the same trait with a device-token table, and changes nothing
+else. No device-token table, no APNs key and no separate webhook
 notifier ship now: webhooks are already covered by the community `[[hook]]` manifest (§13.5), and
 a push service is a separate deployment decision.
 
 **Amendment: that later is now — see §25.** `aulos-apns` is exactly the crate this paragraph
-predicted: `interested = |_| true`, a device-token table behind `aulos_core::ports::DeviceStore`,
-one more `EventRouter` subscriber, and no change to any existing crate. The paragraph is left
+predicted: a device-token table behind `aulos_core::ports::DeviceStore`, one more `EventRouter`
+subscriber, and no change to any existing crate. Its `interested()` is the mirror image of the
+table above — `source.kind == "ios"`, or anything at all with `APNS_PUSH_ALL=true` (§25.2) — and,
+unlike the Telegram one, it is advisory: a Live Activity update or end is addressed to a
+registration rather than fanned out to devices, so `on_event` sends those whatever `interested()`
+says, and nothing may filter *delivery* on it. An
+earlier draft of this paragraph said `interested = |_| true`, which was right while a device
+registration was the only thing there was to filter on and wrong the moment the two notifiers had
+to divide the work. The paragraph is left
 standing because it is the design decision that made the seam cheap enough to take. The webhook
 sentence is unchanged: community `[[hook]]`s still cover webhooks and no webhook notifier ships.
 
@@ -4612,6 +4679,7 @@ variable is ignored rather than fatal (§17.1), which is the price of the except
 | `APNS_KEY_ID` | `''` | str | the provider token's `kid`. **Not a secret** | N\* |
 | `APNS_TEAM_ID` | `''` | str | the provider token's `iss`. **Not a secret** | N\* |
 | `APNS_TOPIC` | `com.tatoalo.aulos` | str | the default bundle id, and the `apns-topic` for a device that reported none. A device's own `bundle_id` wins when present | N\* |
+| `APNS_PUSH_ALL` | `false` | bool | push for **every** item, not only those whose `source.kind` is `ios` (§25.2). `false` is the routing rule: a Telegram or web add is not the phone's to announce. Updating and ending a Live Activity are never gated by this | N |
 | `APNS_BASE_URL_OVERRIDE` | `''` | str | **test only.** Points both gateways at one base URL so the `aulos-apns` suite can run against a local mock (§25.9). Empty in every real deployment | N\* |
 | `METUBE_VERSION` | `dev` | str | reported by `/version` and `healthz`; `AULOS_VERSION` is an accepted alias | L |
 | `PLUGINS_DIR` | `/config/plugins` | path | the default for `AULOS_PLUGINS_DIR`. **Not a legacy variable** — it appears in neither `_DEFAULTS` nor anywhere else in the Python source; it is introduced by BRIEF §9 and is un-prefixed contrary to BRIEF §15, which §23.1 records as a deliberate deviation | N\* |
@@ -4663,7 +4731,7 @@ variable is ignored rather than fatal (§17.1), which is the price of the except
 | `AULOS_NFO_PROVIDERS` | `''` | comma list | provider ids the NFO hook writes for; **empty = all** | N |
 | `AULOS_TELEGRAM_BOARD` | `board` | `board\|per_job` | live board vs one message per job | N |
 | `AULOS_TELEGRAM_EDIT_INTERVAL_MS` | `3000` | int | per-chat edit budget | N |
-| `AULOS_TELEGRAM_WATCH_ALL` | `true` | bool | report web/subscription jobs too; `false` = exact legacy blind spot | N |
+| `AULOS_TELEGRAM_WATCH_ALL` | `false` | bool | report jobs the bot did not create and that are not subscription checks (web, `curl`, iOS) to every allowed chat (§12.6). Subscriptions fan out whatever this says; a Telegram job always goes to its own chat | N |
 | `AULOS_SUB_CHECK_CONCURRENCY` | `2` | int | concurrent subscription checks | N |
 | `AULOS_SUB_CHECK_TIMEOUT_SECS` | `180` | int | per-check timeout | N |
 | `AULOS_SUB_BACKOFF_MAX_SECS` | `21600` | int | backoff cap (6 h) | N |
@@ -5334,6 +5402,10 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 38 | Add `pause`/`resume`, the half of iOS ask 11 that C35 did not cover? | **Yes — as a `pause` action, not a ninth status** (§8.7). `queued(auto_start=true) → auto_start=false` un-schedules; a running job is killed but keeps its `.part` so `start` resumes it, with `attempt` unchanged. The action set becomes `start \| pause \| cancel \| retry \| delete`. "Paused" and "never started" are the same thing to the scheduler, the v1 shim and the client, so the closed 8-value vocabulary of BRIEF §6 is untouched (Appendix B, C41). |
 | 39 | Where does the `DomainEvent` fan-out live, and what type is it? | **An explicit `EventRouter` task in `aulos-core::event`, owning the single receiver and issuing one bounded `EventInbox` per subscriber** (§2.2.1). Not a `broadcast` channel: it cannot express per-subscriber capacity or drop policy, and it drops the *oldest* message for a slow reader, which for a `Completed` event silently skips a hook. Not four consumers each taking "the" `mpsc::Receiver`, which does not compile. |
 | 40 | v1 `GET <p>history` `done[]`: the in-memory window or the whole store? | **The whole store**, `AULOS_V1_HISTORY_MAX=0` by default (§11.4). v1 has no `truncated`, no `done_total` and no paging, and `HistoryResponse` declares all three arrays non-optional, so a window would silently drop thousands of rows out of the shipped client at cutover. v2 stays windowed and honest. |
+| 41 | Should a retry or a boot recovery re-attribute the item to itself? | **No — `source` is written once, at the add, and never rewritten** (§4.4, §8.8, §8.9). It was `kind: "retry"` / `kind: "restart"` until per-origin notification routing needed the field: `source.ref` is the only copy of the Telegram chat that asked, and `source.kind` is how §25 tells an item the phone added from one it did not, so re-attributing made a retried download report to nobody. `Priority::of` now takes the fact explicitly (`retried = item.attempt > 0`), which is a column and therefore survives a restart. Both enum values stay so rows written by an older build still decode. |
+| 42 | How does the server tell an add from the iOS app apart from any other `api/v2` add? | **A request header, `X-Aulos-Client: ios/<version>`, read in one place and mapped to `SourceKind::Ios`** (PROTOCOL §1.3, §4.4). Not a request *field*: attribution belongs to the caller, not to one item of a batch, and a header cannot collide with the §4.3 key set. Not the `User-Agent`: that is whatever HTTP stack the app links against, and `URLSession`'s default string would have made every Shortcuts user an iOS user. Only the token before the `/` is interpreted and an unknown client is `api_v2`, so the header can never turn a good add into a failure. The operator's rule it exists for: *"notifications on iOS only if the item was added via the iOS app; if I add a video via Telegram, Telegram will suffice, and vice versa."* |
+| 43 | Which items does the Telegram bot report on, now that a second notifier exists? | **The chat that asked (`source.kind == "telegram"`), plus every subscription, plus everything else only with `AULOS_TELEGRAM_WATCH_ALL` — which now defaults to `false`** (§12.6, amending decision 26). A subscription is unconditional and that is the load-bearing part: an auto-download has no originating channel, so there is nobody to report back to, and Telegram is the only push surface for background work — gating it on the knob would make the one class of download nothing else covers completely silent. An `ios` add is APNs' to announce, so reporting it here as well is exactly the duplicate the operator asked us to stop sending. `interested()` is defined as "`chats_for()` would name somebody" rather than as a parallel condition: a `true` that yields an empty chat set books a watch nothing can deliver, and §12.5's watchdogs then tick for it forever. |
+| 44 | And which items does APNs push for? | **`source.kind == "ios"`, or everything with `APNS_PUSH_ALL=true` (default `false`)** (§25.2). The mirror of 43, and the gate is narrower than it first looks: it covers the two pushes that fan out to *devices*, the activity **start** and the **alert**. `Removed` is not gated — it is bookkeeping, and skipping it leaks per-item state for every non-iOS download the process ever sees. **Updating** and **ending** a Live Activity are not gated either, and that is one rule, not two: both are addressed to a registration the app made for that one item (its own add, or one it adopted at launch from a server push-start), so the registration is the permission, the knob can be flipped at runtime while an activity is live, and an activity nobody updates freezes at its first frame while one nobody ends is a progress ring with nothing left to close it. The update is also the only thing that fills the record cache the ungated end falls back on when the store cannot be read, so gating it silently emptied that fallback for exactly the non-iOS items it protects. The **alert** additionally fires for an item that had a registration whatever its origin, because `source` is immutable (§4.4) and an iOS add that dedupes onto a live Telegram item never rewrites it (§8.5) — the registration is then the only record that the phone is watching that download. Not a per-device preference instead of a global knob: `alerts` already exists per device for "do I want alerts at all", and a second per-device axis for "…from which origin" is a settings screen nobody asked for. |
 | 1 | A Socket.IO shim for the overlap window? | **No.** BRIEF §8 says Socket.IO is not provided. `<p>socket.io` returns 501 with a pointer; the v2 iOS build is installed **before** the swap, which is what keeps the shipped build (blank queue without a handshake) from ever meeting it (§11.6, R2). |
 | 2 | Should the v1 shim synthesise a parent row for a group? | **No.** Groups are omitted from `/history`; only children appear. A parent row that never progresses is worse than nothing in the old client (§11.4). |
 | 3 | `canceled` in v1 `/history`? | **Omitted entirely.** The shipped `DownloadStatus` has no `canceled` case and maps unknown → `.pending`, so a cancelled row would be stuck in "In Progress" forever. Legacy made cancels vanish; this is faithful (§11.4). |
@@ -5359,7 +5431,7 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 23 | `deny_unknown_fields` on the v2 add request? | **No.** An App Store rollout runs mixed client and server versions for weeks; the first client sending a new optional field must not get a 400 on the whole add. Unknown fields are ignored and echoed in a `warnings` array (see PROTOCOL.md). |
 | 24 | Persist a frame/event log in SQLite? | **No.** The replay ring is in memory and bounded. Persisting delta frames would be ~345 k rows/day of pure progress churn on a DB inside the media volume, and would throw away the one genuinely good legacy property. |
 | 25 | Stack `teloxide::Throttle` on top of `governor`? | **No.** One limiter, the one that knows about `last_rendered` and the per-chat interval (§12.4). |
-| 26 | `AULOS_TELEGRAM_WATCH_ALL` default? | **`true`.** On a single-user box, web and subscription downloads being invisible to the bot is a legacy bug, not a feature. `false` restores it exactly (§12.6). |
+| 26 | `AULOS_TELEGRAM_WATCH_ALL` default? | **`false`** — *amended; it was `true`.* The original answer was right while the bot was the only notifier: web and subscription downloads being invisible to it was a legacy bug. Half of that bug is now fixed unconditionally (a subscription fans out whatever the knob says), and the other half has a better answer than fanning out — the item reports on the channel that added it (§12.6, decision 43). `true` is still the escape hatch, and still restores the "everything on the board" behaviour exactly. |
 | 27 | Serve a status page and a directory index? | **Reversed 2026-09-05 — a web UI ships (§24).** The original decision was **No HTML**: `GET <p>` returned a small JSON identity document and nothing rendered. It stands for the *directory index* — `DOWNLOAD_DIRS_INDEXABLE=true` still serves a JSON listing, never HTML — and it stands for every API route, none of which gained an HTML representation. What changed is the BRIEF: the owner put a first-party page in scope (BRIEF, *Amendment 2026-09-05*), so `GET <p>` is now content-negotiated and answers the embedded page to an `Accept` list containing `text/html` and the **unchanged** identity document to everything else. `AULOS_WEB_UI=false` restores the original posture exactly. |
 | 28 | CI performance gates? | **No latency gates.** `criterion` benchmarks are tracked in release notes; CI gates only runner-speed-independent assertions: frame counts, transaction counts, byte sizes, zero leaked processes, zero `Lagged` (§20). |
 | 29 | CI target architectures? | **`linux/amd64` only** (BRIEF §16). The Dockerfile stays `TARGETARCH`-parametrised so arm64 is a one-line change later (§18.1). |
@@ -5752,6 +5824,15 @@ builders are pure functions of an `ItemView` with tests that compare whole `serd
 A key that changes name, moves, appears or disappears fails in this repository rather than on a
 phone.
 
+**The origin this notifier keys on is `item.source.kind == "ios"`** (§4.4) — the kind the
+`X-Aulos-Client` header sets on an add from the app or its share extension. It is a real origin
+alongside `api_v2 | api_v1 | telegram | subscription`, and it is stable: a retry and a boot
+recovery both leave `source` alone, so an item the phone asked for is still the phone's item after
+it fails once and comes back. (`restart` and `retry` are legacy kinds a notifier may still see on
+rows written by an older build; nothing produces them now.) Subscription items have no originating
+channel at all and are Telegram's, because Telegram is the only push channel for work nobody
+started by hand.
+
 ### 25.1 Shape and dependencies
 
 | Module | Concern |
@@ -5806,6 +5887,11 @@ Three wiring facts follow from that, and each is a way to get it silently wrong:
 | `Completed` | Live Activity **end** to every registration, then `remove_live_activities_for`; plus one **alert** per device with `alerts == true`, when the item is top-level or a group and its status is `finished` or `error`. |
 | `Removed` | forget the item's cached state, so a re-added id may start a fresh activity. |
 
+The **push-to-start** and the **alert** are gated on the item's origin — see the `interested()`
+paragraph at the end of this section. The Live Activity **update** and **end** are not: both are
+addressed to a registration the app made for that one item, so the registration, not the row, is
+the permission. `Removed` is bookkeeping and is never gated.
+
 `Removed` needs **no** `remove_live_activities_for` from the notifier, and that is a store fact
 rather than an omission: every removal path in `aulos-queue` funnels through `remove_rows`, whose
 one write is `WriteOp::DeleteItems`, and that op sweeps the `live_activities` rows for each id *and*
@@ -5845,8 +5931,46 @@ registration it just sent, pushing it back inside the other's window, so the tim
 *same* content-state at N pushes per interval for ever. Apple budgets Live Activity updates, and
 exceeding the budget is what gets the activity killed by iOS.
 
-`interested()` is `|_| true`. A device registration is per user, not per source, so unlike
-`TelegramNotifier` (§12.6) there is nothing to filter on.
+**`interested()` is `source.kind == "ios"`, or anything at all with `APNS_PUSH_ALL=true`** — the
+predicate for the two pushes that fan out to *devices*, the push-to-start and the alert. It was
+`|_| true` for as long as `aulos-apns` was the only notifier that could see the item — a device
+registration is per user, not per source, so there seemed to be nothing to filter on. There is: the
+*other* notifier. §12.6's rule is that an item reports on the channel that asked for it, and this
+side of it is that a Telegram add, a web add and a subscription check produce **no alert and no
+Live Activity**. `source.kind` is the whole test, and one test suffices for a playlist too, because
+the engine copies the parent's `SourceRef` onto every child and nothing ever rewrites it (§4.4,
+decision 41). `X-Aulos-Client: ios/<version>` is what puts `"ios"` there (PROTOCOL §1.3, decision
+42).
+
+`APNS_PUSH_ALL` defaults to **`false`** (decision 44) and is the escape hatch for an operator who
+adds from `curl` and still wants the phone to ring; it is the exact mirror of
+`AULOS_TELEGRAM_WATCH_ALL`, and both being off is the shipped routing. Note what does *not* follow
+the gate:
+
+- **`Removed` still forgets the item**, whatever its source. That row is bookkeeping, not a push,
+  and skipping it would leak `started`/`items` entries for every non-iOS download the process ever
+  saw.
+- **`StatusChanged` still updates the Live Activities**, whatever its source, and still reads and
+  caches the registrations. An activity exists only because the app registered one — it is the
+  app's own add, or one it adopted at launch because the server had push-started it — so an update
+  is never the fan-out the operator's rule is aimed at, and withholding it is a ring frozen at its
+  first frame until the item finishes. It is also the *only* thing that fills the record cache, and
+  gating it was a real bug: the ungated end's fallback (below) reads that cache, so it was
+  permanently empty for exactly the non-iOS items the ungated end exists to protect.
+- **`Completed` still ends the Live Activity**, whatever its source, and still calls
+  `remove_live_activities_for`, because the knob can be flipped while an activity is live and an
+  activity that is never ended is a progress ring on the lock screen that nothing else will ever
+  close.
+- **The alert is gated on the origin *or* a live registration.** An item the app was holding an
+  activity for is the phone's to announce whatever `source` says: `source` is written once at the
+  add and never rewritten (§4.4), so with `AULOS_DEDUPE_MODE=active` an add from the app that lands
+  on a live Telegram item mints no row and the origin stays `telegram` (§8.5) — the registration is
+  then the only thing that knows the phone is watching that download. An item with no registration
+  and a non-iOS origin still rings nobody.
+
+`interested()` is therefore the *device fan-out* predicate rather than a summary of `on_event`, and
+it says so: a caller that filtered event **delivery** on it would strand the update and the end,
+which is the one thing it must not be used for.
 
 ### 25.3 The provider token
 

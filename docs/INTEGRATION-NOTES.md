@@ -1514,9 +1514,11 @@ All of these are addressed to packages that do not exist yet. None of them block
 
 ### BRIEF scope trims applied here
 
-- `AULOS_TELEGRAM_WATCH_ALL` defaults to **`true`**, per the BRIEF table — the legacy blind spot
-  (web and subscription downloads invisible to the bot) is treated as a bug. `false` reproduces it
-  exactly, and `tests/actor.rs` asserts both.
+- `AULOS_TELEGRAM_WATCH_ALL` defaulted to **`true`** here, per the BRIEF table. It is now
+  **`false`** (DESIGN §12.6, decisions 26/43): a subscription fans out to every allowed chat
+  whatever the knob says, so that half of the legacy blind spot is closed unconditionally, and
+  everything else — web, `curl`, iOS — reports on the channel that added it. `tests/actor.rs`
+  asserts the knob both ways plus the subscription and iOS rules.
 - No Prometheus metrics: `edits_throttled_total` is exposed on `TelegramHealth` for `healthz`
   (DESIGN §12.4 asks for it there) and nowhere else.
 

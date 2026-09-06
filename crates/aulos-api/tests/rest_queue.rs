@@ -78,6 +78,68 @@ async fn the_added_item_appears_in_state_as_resolving() {
     .await;
 }
 
+/// PROTOCOL §1.3: `X-Aulos-Client: ios/<version>` attributes the add to the iOS app, and nothing
+/// else does. The kind is what DESIGN §25 routes an APNs alert on, so it has to be on the item the
+/// client can read back — both for a single add and for a batch, which share one add path.
+#[tokio::test]
+async fn the_ios_client_header_attributes_the_add_to_the_phone() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+
+        let post = async |client: Option<&str>, body: Value| {
+            let mut req = rig.http.post(rig.url("api/v2/downloads")).json(&body);
+            if let Some(client) = client {
+                req = req.header("X-Aulos-Client", client);
+            }
+            let response = req.send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 202);
+            response.json::<Value>().await.unwrap()
+        };
+
+        // `auto_start: false` parks each row in `queued`, so the assertion is not a race with a
+        // download that finishes before the item can be read back.
+        let ios = post(
+            Some("ios/1.4.0 (77)"),
+            json!({ "url": YT, "auto_start": false }),
+        )
+        .await;
+        let item = rig
+            .until_status(ios["ids"][0].as_str().unwrap(), "queued")
+            .await;
+        assert_eq!(item["source"], json!({ "kind": "ios", "ref": null }));
+
+        // A batch shares the add path, so every item in it is attributed the same way.
+        let batch = post(
+            Some("IOS"),
+            json!({
+                "items": [
+                    { "url": "https://www.youtube.com/watch?v=batch-a" },
+                    { "url": "https://www.youtube.com/watch?v=batch-b" },
+                ],
+                "defaults": { "auto_start": false },
+            }),
+        )
+        .await;
+        for id in batch["ids"].as_array().unwrap() {
+            let item = rig.until_status(id.as_str().unwrap(), "queued").await;
+            assert_eq!(item["source"]["kind"], "ios", "{item}");
+        }
+
+        // No header, and an unknown client, are both plain `api_v2`.
+        for (client, url) in [
+            (None, "https://www.youtube.com/watch?v=plain"),
+            (Some("android/1"), "https://www.youtube.com/watch?v=droid"),
+        ] {
+            let body = post(client, json!({ "url": url, "auto_start": false })).await;
+            let item = rig
+                .until_status(body["ids"][0].as_str().unwrap(), "queued")
+                .await;
+            assert_eq!(item["source"]["kind"], "api_v2", "{client:?}: {item}");
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_batch_merges_defaults_under_each_item() {
     for_each_prefix(|prefix| async move {

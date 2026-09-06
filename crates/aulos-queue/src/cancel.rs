@@ -257,11 +257,10 @@ impl Engine {
     /// Returns whether the row moved — `false` only when the persisted write failed.
     async fn retry_one(&mut self, id: ItemId, item: &std::sync::Arc<aulos_core::Item>) -> bool {
         let at = self.clock.now_ms();
-        let source = aulos_core::SourceRef::bare(aulos_core::SourceKind::Retry);
-        if !self
-            .apply(retry_ops(id, at, source.clone()), Durability::Batched)
-            .await
-        {
+        // `item.source` is deliberately untouched: DESIGN §4.4 makes the origin permanent so
+        // per-origin routing survives a retry — a Telegram item still reports to its chat, an iOS
+        // item still reaches the phone. `attempt` is what marks it a retry (DESIGN §8.2).
+        if !self.apply(retry_ops(id, at), Durability::Batched).await {
             return false;
         }
         let from = item.status;
@@ -271,7 +270,6 @@ impl Engine {
             i.msg = None;
             i.error = None;
             i.attempt = i.attempt.saturating_add(1);
-            i.source = source.clone();
             i.finished_at = None;
         });
         // The row leaves the done window; the published terminal total is the aggregator's

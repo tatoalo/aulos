@@ -20,7 +20,7 @@ use aulos_core::{
 use aulos_provider::Registry;
 use aulos_queue::{AddError, CancelScope};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::IntoResponse;
 use serde_json::{Map, Value, json};
 use url::Url;
@@ -52,6 +52,35 @@ pub const REQUEST_FIELDS: [&str; 16] = [
 /// The two keys the batch envelope carries.
 pub const BATCH_FIELDS: [&str; 2] = ["items", "defaults"];
 
+/// `X-Aulos-Client` — a client naming itself so its adds are attributed to it (PROTOCOL §1.3).
+///
+/// The value is `<client>/<version>`; the iOS app sends `ios/<version>`. Only the token before the
+/// first `/` is interpreted, so a client is free to put a build number or a platform string after
+/// it without ever changing what the server does with the header.
+pub const CLIENT_HEADER: HeaderName = HeaderName::from_static("x-aulos-client");
+
+/// Which origin an add is attributed to, given the `X-Aulos-Client` value (PROTOCOL §1.3).
+///
+/// This exists so notifications can route by origin (DESIGN §12.6, §25): a video added from the
+/// iOS app should buzz the phone and a video added from Telegram should not, and the only thing
+/// that distinguishes the two at add time is who is calling. An unknown client — or none — is
+/// `api_v2`, so a client that never heard of the header keeps working exactly as before and a
+/// typo in it can never turn a good add into a failure.
+#[must_use]
+pub fn source_for_client(header: Option<&str>) -> SourceKind {
+    let client = header
+        .unwrap_or_default()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if client.eq_ignore_ascii_case("ios") {
+        SourceKind::Ios
+    } else {
+        SourceKind::ApiV2
+    }
+}
+
 /// `POST api/v2/downloads` — the async add.
 pub async fn add(
     State(state): State<ApiState>,
@@ -66,7 +95,11 @@ pub async fn add(
         return Err(ApiError::invalid("items", "at least one url is required"));
     }
 
-    let source = SourceRef::bare(SourceKind::ApiV2);
+    // One add path serves both the single and the batch body (`parse_batch` flattens them), so the
+    // attribution is read once, here, and covers both.
+    let source = SourceRef::bare(source_for_client(
+        headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()),
+    ));
     let outcome = state
         .engine
         .add(requests, source)
@@ -538,6 +571,21 @@ mod tests {
     fn cfg(pairs: &[(&str, &str)]) -> Config {
         aulos_core::config::load(&aulos_core::config::RawEnv::from_pairs(pairs.to_vec()))
             .expect("the test config must load")
+    }
+
+    /// PROTOCOL §1.3: only the token before the first `/` is interpreted, ASCII-case-insensitively,
+    /// and everything the server does not recognise is `api_v2`.
+    #[test]
+    fn only_a_leading_ios_token_claims_the_ios_origin() {
+        assert_eq!(source_for_client(None), SourceKind::ApiV2);
+        assert_eq!(source_for_client(Some("")), SourceKind::ApiV2);
+        assert_eq!(source_for_client(Some("ios/1.0.0 (5)")), SourceKind::Ios);
+        assert_eq!(source_for_client(Some("ios")), SourceKind::Ios);
+        assert_eq!(source_for_client(Some("IOS")), SourceKind::Ios);
+        assert_eq!(source_for_client(Some(" ios /2")), SourceKind::Ios);
+        // A prefix is not a match: `iosx` is some other client.
+        assert_eq!(source_for_client(Some("iosx")), SourceKind::ApiV2);
+        assert_eq!(source_for_client(Some("android/1")), SourceKind::ApiV2);
     }
 
     #[test]

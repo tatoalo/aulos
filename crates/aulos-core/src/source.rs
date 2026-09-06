@@ -19,10 +19,19 @@ pub enum SourceKind {
     Telegram,
     /// A subscription check. `ref` is the subscription id.
     Subscription,
-    /// Boot recovery re-queued an interrupted item (DESIGN §8.9).
+    /// **Legacy.** Boot recovery used to re-attribute an interrupted item to itself (DESIGN §8.9).
+    ///
+    /// It no longer does: recovery keeps the origin, because per-origin routing needs to know who
+    /// asked (a Telegram item's chat id lives in `ref`, an iOS item's kind is what APNs keys on).
+    /// The variant stays so rows written by an older build still decode.
     Restart,
-    /// A retry, manual or automatic (DESIGN §8.8).
+    /// **Legacy.** A retry used to overwrite the origin with itself (DESIGN §8.8).
+    ///
+    /// It no longer does, for the same reason [`Self::Restart`] does not. `Priority::Retry` is
+    /// derived from `item.attempt` instead. The variant stays so old rows still decode.
     Retry,
+    /// The iOS app, share extension included. Recognised from `X-Aulos-Client` (PROTOCOL §1.3).
+    Ios,
 }
 
 impl SourceKind {
@@ -36,17 +45,19 @@ impl SourceKind {
             Self::Subscription => "subscription",
             Self::Restart => "restart",
             Self::Retry => "retry",
+            Self::Ios => "ios",
         }
     }
 
     /// Every value, in declaration order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ApiV2,
         Self::ApiV1,
         Self::Telegram,
         Self::Subscription,
         Self::Restart,
         Self::Retry,
+        Self::Ios,
     ];
 }
 
@@ -124,8 +135,19 @@ mod tests {
                 "telegram",
                 "subscription",
                 "restart",
-                "retry"
+                "retry",
+                "ios"
             ]
         );
+    }
+
+    /// The iOS app is a *first-class origin*, not an `api_v2` variant: DESIGN §25 routes an APNs
+    /// alert on `kind == "ios"`, so the string is part of the contract the phone decodes.
+    #[test]
+    fn the_ios_origin_round_trips_through_its_wire_string() {
+        let s = SourceRef::bare(SourceKind::Ios);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v, serde_json::json!({ "kind": "ios", "ref": null }));
+        assert_eq!(serde_json::from_value::<SourceRef>(v).unwrap(), s);
     }
 }

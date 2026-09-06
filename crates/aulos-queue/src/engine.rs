@@ -1014,7 +1014,10 @@ impl Engine {
         if item.kind == Kind::Group {
             return;
         }
-        let prio = Priority::of(item.source.kind, item.group_id.is_some());
+        // `attempt > 0` is what says "this is a retry" now that a retry no longer overwrites
+        // `source` (DESIGN §4.4): both retry paths bump it, and so does boot recovery for the
+        // handful of rows that were mid-flight, which is exactly the set that should resume first.
+        let prio = Priority::of(item.source.kind, item.group_id.is_some(), item.attempt > 0);
         let ord = item.ord;
         if self.ready[prio.index()].contains(&id) {
             return;
@@ -1522,7 +1525,7 @@ mod tests {
         for id in &ids {
             engine.enqueue(*id);
         }
-        let prio = crate::priority::Priority::of(aulos_core::SourceKind::ApiV2, false);
+        let prio = crate::priority::Priority::of(aulos_core::SourceKind::ApiV2, false, false);
         let deque: Vec<i64> = engine.ready[prio.index()]
             .iter()
             .map(|id| engine.items[id].ord)

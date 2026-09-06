@@ -195,6 +195,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("APNS_KEY_ID", ""),
     ("APNS_TEAM_ID", ""),
     ("APNS_TOPIC", "com.tatoalo.aulos"),
+    ("APNS_PUSH_ALL", "false"),
     ("APNS_BASE_URL_OVERRIDE", ""),
     // --- identity and plugins ---
     ("METUBE_VERSION", "dev"),
@@ -253,7 +254,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // --- AULOS_*: Telegram ---
     ("AULOS_TELEGRAM_BOARD", "board"),
     ("AULOS_TELEGRAM_EDIT_INTERVAL_MS", "3000"),
-    ("AULOS_TELEGRAM_WATCH_ALL", "true"),
+    ("AULOS_TELEGRAM_WATCH_ALL", "false"),
     // --- AULOS_*: subscriptions ---
     ("AULOS_SUB_CHECK_CONCURRENCY", "2"),
     ("AULOS_SUB_CHECK_TIMEOUT_SECS", "180"),
@@ -291,6 +292,7 @@ pub const BOOLEAN_KEYS: &[&str] = &[
     "JELLYFIN_SYNC_ENABLED",
     "TELEGRAM_BOT_ENABLED",
     "APNS_ENABLED",
+    "APNS_PUSH_ALL",
     // new
     "AULOS_RESOLVE_FALLTHROUGH",
     "AULOS_CLEAN_ORPHAN_TEMP",
@@ -762,8 +764,13 @@ pub struct Config {
     pub telegram_board: TelegramBoard,
     /// `AULOS_TELEGRAM_EDIT_INTERVAL_MS` — the per-chat edit budget.
     pub telegram_edit_interval_ms: u64,
-    /// `AULOS_TELEGRAM_WATCH_ALL` — report web and subscription jobs too. Default `true`: the
-    /// legacy blind spot is a bug, not a feature (BRIEF scope trims).
+    /// `AULOS_TELEGRAM_WATCH_ALL` — report jobs the bot did not create and that are not
+    /// subscription checks (web, `curl`, the iOS app) to every allowed chat.
+    ///
+    /// Default `false` (DESIGN §12.6, decision 26/43): an item now reports on the channel that
+    /// asked for it, so a video added from the phone is announced by APNs and not also by the
+    /// bot. Subscriptions are the deliberate exception and fan out whatever this says — a
+    /// background check has no originating channel, and Telegram is its only push surface.
     pub telegram_watch_all: bool,
 
     // --- APNs push (DESIGN §25) ---
@@ -782,6 +789,16 @@ pub struct Config {
     /// `APNS_TOPIC` — the default bundle id, and the `apns-topic` for a device that did not
     /// report its own. A device's `bundle_id` wins when present.
     pub apns_topic: Box<str>,
+    /// `APNS_PUSH_ALL` — push for **every** item, not only the ones the iOS app added.
+    ///
+    /// Default `false` (DESIGN §25.2, decision 44): the operator's rule is that a download reports
+    /// on the channel that asked for it, so an item whose `source.kind` is not `ios` gets no alert
+    /// and no Live Activity *start*. `true` restores the fan-out to every registered device, which
+    /// is what an operator who drives the server from `curl` and still wants the phone to ring
+    /// needs. Updating and ending a Live Activity are never gated by this: those go to a
+    /// registration the app itself made for that item, and an activity that exists must always be
+    /// updated and closed, or a progress ring freezes or spins on the lock screen forever.
+    pub apns_push_all: bool,
     /// `APNS_BASE_URL_OVERRIDE` — **test only**: points both gateways at one base URL so the
     /// `aulos-apns` suite can run against a local mock. Empty in every real deployment.
     pub apns_base_url_override: Box<str>,
@@ -1136,6 +1153,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         apns_key_id: g.str("APNS_KEY_ID").into(),
         apns_team_id: g.str("APNS_TEAM_ID").into(),
         apns_topic: g.str("APNS_TOPIC").into(),
+        apns_push_all: g.bool("APNS_PUSH_ALL"),
         apns_base_url_override: g.str("APNS_BASE_URL_OVERRIDE").into(),
 
         version: g.str("METUBE_VERSION").into(),
@@ -1728,7 +1746,10 @@ mod tests {
         assert_eq!(c.restart_policy, RestartPolicy::Resume);
         assert_eq!(c.sc_http, ScHttpMode::Auto);
         assert_eq!(c.telegram_board, TelegramBoard::Board);
-        assert!(c.telegram_watch_all, "BRIEF: default true");
+        // Both routing knobs are off by default: an item reports on the channel that asked for it
+        // (DESIGN §12.6, §25.2). The BRIEF's `true` is superseded by decision 43.
+        assert!(!c.telegram_watch_all, "DESIGN §12.6: default false");
+        assert!(!c.apns_push_all, "DESIGN §25.2: default false");
         assert_eq!(c.import_on_error, ImportOnError::Fail);
         assert_eq!(c.log_format, LogFormat::Text);
         assert_eq!(c.db_synchronous, DbSynchronous::Normal);

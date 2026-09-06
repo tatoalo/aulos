@@ -72,7 +72,8 @@ pub struct TelegramConfig {
     pub board: TelegramBoard,
     /// `AULOS_TELEGRAM_EDIT_INTERVAL_MS`.
     pub edit_interval_ms: u64,
-    /// `AULOS_TELEGRAM_WATCH_ALL`. Default `true` (BRIEF).
+    /// `AULOS_TELEGRAM_WATCH_ALL`. Default `false` (DESIGN §12.6, decision 43): only the bot's
+    /// own adds and subscription checks are reported unless this is on.
     pub watch_all: bool,
     /// `DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT`, for a chat's first-access defaults.
     pub default_playlist_item_limit: u32,
@@ -100,6 +101,11 @@ impl TelegramConfig {
     }
 
     /// A config for a test: enabled, one chat, the legacy timeouts.
+    ///
+    /// `watch_all` is deliberately `true` here even though the shipped default is `false`: most of
+    /// the suite is about rendering, the board and the watchdogs, and it drives those with plain
+    /// `api_v2` items. Flipping this would make those tests silently exercise nothing. The two
+    /// tests that are *about* the routing rule set the knob themselves.
     #[must_use]
     pub fn for_test(allowed: Vec<i64>) -> Self {
         Self {
@@ -623,10 +629,11 @@ impl TelegramActor {
         match event {
             // A restart says nothing until something happens. Boot recovery re-publishes the whole
             // recovered working set (DESIGN §8.9 step 7) purely to seed the realtime snapshot, and
-            // with `AULOS_TELEGRAM_WATCH_ALL` on by default §12.6 attributes every one of those
-            // rows to every allowed chat — so drawing a board here meant every boot posted the
-            // entire download history into each chat and, 60 s later, edited it into an
-            // "N downloads finished" summary the user had never asked for.
+            // §12.6 attributes every one of those rows to whoever asked for it — every
+            // subscription row, and with `AULOS_TELEGRAM_WATCH_ALL` on every row at all — so
+            // drawing a board here meant every boot posted the entire download history into each
+            // chat and, 60 s later, edited it into an "N downloads finished" summary the user had
+            // never asked for.
             //
             // The watch is still taken for anything not yet terminal: a download the engine
             // resumes after the restart has to report its completion and its two §12.5 watchdog

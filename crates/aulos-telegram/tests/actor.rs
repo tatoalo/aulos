@@ -1192,7 +1192,7 @@ async fn progress_keeps_the_stall_warning_away() {
 // AULOS_TELEGRAM_WATCH_ALL
 // ---------------------------------------------------------------------------
 
-/// BRIEF: `false` reproduces the legacy blind spot; `true` reports an API-sourced job.
+/// DESIGN §12.6: `false` (the default) keeps a web add off the board; `true` reports it.
 #[tokio::test]
 async fn watch_all_decides_whether_an_api_job_is_reported() {
     for (watch_all, expect) in [(false, 0_usize), (true, 1)] {
@@ -1218,6 +1218,54 @@ async fn watch_all_decides_whether_an_api_job_is_reported() {
         );
         assert_eq!(h.actor.health().watched_jobs, expect);
     }
+}
+
+/// A subscription has no originating channel — nobody typed the URL — and Telegram is the only
+/// push surface for background work, so it is reported with the knob **off** (DESIGN §12.6).
+#[tokio::test]
+async fn a_subscription_is_reported_with_the_all_knob_off() {
+    let mut h = Harness::builder()
+        .telegram(TelegramConfig {
+            watch_all: false,
+            ..TelegramConfig::for_test(vec![CHAT])
+        })
+        .build()
+        .await;
+    let v = view(
+        ItemId::new(),
+        "A new episode",
+        Status::Downloading,
+        SourceRef::with_ref(SourceKind::Subscription, "01JCSUB"),
+    );
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    assert_eq!(h.transport.count(), 1, "an auto-download still reports");
+    assert_eq!(h.actor.health().watched_jobs, 1);
+}
+
+/// The operator's rule: an add from the phone is announced by APNs (§25), so the bot stays quiet
+/// about it — otherwise the same download rings twice.
+#[tokio::test]
+async fn an_ios_add_is_not_reported_with_the_all_knob_off() {
+    let mut h = Harness::builder()
+        .telegram(TelegramConfig {
+            watch_all: false,
+            ..TelegramConfig::for_test(vec![CHAT])
+        })
+        .build()
+        .await;
+    let v = view(
+        ItemId::new(),
+        "From the phone",
+        Status::Downloading,
+        SourceRef::bare(SourceKind::Ios),
+    );
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    assert_eq!(h.transport.count(), 0, "APNs has this one");
+    assert_eq!(h.actor.health().watched_jobs, 0);
 }
 
 /// With `watch_all` on, a non-Telegram job fans out to every allowed chat; a Telegram job does not.

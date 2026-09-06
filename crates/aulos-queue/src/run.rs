@@ -325,11 +325,11 @@ impl Engine {
         let at_ms = self.clock.now_ms() + i64::try_from(delay.as_millis()).unwrap_or(0);
         let now = self.clock.now_ms();
         let msg = format!("Retrying in {}s", delay.as_secs().max(1));
-        let source = aulos_core::SourceRef::bare(aulos_core::SourceKind::Retry);
 
-        // The DESIGN §7.1 retry triple, with a message: the manual path uses
-        // `aulos_store::retry_ops` verbatim, and this one differs only in keeping the failure
-        // visible while the backoff runs.
+        // The DESIGN §7.1 retry pair, with a message: the manual path uses `aulos_store::retry_ops`
+        // verbatim, and this one differs only in keeping the failure visible while the backoff
+        // runs. Neither writes `source` — DESIGN §4.4 keeps the origin across a retry so
+        // per-origin routing still knows who asked.
         let ops = vec![
             WriteOp::SetStatus {
                 id,
@@ -340,10 +340,6 @@ impl Engine {
                 at: now,
             },
             WriteOp::BumpAttempt { id },
-            WriteOp::SetSource {
-                id,
-                source: source.clone(),
-            },
         ];
         if !self.apply(ops, Durability::Batched).await {
             return;
@@ -355,7 +351,6 @@ impl Engine {
             i.msg = Some(msg.clone().into_boxed_str());
             i.error = Some(error.clone());
             i.attempt = i.attempt.saturating_add(1);
-            i.source = source.clone();
             i.finished_at = None;
         });
         self.retries.push(crate::engine::PendingRetry { id, at_ms });

@@ -78,7 +78,16 @@ or header on any `api/v2/*` route is affected, and the UI adds no endpoint you n
 - Numbers are always JSON numbers. A numeric field is never sent as a string. You do not need a
   flexible numeric decoder.
 
-### 1.3 Response headers
+### 1.3 Headers
+
+**Request headers.** Both are optional; neither can make a request fail.
+
+| Header | Meaning |
+|---|---|
+| `X-Request-Id` | 1–64 printable ASCII characters. Echoed back on the response, so it is the key to correlating your logs with the server's. Anything else is ignored and a fresh id is minted. |
+| `X-Aulos-Client` | optional; a client that wants its adds attributed to it. The iOS app sends `ios/<version>`. Only the token before the slash is interpreted (ASCII-case-insensitively); unknown clients are `api_v2`. It sets `Item.source.kind` on `POST api/v2/downloads` (§2.3, §4.1) and does nothing anywhere else. |
+
+**Response headers.**
 
 | Header | On | Meaning |
 |---|---|---|
@@ -454,8 +463,20 @@ never to appear in a `delta` frame. Read them once from `added`/`snapshot` and n
 
 | Key | Type | Notes |
 |---|---|---|
-| `kind` | `string` | `"api_v2"` \| `"api_v1"` \| `"telegram"` \| `"subscription"` \| `"restart"` \| `"retry"` |
+| `kind` | `string` | `"api_v2"` \| `"api_v1"` \| `"ios"` \| `"telegram"` \| `"subscription"` \| `"restart"` \| `"retry"` |
 | `ref` | `string \| null` | the chat id, the subscription id, or a request id — whichever applies. `null` when there is nothing to reference. |
+
+**`source` records where the item came from, and it never changes afterwards.** A retry — manual
+or automatic — and a boot recovery both leave it exactly as it was, so a download that was asked
+for from Telegram still reports to that chat and one added from the iOS app still reaches that
+phone. `attempt` is what tells you an item has been retried; `source` is not.
+
+`"restart"` and `"retry"` are **legacy** values for that reason: older builds re-attributed an item
+to itself on a boot recovery or a retry, so rows written back then can still carry them and a
+client must still decode them. No row written by this build ever gets either value.
+
+`"ios"` is set by the `X-Aulos-Client` request header (§1.3); every other client of
+`POST api/v2/downloads` is `"api_v2"`.
 
 ### 2.4 Rendering guidance
 
@@ -681,6 +702,9 @@ Response `202`:
   first client to send a new optional field must not get a 400 on the whole add.
 - By the time this response arrives, the item is already in the state snapshot with
   `status: "resolving"`, and an `added` frame either has arrived or will arrive within ~25 ms.
+- Send `X-Aulos-Client: ios/<version>` (§1.3) if you are the iOS app and want the items you add to
+  carry `source.kind == "ios"`. It is the only thing that sets that kind, it applies to the batch
+  body as well as the single one, and sending nothing is `"api_v2"` exactly as before.
 
 Errors: `400 validation_failed` (with `field`), `400 unknown_preset`, `400 overrides_disabled`,
 `400 folder_invalid`, `400 unsupported_url`, `413 payload_too_large`, `503 state_unavailable`.
@@ -1174,6 +1198,17 @@ The registration body:
 | `alerts` | boolean, optional | whether completion/failure alerts are wanted. Absent or `null` means `true`. |
 | `live_activity_start_token` | string or `null`, optional | the Live Activity **push-to-start** token (iOS 17.2+), when the app has one. `null` clears a previously reported one. |
 | `app_version` | string or `null`, optional | free-form, for the server's logs. At most 64 characters. |
+
+**A registered device is not pushed for every download.** The server *starts* an activity and sends
+an alert for items whose `source.kind` is `"ios"` — i.e. the ones added with
+`X-Aulos-Client: ios/<version>` (§1.3) — and for nothing else, so a Telegram add is announced by the
+bot and a web add by nobody. `alerts` is a further filter on top of that, not an override. An
+operator can widen it server-side with `APNS_PUSH_ALL=true`; there is no client-visible way to ask
+for it, and none is needed, because a client that wants a push simply sends the header on its adds.
+**Updating and ending a Live Activity are never filtered:** an activity registered through the
+route below is updated and then closed whatever added the item — the registration is the request —
+and an item that had one also gets the completion alert, because a `PUT` here is the app saying it
+is watching that download.
 
 `{token}` and the two token fields are **hexadecimal, 32 to 200 characters**. They are lowercased
 on the way in, so a `DELETE` whose token a client happened to uppercase still finds the row it

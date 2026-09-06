@@ -39,6 +39,10 @@ services:
       # JELLYFIN_SYNC_ENABLED / JELLYFIN_URL / JELLYFIN_API_KEY / JELLYFIN_PATH_MAP
       # TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_CHAT_IDS
       # APNS_ENABLED / APNS_KEY_FILE / APNS_KEY_ID / APNS_TEAM_ID  (iOS push, docs/DESIGN.md §25)
+      # A download reports on the channel that added it: the bot announces its own adds (and every
+      # subscription), the phone announces its own. Two knobs widen that, both off by default:
+      # AULOS_TELEGRAM_WATCH_ALL: "true"  -- the bot also reports web/curl/iOS adds
+      # APNS_PUSH_ALL: "true"             -- the phone is also pushed for non-iOS adds
     volumes:
       - /srv/media:/downloads
       - /srv/aulos/config:/config
@@ -143,6 +147,19 @@ needs a signing key of your own — there is no shared one.
 3. **Register the phone.** Nothing else to do on the server: the app `PUT`s its device token to
    `<prefix>api/v2/devices/{token}` on launch and the server starts pushing. The routes are behind
    the same auth as the rest of v2 (`docs/PROTOCOL.md` §4.8).
+
+**Which downloads actually push.** Only the ones you added *from the app* — the share sheet
+included. A download you started from Telegram is announced by the bot, one you started from the
+web UI or `curl` is announced by nothing, and a subscription's auto-downloads go to Telegram, which
+is the only push channel background work has. The server tells them apart by the
+`X-Aulos-Client: ios/<version>` header the app sends on every add, recorded once on the item and
+never rewritten — so a retried or resumed download still reaches the phone that asked for it.
+
+Set `APNS_PUSH_ALL=true` if you would rather the phone hear about everything; its mirror image is
+`AULOS_TELEGRAM_WATCH_ALL=true`, which puts every download on the bot's board. Both default to
+`false`, which is what keeps one download from ringing twice. Neither affects a Live Activity the
+app is already showing: it keeps its progress and is always closed at the end, whatever the knobs
+say, and the download it tracks does ring the phone when it finishes.
 
 `GET /healthz` reports `components.apns`:
 

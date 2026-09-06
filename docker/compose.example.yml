@@ -60,6 +60,10 @@ services:
       TELEGRAM_BOT_ENABLED: "true"
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
+      # Who reports a download: the channel that added it. The bot announces its own adds, and
+      # every subscription check (background work has no other push channel). A web, curl or iOS
+      # add is not reported here unless you turn this on.
+      # AULOS_TELEGRAM_WATCH_ALL: "true"
       # iOS push notifications (docs/DESIGN.md §25). The .p8 is the only secret here: APNS_KEY_ID
       # and APNS_TEAM_ID are identifiers, not credentials. Mount the key read-only and keep it out
       # of the image. With APNS_ENABLED=true and an unreadable key the server logs an ERROR, runs
@@ -69,6 +73,11 @@ services:
       # APNS_KEY_ID: ABCD1234EF
       # APNS_TEAM_ID: TEAM123456
       # APNS_TOPIC defaults to com.tatoalo.aulos; a device's own bundle_id wins when it reports one.
+      # The mirror of AULOS_TELEGRAM_WATCH_ALL: by default the phone is pushed only for downloads
+      # the app itself added (the share sheet counts), so a Telegram add does not also ring here.
+      # Turn this on to be pushed for every download, whoever added it. A Live Activity that has
+      # started is always ended either way.
+      # APNS_PUSH_ALL: "true"
     volumes:
       - /srv/media:/downloads
       - /srv/aulos/config:/config

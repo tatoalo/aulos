@@ -925,10 +925,14 @@ fn build_apns(
             None
         }
         Ok(Some(notifier)) => {
+            // `push_all` is worth a boot line of its own: with it off (the default) an operator
+            // who adds from the web and sees no notification is looking at the documented
+            // behaviour, not at a broken key (DESIGN §25.2).
             tracing::info!(
                 topic = %cfg.apns_topic,
                 key_id = %cfg.apns_key_id,
                 team_id = %cfg.apns_team_id,
+                push_all = cfg.apns_push_all,
                 "APNs push is armed"
             );
             Some(notifier)

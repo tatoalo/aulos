@@ -16,6 +16,7 @@ use aulos_core::config::{RawEnv, load};
 use aulos_core::event::{DomainEvent, RemoveReason};
 use aulos_core::health::ComponentStatus;
 use aulos_core::id::ItemId;
+use aulos_core::source::SourceKind;
 use aulos_core::status::Status;
 use common::{
     Call, FakeDeviceStore, ItemBuilder, TEST_BUNDLE_ID, TEST_KEY_ID, TEST_KEY_P8, TEST_TEAM_ID,
@@ -46,6 +47,15 @@ impl Rig {
     }
 
     async fn with_status(status: u16, body: Value) -> Self {
+        Self::build(status, body, false).await
+    }
+
+    /// A rig with `APNS_PUSH_ALL=true`: every item pushes, whoever added it.
+    async fn pushing_everything() -> Self {
+        Self::build(200, json!({}), true).await
+    }
+
+    async fn build(status: u16, body: Value, push_all: bool) -> Self {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))
@@ -68,6 +78,7 @@ impl Rig {
             TEST_BUNDLE_ID,
             Arc::clone(&store) as Arc<dyn DeviceStore>,
             clock_dyn,
+            push_all,
         )
         .with_update_interval(WINDOW);
         Self {
@@ -898,10 +909,263 @@ async fn a_store_hiccup_at_completion_still_ends_the_activity() {
     assert!(rig.store.activity_tokens().is_empty());
 }
 
+// ---------------------------------------------------------------------------
+// Who gets pushed at all (DESIGN §12.6, §25.2)
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn it_is_interested_in_every_item() {
+async fn it_is_interested_only_in_what_the_phone_added() {
     let rig = Rig::new().await;
-    let item = ItemBuilder::new("x");
-    assert!(rig.notifier.interested(&item.view()));
     assert_eq!(rig.notifier.id(), "apns");
+    assert!(
+        rig.notifier
+            .interested(&ItemBuilder::new("x").source(SourceKind::Ios).view())
+    );
+    for kind in [
+        SourceKind::ApiV2,
+        SourceKind::ApiV1,
+        SourceKind::Telegram,
+        SourceKind::Subscription,
+        SourceKind::Restart,
+        SourceKind::Retry,
+    ] {
+        assert!(
+            !rig.notifier
+                .interested(&ItemBuilder::new("x").source(kind).view()),
+            "{kind} is somebody else's to report"
+        );
+    }
+
+    // The escape hatch restores the old "every item" behaviour.
+    let all = Rig::pushing_everything().await;
+    for kind in SourceKind::ALL {
+        assert!(
+            all.notifier
+                .interested(&ItemBuilder::new("x").source(kind).view()),
+            "APNS_PUSH_ALL=true: {kind}"
+        );
+    }
+}
+
+/// The operator's rule, at the only place it is observable: a web add rings nobody's phone.
+#[tokio::test]
+async fn a_finished_api_item_sends_no_alert_while_an_ios_one_does() {
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let web = ItemBuilder::new("From the web")
+        .source(SourceKind::ApiV2)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(web.view()))
+        .await;
+    rig.notifier.quiesce().await;
+    assert!(
+        rig.requests().await.is_empty(),
+        "Telegram or the web UI reported this one"
+    );
+
+    let phone = ItemBuilder::new("From the phone")
+        .source(SourceKind::Ios)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(phone.view()))
+        .await;
+    rig.notifier.quiesce().await;
+    assert_eq!(rig.tokens().await, ["aa11"]);
+}
+
+/// `APNS_PUSH_ALL=true` is the escape hatch for an operator who drives the server from `curl` and
+/// still wants the phone to ring.
+#[tokio::test]
+async fn push_all_restores_the_alert_for_a_non_ios_item() {
+    let rig = Rig::pushing_everything().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let tg = ItemBuilder::new("From the bot")
+        .source(SourceKind::Telegram)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(tg.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    assert_eq!(rig.tokens().await, ["aa11"]);
+}
+
+/// A non-iOS item starts no Live Activity — the push-to-start is a fan-out to *devices*, and that
+/// is what the source gate is for.
+#[tokio::test]
+async fn a_non_ios_item_starts_no_live_activity() {
+    let rig = Rig::new().await;
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.live_activity_start_token = Some("start-1".into());
+    rig.store.add_device(d);
+
+    let web = ItemBuilder::new("From the web").source(SourceKind::ApiV2);
+
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &web))
+        .await;
+    rig.notifier.quiesce().await;
+
+    assert!(rig.requests().await.is_empty());
+}
+
+/// ...but an activity the app *did* register is updated whatever the item's origin: the
+/// registration is the permission, and refusing to push it is a ring frozen at its first frame
+/// (DESIGN §25.2). The app adopts a running activity for an item it did not add on launch
+/// reconciliation, and the knob can be flipped while one is live.
+#[tokio::test]
+async fn a_registered_activity_is_updated_even_for_an_item_the_gate_would_silence() {
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let web = ItemBuilder::new("From the web").source(SourceKind::ApiV2);
+    rig.store.add_activity(activity(
+        "aa11",
+        web.item_id(),
+        "act-1",
+        ApnsEnvironment::Sandbox,
+    ));
+
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &web))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1, "the update, and no start: {reqs:?}");
+    assert_eq!(reqs[0].0, "/3/device/act-1");
+    assert_eq!(reqs[0].1, "liveactivity");
+    assert_eq!(reqs[0].2["aps"]["event"], json!("update"));
+}
+
+/// A Live Activity is ended even for an item the gate would otherwise silence: the knob can be
+/// flipped while one is live, and nothing else ever closes a progress ring (DESIGN §25.2).
+#[tokio::test]
+async fn a_live_activity_is_still_ended_for_an_item_that_no_longer_pushes() {
+    let rig = Rig::new().await;
+    // Alerts off, so this test is about the end alone.
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.alerts = false;
+    rig.store.add_device(d);
+    let web = ItemBuilder::new("From the web").source(SourceKind::ApiV2);
+    let id = web.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+
+    let done = web.clone().status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1, "the end, and only the end: {reqs:?}");
+    assert_eq!(reqs[0].0, "/3/device/act-1");
+    assert_eq!(reqs[0].2["aps"]["event"], json!("end"));
+    assert!(
+        rig.store
+            .calls()
+            .contains(&Call::RemoveLiveActivitiesFor(id)),
+        "and the rows are swept"
+    );
+}
+
+/// An item the phone was holding an activity for is the phone's to announce, whatever `source`
+/// says: `source` is written once at the add and never rewritten (DESIGN §4.4), so the
+/// registration is the only thing that knows the phone is watching this download.
+#[tokio::test]
+async fn a_tracked_item_alerts_even_when_its_source_is_not_ios() {
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let tg = ItemBuilder::new("From the bot").source(SourceKind::Telegram);
+    rig.store.add_activity(activity(
+        "aa11",
+        tg.item_id(),
+        "act-1",
+        ApnsEnvironment::Sandbox,
+    ));
+
+    let done = tg.clone().status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let mut tokens = rig.tokens().await;
+    tokens.sort();
+    assert_eq!(tokens, ["aa11", "act-1"], "the end *and* the alert");
+}
+
+/// The other half of the same rule: an untracked non-iOS item still rings nobody.
+#[tokio::test]
+async fn an_untracked_non_ios_item_still_alerts_nobody() {
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let tg = ItemBuilder::new("From the bot")
+        .source(SourceKind::Telegram)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(tg.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    assert!(
+        rig.requests().await.is_empty(),
+        "Telegram reported this one"
+    );
+}
+
+/// The regression the ungated bookkeeping exists for: the terminal fallback is only useful if the
+/// record cache was filled, and the cache is filled by the *update* path. Gating that path on the
+/// source left the fallback permanently empty for exactly the non-iOS items the ungated end
+/// protects — the mirror of `a_store_hiccup_at_completion_still_ends_the_activity`.
+#[tokio::test]
+async fn a_store_hiccup_at_completion_still_ends_a_non_ios_activity() {
+    let rig = Rig::new().await;
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.alerts = false;
+    rig.store.add_device(d);
+    let item = ItemBuilder::new("From the web")
+        .source(SourceKind::ApiV2)
+        .status(Status::Downloading);
+    let id = item.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+
+    // One update, so the notifier has the registration cached.
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    let before = rig.requests().await.len();
+    assert_eq!(before, 1);
+
+    rig.store.fail_activities(true);
+    let done = item.clone().status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    let end = reqs[before..]
+        .iter()
+        .find(|(p, _, _)| p == "/3/device/act-1")
+        .expect("an end push, sent from the cached registrations");
+    assert_eq!(end.2["aps"]["event"], json!("end"));
+    assert!(
+        rig.store
+            .calls()
+            .contains(&Call::RemoveLiveActivitiesFor(id)),
+        "and the rows are still swept"
+    );
 }

@@ -9,10 +9,24 @@
 //! [`ItemId`] and the chat comes from [`aulos_core::SourceRef`], which the engine copies onto
 //! every playlist child.
 //!
-//! # `AULOS_TELEGRAM_WATCH_ALL`
+//! # Who the bot reports on
 //!
-//! Default **`true`** (BRIEF): on a single-user box the legacy blind spot is a bug, not a feature,
-//! and the board is rate-limited anyway. Set it to `false` for exact legacy behaviour.
+//! An item reports on the channel that asked for it (DESIGN §12.6):
+//!
+//! | `source.kind` | Chats |
+//! |---|---|
+//! | `telegram` | the one chat in `source.ref`, if it is allow-listed — never the whole list |
+//! | `subscription` | every allowed chat, **always** |
+//! | anything else (`api_v2`, `api_v1`, `ios`, and the legacy `retry`/`restart` rows) | every allowed chat, but only with `AULOS_TELEGRAM_WATCH_ALL` |
+//!
+//! `AULOS_TELEGRAM_WATCH_ALL` defaults to **`false`** (decision 43, superseding the BRIEF's
+//! `true`): an item added from the iOS app is announced by APNs (§25), and announcing it here too
+//! is the duplicate the operator asked us to stop sending.
+//!
+//! A subscription is the exception because it has no originating channel — nobody typed the URL,
+//! so there is nobody to report back to — and Telegram is the only push surface for background
+//! work. Gating it on `watch_all` would make auto-downloads silent everywhere, which is the one
+//! outcome nothing else in the system covers.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -97,32 +111,48 @@ impl WatchRegistry {
     }
 
     /// Whether this item is one the bot reports on (DESIGN §12.6).
+    ///
+    /// Kept deliberately as "`chats_for` would name somebody", so the predicate and the routing
+    /// can never disagree: a `true` here that produced an empty chat set would register a watch
+    /// nothing can ever deliver, and the watchdogs would tick for it forever.
     #[must_use]
     pub fn interested(&self, item: &ItemView) -> bool {
-        self.watch_all || item.source.kind == SourceKind::Telegram
+        match item.source.kind {
+            // Its own chat still has to be allow-listed; `chats_for` is the authority.
+            SourceKind::Telegram => !self.chats_for(item).is_empty(),
+            SourceKind::Subscription => true,
+            _ => self.watch_all,
+        }
     }
 
-    /// The chats an item's events go to.
+    /// The chats an item's events go to (DESIGN §12.6).
     ///
-    /// A Telegram-sourced item goes to the chat that asked for it, and nowhere else. Anything else
-    /// goes to the whole allow-list, and only when `AULOS_TELEGRAM_WATCH_ALL` is on — which is
-    /// what turns the legacy blind spot into a report.
+    /// Three rules, in order:
+    ///
+    /// - **Telegram-sourced** → the one chat in `source.ref`, and nowhere else. `source` is
+    ///   written once at the add and never rewritten, so a retried or recovered item still knows
+    ///   which chat asked (DESIGN §4.4).
+    /// - **Subscription-sourced** → every allowed chat, whatever the knob says. An auto-download
+    ///   has no originating channel and Telegram is its only push surface; gating it would make
+    ///   background work silent everywhere.
+    /// - **anything else** (web, `curl`, the iOS app) → every allowed chat only with
+    ///   `AULOS_TELEGRAM_WATCH_ALL`, which is off by default so an iOS add is announced by APNs
+    ///   alone (§25).
     #[must_use]
     pub fn chats_for(&self, item: &ItemView) -> BTreeSet<i64> {
-        if item.source.kind == SourceKind::Telegram {
-            return item
+        match item.source.kind {
+            SourceKind::Telegram => item
                 .source
                 .reference
                 .as_deref()
                 .and_then(|r| r.parse::<i64>().ok())
                 .filter(|c| self.allowed.contains(c))
                 .into_iter()
-                .collect();
+                .collect(),
+            SourceKind::Subscription => self.allowed.iter().copied().collect(),
+            _ if self.watch_all => self.allowed.iter().copied().collect(),
+            _ => BTreeSet::new(),
         }
-        if self.watch_all {
-            return self.allowed.iter().copied().collect();
-        }
-        BTreeSet::new()
     }
 
     /// Starts (or extends) a watch on `item`. Returns the chats now watching it.
@@ -206,9 +236,10 @@ impl WatchRegistry {
     /// returned, so a caller that drops a message does not get it again; that matches legacy,
     /// where the `add` to `stall_notified` happened under the lock before the send.
     ///
-    /// A job that has not started running is skipped by both watchdogs: with
-    /// `AULOS_TELEGRAM_WATCH_ALL` on, a 200-item playlist behind `MAX_CONCURRENT_DOWNLOADS=3`
-    /// would otherwise fire ~197 "stalled" messages into every allowed chat three minutes later.
+    /// A job that has not started running is skipped by both watchdogs: a 200-item subscription
+    /// batch behind `MAX_CONCURRENT_DOWNLOADS=3` (or any playlist, with `AULOS_TELEGRAM_WATCH_ALL`
+    /// on) would otherwise fire ~197 "stalled" messages into every allowed chat three minutes
+    /// later.
     pub fn due_warnings(&mut self, now: Instant) -> Vec<Warning> {
         let mut out = Vec::new();
         for (id, w) in &mut self.jobs {
@@ -340,8 +371,7 @@ mod tests {
         assert!(r.chats_for(&it).is_empty());
     }
 
-    /// BRIEF: `AULOS_TELEGRAM_WATCH_ALL=false` reproduces the legacy blind spot; `true` reports an
-    /// API-sourced job.
+    /// DESIGN §12.6: the knob governs only the kinds that have another channel of their own.
     #[tokio::test]
     async fn watch_all_decides_whether_a_web_add_is_visible() {
         let api = item(SourceRef::bare(SourceKind::ApiV2));
@@ -351,17 +381,70 @@ mod tests {
         assert_eq!(on.chats_for(&api), BTreeSet::from([7, 8]));
 
         let off = registry(false);
-        assert!(!off.interested(&api), "the legacy blind spot");
+        assert!(
+            !off.interested(&api),
+            "the default: web adds report nowhere"
+        );
         assert!(off.chats_for(&api).is_empty());
 
-        // A subscription-sourced job is the other half of the legacy blind spot.
-        let sub = item(SourceRef::with_ref(SourceKind::Subscription, "01JC"));
-        assert!(on.interested(&sub));
-        assert!(!off.interested(&sub));
-        // …but a Telegram job is always visible, whatever the knob says.
+        // A Telegram job is always visible, whatever the knob says.
         let tg = item(SourceRef::with_ref(SourceKind::Telegram, "8"));
         assert!(off.interested(&tg));
         assert_eq!(off.chats_for(&tg), BTreeSet::from([8]));
+    }
+
+    /// A subscription has no originating channel, and Telegram is the only push surface for
+    /// background work — so it fans out with the knob **off** (DESIGN §12.6).
+    #[tokio::test]
+    async fn a_subscription_is_reported_even_with_the_knob_off() {
+        let sub = item(SourceRef::with_ref(SourceKind::Subscription, "01JC"));
+        for watch_all in [false, true] {
+            let r = registry(watch_all);
+            assert!(r.interested(&sub), "AULOS_TELEGRAM_WATCH_ALL={watch_all}");
+            assert_eq!(r.chats_for(&sub), BTreeSet::from([7, 8]));
+        }
+    }
+
+    /// The operator's rule: a video added from the phone is APNs' to announce (§25), so the bot
+    /// says nothing about it unless an operator asks for everything.
+    #[tokio::test]
+    async fn an_ios_add_is_the_phones_to_report_not_the_bots() {
+        let ios = item(SourceRef::bare(SourceKind::Ios));
+
+        let off = registry(false);
+        assert!(!off.interested(&ios));
+        assert!(off.chats_for(&ios).is_empty());
+
+        let on = registry(true);
+        assert!(on.interested(&ios), "the all-knob is still an escape hatch");
+        assert_eq!(on.chats_for(&ios), BTreeSet::from([7, 8]));
+    }
+
+    /// `interested` and `chats_for` may never disagree: a watch nothing can deliver to would tick
+    /// the watchdogs forever.
+    #[tokio::test]
+    async fn interested_never_promises_a_chat_that_routing_will_not_produce() {
+        for watch_all in [false, true] {
+            let r = registry(watch_all);
+            for it in [
+                item(SourceRef::bare(SourceKind::ApiV2)),
+                item(SourceRef::bare(SourceKind::ApiV1)),
+                item(SourceRef::bare(SourceKind::Ios)),
+                item(SourceRef::with_ref(SourceKind::Subscription, "01JC")),
+                item(SourceRef::with_ref(SourceKind::Telegram, "7")),
+                // A chat outside the allow-list is the case the two used to disagree on.
+                item(SourceRef::with_ref(SourceKind::Telegram, "999")),
+                item(SourceRef::bare(SourceKind::Retry)),
+                item(SourceRef::bare(SourceKind::Restart)),
+            ] {
+                assert_eq!(
+                    r.interested(&it),
+                    !r.chats_for(&it).is_empty(),
+                    "{:?} with AULOS_TELEGRAM_WATCH_ALL={watch_all}",
+                    it.source
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -459,9 +542,10 @@ mod tests {
     }
 
     /// Regression (ops-5): a merely-*queued* item is not stalled, it is waiting behind
-    /// `MAX_CONCURRENT_DOWNLOADS`. With `AULOS_TELEGRAM_WATCH_ALL` on by default, letting the
-    /// watchdogs run from `Added` fanned one bogus "stalled" message per queued item out to every
-    /// allowed chat three minutes after a playlist or subscription batch landed.
+    /// `MAX_CONCURRENT_DOWNLOADS`. Letting the watchdogs run from `Added` fanned one bogus
+    /// "stalled" message per queued item out to every allowed chat three minutes after a
+    /// subscription batch landed — and a subscription fans out whatever `AULOS_TELEGRAM_WATCH_ALL`
+    /// says, so flipping that default did not retire this regression.
     #[tokio::test(start_paused = true)]
     async fn neither_watchdog_fires_on_an_item_that_has_not_started() {
         let mut r = WatchRegistry::new(180, 7_200, true, vec![7, 8]);

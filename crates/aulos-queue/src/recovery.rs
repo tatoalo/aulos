@@ -6,7 +6,7 @@
 //! | Found status | Action |
 //! |---|---|
 //! | `resolving` | → `queued`, `msg = "Re-queued after restart"` — the resolve task is gone |
-//! | `preparing`/`downloading`/`postprocessing` | → `queued`, `BumpAttempt`, `SetSource { kind: "restart" }` |
+//! | `preparing`/`downloading`/`postprocessing` | → `queued`, `BumpAttempt` — the origin is kept |
 //! | `queued`, `auto_start = true` | left as-is, pushed to its priority deque ordered by `ord` |
 //! | `queued`, `auto_start = false` | left as-is, not scheduled — the legacy `pending` bucket |
 //! | terminal | untouched; `clear_after` re-armed; the most recent `AULOS_MEM_DONE_ITEMS` cached |
@@ -18,9 +18,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use aulos_core::{
-    FieldUpdate, GroupId, Item, ItemId, Kind, RestartPolicy, SourceKind, SourceRef, Status, UnixMs,
-};
+use aulos_core::{FieldUpdate, GroupId, Item, ItemId, Kind, RestartPolicy, Status, UnixMs};
 use aulos_store::{Durability, WriteOp};
 
 use crate::cmd::EngineError;
@@ -109,7 +107,6 @@ impl Engine {
                 (s, _) if s.is_running() => {
                     report.requeued_running += 1;
                     let auto_start = policy == RestartPolicy::Resume;
-                    let source = SourceRef::bare(SourceKind::Restart);
                     ops.push(WriteOp::SetStatus {
                         id: item.id,
                         status: Status::Queued,
@@ -119,15 +116,14 @@ impl Engine {
                         at: now,
                     });
                     ops.push(WriteOp::BumpAttempt { id: item.id });
-                    ops.push(WriteOp::SetSource {
-                        id: item.id,
-                        source: source.clone(),
-                    });
+                    // `source` is **not** rewritten to `restart`. A crash is not a change of
+                    // origin, and DESIGN §4.4 needs the origin intact for per-origin routing:
+                    // the recovered item still belongs to the chat — or the phone — that asked
+                    // for it. `attempt` is what tells the scheduler it is resuming (DESIGN §8.2).
                     item.status = Status::Queued;
                     item.auto_start = auto_start;
                     item.msg = Some(REQUEUED_MSG.into());
                     item.attempt = item.attempt.saturating_add(1);
-                    item.source = source;
                 }
                 _ => {}
             }
