@@ -170,6 +170,48 @@ async fn an_uncovered_path_falls_back_to_the_global_scan_rather_than_trusting_a_
     server.verify().await;
 }
 
+/// A batch entry with no resolvable path (a finished row that never learnt its filename) must not
+/// shrink the notification to the entries that have one: the whole batch takes the global scan.
+#[tokio::test]
+async fn an_unresolvable_entry_sends_the_whole_batch_to_the_global_scan() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/Library/Media/Updated"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/Library/Refresh"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = config(&[
+        ("JELLYFIN_SYNC_ENABLED", "true"),
+        ("JELLYFIN_URL", &server.uri()),
+        ("JELLYFIN_API_KEY", "secret"),
+        ("JELLYFIN_PATH_MAP", "/downloads=/data/videos"),
+    ]);
+    let hook = JellyfinHook::new(&cfg).with_backoff(&NO_BACKOFF);
+    let (runner, _store) = runner(&cfg);
+    let views = [
+        ItemBuilder::finished("Clip").filename("tube/a.mp4").view(),
+        ItemBuilder::finished("Nameless").no_file().view(),
+    ];
+    let batch: Vec<_> = views
+        .iter()
+        .map(|v| BatchEntry::from_view(v, TerminalStatus::Finished))
+        .collect();
+    runner
+        .run(&hook, &views[0], &batch)
+        .await
+        .expect("the fallback succeeds");
+    assert_eq!(hook.health().detail["mode"], "global_scan");
+    server.verify().await;
+}
+
 /// The targeted mode: every produced path is mapped, so one `Library/Media/Updated` carries them
 /// all and no global scan is issued.
 #[tokio::test]

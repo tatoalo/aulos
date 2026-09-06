@@ -266,14 +266,18 @@ impl JellyfinHook {
     ///
     /// Every entry, not just the representative item's: a debounced batch is the whole point, and
     /// a 50-item playlist must notify Jellyfin about 50 files.
-    fn produced_paths(ctx: &HookCtx<'_>) -> Vec<String> {
+    /// `None` when **any** entry has no resolvable path: a notification that names only part of
+    /// the batch would be reported as a success while the rest was never asked for, which is
+    /// exactly the silent no-op this hook was rewritten to avoid. The caller falls back to the
+    /// global scan, a superset of what the notification would have covered.
+    fn produced_paths(ctx: &HookCtx<'_>) -> Option<Vec<String>> {
         ctx.batch
             .iter()
-            .filter_map(|e| {
+            .map(|e| {
                 let root = ctx.cfg.paths.root_for(e.download_type);
                 crate::dispatcher::file_path(root, e.filename.as_deref())
+                    .map(|p| p.to_string_lossy().into_owned())
             })
-            .map(|p| p.to_string_lossy().into_owned())
             .collect()
     }
 
@@ -471,7 +475,7 @@ impl Hook for JellyfinHook {
         // for, so a partially-mapped batch is served correctly and more cheaply by one global
         // scan than by a notification that would miss some of it.
         if !self.path_map.is_empty() {
-            let paths = Self::produced_paths(&ctx);
+            let paths = Self::produced_paths(&ctx).unwrap_or_default();
             let mapped: Option<Vec<String>> = paths.iter().map(|p| self.path_map.map(p)).collect();
             match mapped {
                 Some(mapped) if !mapped.is_empty() => {
