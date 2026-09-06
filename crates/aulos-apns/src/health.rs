@@ -29,6 +29,51 @@ use serde_json::Value;
 /// The `healthz` component name.
 pub const COMPONENT: &str = "apns";
 
+/// The shortest run of hex characters treated as a token by [`redact_tokens`]. The route
+/// validator's own floor (`TOKEN_MIN` in `aulos-api`), so anything it would accept as a device
+/// token is redacted here.
+const HEX_RUN_MIN: usize = 32;
+
+/// How much of a redacted token survives — enough to correlate two log lines, not enough to push.
+const HEX_RUN_KEEP: usize = 8;
+
+/// Shortens every run of [`HEX_RUN_MIN`] or more hexadecimal characters to its first
+/// [`HEX_RUN_KEEP`] plus an ellipsis.
+///
+/// `last_error` is published by `healthz`, which is deliberately **outside** the auth layer, so
+/// whatever reaches it is world-readable. An APNs device token is the one secret this crate
+/// handles that lives in a URL path, and a transport error or an unexpected gateway body can carry
+/// one without anybody having written it there on purpose. Clamping at the sink means a future
+/// error source cannot reopen the hole.
+#[must_use]
+pub fn redact_tokens(reason: &str) -> String {
+    let bytes = reason.as_bytes();
+    let mut out = String::with_capacity(reason.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_hexdigit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            let run = &reason[start..i];
+            if run.len() >= HEX_RUN_MIN {
+                out.push_str(&run[..HEX_RUN_KEEP]);
+                out.push('\u{2026}');
+            } else {
+                out.push_str(run);
+            }
+        } else {
+            // Not a hex digit, so `bytes[i]` is either ASCII or the lead byte of a UTF-8
+            // sequence; pushing the whole character keeps the slice on a boundary.
+            let ch = reason[i..].chars().next().unwrap_or('\u{fffd}');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 /// The live counters. One instance per notifier, shared with every push task.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -78,11 +123,14 @@ impl Counters {
     }
 
     /// Replaces `last_error` without touching any counter (a store read that failed, say).
+    ///
+    /// Everything goes through [`redact_tokens`] on the way in, because this field is served by
+    /// the unauthenticated `healthz`.
     pub fn set_last_error(&self, reason: &str) {
         *self
             .last_error
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_owned());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(redact_tokens(reason));
     }
 
     /// The counters as a value, minus the gauges only a store read can supply.
@@ -186,6 +234,50 @@ impl ApnsHealth {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod redaction_tests {
+    use super::{HEX_RUN_KEEP, redact_tokens};
+
+    #[test]
+    fn a_device_token_never_reaches_last_error() {
+        // reqwest's Display appends " for url (...)", and the URL is /3/device/<token>. healthz
+        // is served outside the auth layer, so this string is world-readable.
+        let token = "9f3c1a2b".repeat(8); // 64 hex characters
+        let reason = format!(
+            "error sending request for url (https://api.push.apple.com:443/3/device/{token}) (gave up)"
+        );
+        let safe = redact_tokens(&reason);
+        assert!(!safe.contains(&token), "{safe}");
+        assert!(safe.contains(&token[..HEX_RUN_KEEP]), "{safe}");
+        assert!(safe.starts_with("error sending request for url"), "{safe}");
+    }
+
+    #[test]
+    fn short_hex_and_ordinary_reasons_are_left_alone() {
+        for reason in [
+            "410 Unregistered",
+            "403 InvalidProviderToken",
+            "device registrations unreadable: busy",
+            "aa11",
+            "",
+        ] {
+            assert_eq!(redact_tokens(reason), reason);
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_reason_survives_redaction() {
+        let long = "a".repeat(40);
+        let reason = format!("proxy said \u{201c}nope\u{201d} \u{20ac} {long} end");
+        let safe = redact_tokens(&reason);
+        assert!(safe.contains('\u{20ac}'), "{safe}");
+        assert!(safe.contains("\u{201c}nope\u{201d}"), "{safe}");
+        assert!(!safe.contains(&long), "{safe}");
+        assert!(safe.ends_with(" end"), "{safe}");
+    }
+}
+
 /// Reads [`ApnsHealth`] after the notifier has been handed to the wiring.
 #[derive(Clone)]
 pub struct ApnsHealthHandle {
@@ -223,7 +315,7 @@ impl ApnsHealthHandle {
         match self.store.devices().await {
             Ok(devices) => health.devices = u64::try_from(devices.len()).unwrap_or(u64::MAX),
             Err(e) => {
-                let reason = format!("device registrations unreadable: {e}");
+                let reason = redact_tokens(&format!("device registrations unreadable: {e}"));
                 self.counters.set_last_error(&reason);
                 health.last_error = Some(reason);
             }

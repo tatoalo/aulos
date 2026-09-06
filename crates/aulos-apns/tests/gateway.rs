@@ -343,4 +343,12 @@ async fn an_unreachable_gateway_gives_up_rather_than_erroring() {
         .await
         .expect("a transport failure is an Outcome, not an Err");
     assert!(matches!(outcome, Outcome::GaveUp { status: None, .. }));
+
+    // And the reason must not carry the device token. reqwest's `Display` appends
+    // " for url (...)", the URL is `/3/device/<token>`, and this string becomes `healthz`'s
+    // `apns.last_error` — which is served outside the auth layer.
+    let reason = outcome.last_error().expect("a reason");
+    assert!(!reason.contains(TOKEN), "{reason}");
+    assert!(!reason.contains("127.0.0.1"), "{reason}");
+    assert!(reason.ends_with("(gave up)"), "{reason}");
 }

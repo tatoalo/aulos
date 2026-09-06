@@ -316,7 +316,9 @@ impl ApnsClient {
                             return Ok(Outcome::ProviderTokenRejected { reason });
                         }
                         reminted = true;
-                        self.token.remint()?;
+                        // Compare-and-swap: if a sibling push task already rotated the token,
+                        // reuse theirs rather than minting a second one Apple would rate-limit.
+                        self.token.remint_if_current(&bearer)?;
                         continue;
                     }
                     429 | 500..=599 => {
@@ -360,7 +362,11 @@ impl ApnsClient {
             .json(&push.payload)
             .send()
             .await
-            .map_err(|e| Box::<str>::from(e.to_string()))?;
+            // `without_url` is load-bearing, not tidiness: reqwest's `Display` appends
+            // " for url (...)" and the URL is `/3/device/<device token>`. That string becomes
+            // `Outcome::GaveUp { reason }`, then `healthz`'s `apns.last_error` — which is served
+            // outside the auth layer. A DNS or TLS blip must not publish a device token.
+            .map_err(|e| Box::<str>::from(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         Ok((status, reason_of(status, &body)))
@@ -385,8 +391,28 @@ fn reason_of(status: u16, body: &str) -> Box<str> {
     if trimmed.is_empty() {
         Box::from("no reason")
     } else {
-        Box::from(&trimmed[..trimmed.len().min(200)])
+        Box::from(&trimmed[..floor_char_boundary(trimmed, REASON_MAX)])
     }
+}
+
+/// The largest slice of an undocumented body kept in a log line and in `healthz`.
+const REASON_MAX: usize = 200;
+
+/// The largest index `<= max` that `s` may be split at.
+///
+/// `&s[..s.len().min(200)]` panics when byte 200 lands inside a multi-byte character, and the
+/// branch that reaches here exists for a proxy answering HTML — precisely the body most likely to
+/// carry a localised quote or an em dash. The panic would unwind inside a spawned push task, so
+/// the cost of getting this wrong is not a bad log line but a leaked in-flight slot.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if s.len() <= max {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 #[cfg(test)]
@@ -406,6 +432,32 @@ mod tests {
             &*reason_of(502, "<html>bad gateway</html>"),
             "<html>bad gateway</html>"
         );
+    }
+
+    #[test]
+    fn a_long_body_is_truncated_on_a_character_boundary() {
+        // A captive portal or a localised CDN error page is exactly the body that reaches the
+        // verbatim branch, and exactly the one with a multi-byte character in it. Slicing at a
+        // fixed byte 200 used to panic — inside a spawned push task, which leaked its slot.
+        let body = format!("{}\u{20ac} and more", "a".repeat(199));
+        let reason = reason_of(502, &body);
+        assert_eq!(
+            &*reason,
+            "a".repeat(199),
+            "the euro sign straddles byte 200"
+        );
+        assert!(reason.len() <= REASON_MAX);
+
+        // A multi-byte character that ends exactly on the boundary is kept whole.
+        let body = format!("{}\u{20ac}{}", "a".repeat(197), "b".repeat(50));
+        assert_eq!(
+            &*reason_of(502, &body),
+            format!("{}\u{20ac}", "a".repeat(197))
+        );
+
+        // And an all-ASCII overlong body is still cut at exactly 200.
+        assert_eq!(reason_of(502, &"z".repeat(500)).len(), REASON_MAX);
+        assert_eq!(floor_char_boundary("short", 200), 5);
     }
 
     #[test]
