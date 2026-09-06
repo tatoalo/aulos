@@ -2598,3 +2598,81 @@ DESIGN/PROTOCOL, and why. Everything not listed here matches.
   replacement is the recorded experiment above, which is reproducible from its own protocol, plus
   the manual check in the fix report: point a staging aulos at a real Jellyfin, finish one
   download, and read `components.jellyfin.mode` / `last_status` out of `/healthz`.
+
+---
+
+## Push notifications — `aulos-apns` and its wiring (2026-09-06)
+
+Three agents built this in parallel against the contract in DESIGN §25 / PROTOCOL §4.8: the
+`DeviceStore` port and the store/API halves, the notifier crate, and this integration pass. What
+follows is only what deviates from what those documents now say, plus the decisions the contract
+left open.
+
+### Deviations from the contract as briefed
+
+- **`totalBytes` in the Live Activity content state falls back to `total_bytes_estimate`.** The
+  contract pins the key set, not the source. `ItemView.total_bytes` is `null` for HLS and
+  fragmented downloads, and its own documentation gives every client the fallback rule — for this
+  payload the notifier *is* the client, and a progress ring with no denominator is exactly the case
+  the estimate exists for. The seven keys are unchanged. (DESIGN §25.4.)
+- **`apns-expiration` on a Live Activity *update* is `0`, not `now+3600`.** The contract pins the
+  value for the alert; start and end also use `now+3600`. A progress frame that could not be
+  delivered immediately is worthless by the time a queue drains, and Apple asks providers to say so.
+  (DESIGN §25.4.)
+- **`healthz`'s `live_activities` is the notifier's cached count, not a `SELECT COUNT(*)`.** The
+  `DeviceStore` port has no global count method, and the port was committed at HEAD to be coded
+  against exactly. The number is exact for every item the notifier has looked at inside the throttle
+  window and `0` before any item has run — a small lie in the direction of a smaller number. Making
+  it exact is a `count_live_activities` on the port. (DESIGN §25.7.)
+- **Uppercase device tokens are normalised, not rejected.** The contract says "lowercase hex,
+  validated"; what is stored and matched is always lowercase, and a client that upper-cased a token
+  on one call and not another still finds its row. Documented in PROTOCOL §4.8. A strict `400` is
+  one condition in `parse_token` if that is ever preferred.
+- **`live_activities.item_id` is deliberately not a foreign key.** PROTOCOL §4.8 lets the app
+  register an activity before the item row exists — it starts one the moment the user taps
+  download, which can beat the server's own row.
+- **The `APNS_*` family is not `AULOS_`-prefixed**, against BRIEF §15. They name Apple's own
+  identifiers and an operator copying them out of the developer portal should not have to re-prefix
+  them; the cost is that an unrecognised `APNS_*` is ignored rather than fatal. Recorded as the
+  `N*` legend entry in DESIGN §17.3, next to the same exception for `PLUGINS_DIR`.
+
+### Decisions this integration pass made
+
+- **`SubscriberSpec::apns()` is 256 / `DropNewest` / `StatusChanged | Completed | Removed`**, which
+  is DESIGN §2.2.1's row for it, not the 512 the crate's own notes suggested. 256 matches `hooks`,
+  and the events that matter here are edges (`Completed`, the start edge) rather than the frames in
+  between: the throttle's trailing edge redelivers the last state anyway, so a dropped update costs
+  nothing. `events.dropped.apns` is now a third key in `components.events.dropped`.
+- **The subscriber loop lives in `wiring::run_apns`, not in the crate.** `aulos-core` hands out an
+  `EventInbox`, not a `Notifier` driver — the same shape `aulos-telegram` has, except that the
+  Telegram actor owns its own `spawn`. Keeping the loop in the wiring is what makes the shutdown
+  order explicit: it ends when the last `EventSender` drops, which §16.4 arranges by awaiting the
+  engine first.
+- **`APNS_DRAIN_WINDOW` is 1 s, inside `CONSUMER_DRAIN_CEILING`'s 2 s.** The loop quiesces for a
+  second and then cancels, so the "bounded tasks, no dangling awaits past the grace period"
+  property belongs to the loop rather than to a race against the outer timeout. What can be lost is
+  a push already past its `await`, and a push is fire-and-forget by contract.
+- **`ApiState` is handed the *same* `Arc<dyn DeviceStore>` the notifier reads**, through
+  `with_devices`, even though `ApiState::new` would default an equivalent one from the store. Two
+  independent handles over the same `Store` work today and stop working the day one of them grows a
+  cache — and the failure would be silent, because the routes would keep answering `204`.
+- **`Removed` needs nothing from the notifier beyond forgetting its cache.** Every removal path in
+  `aulos-queue` funnels through `remove_rows` → `WriteOp::DeleteItems`, which sweeps the
+  `live_activities` rows for the id and for its children before the `DELETE FROM items`. That covers
+  the case the notifier could not: a row removed while the process was not running.
+- **`healthz` reads `DeviceStore::devices()` once per 2 s tick** for the `devices` gauge. That is a
+  full table scan of a table with single-digit rows at household scale, and it is the same cost
+  shape as the store latency probe next to it. If the table ever grows, the fix is a count on the
+  port rather than a slower tick.
+
+### Left undone, on purpose
+
+- **No end-to-end test against Apple's real gateway**, and none is possible from CI: it needs a real
+  team id, a real `.p8` and a real device token. `tests/e2e/run.sh` is untouched. What stands in for
+  it is the `wiremock` gateway suite in `crates/aulos-apns/tests/gateway.rs`, which asserts every
+  header and every row of the §25.5 response table.
+- **`crates/aulos-apns/tests/fixtures/apns_test_key.p8` is a committed throwaway P-256 key**,
+  generated with `openssl` and documented as such. It is committed rather than generated at test
+  time so the suite needs no `openssl` binary. `crates/aulos-server/tests/server.rs` references that
+  same fixture rather than checking in a second one. **If CI ever grows a secret scanner, that path
+  needs an allowlist entry.**

@@ -1,6 +1,6 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-06 (Jellyfin discovery regression fixed). Update this file at every checkpoint.
+Last updated: 2026-09-06 (APNs push notifications shipped). Update this file at every checkpoint.
 
 ## What this is
 
@@ -180,6 +180,44 @@ engine. One cross-crate fallout fixed by the orchestrator: the API skip-reasons 
 Integration by the orchestrator: fmt/clippy clean, `cargo test --workspace` green, image rebuilt,
 `AULOS_E2E=1 tests/e2e/run.sh` → `END-TO-END: PASS` (43 checks).
 
+## Push notifications — `aulos-apns` (2026-09-06)
+
+The APNs notifier BRIEF deferred and DESIGN §12.6 left a seam for. Three agents in parallel against
+one written contract (DESIGN §25, PROTOCOL §4.8), then this integration pass.
+
+- **`crates/aulos-apns`** — the thirteenth crate and the second `Notifier` implementation after
+  `aulos-telegram`. Alert pushes on a terminal top-level item or group, and a full Live Activity
+  lifecycle (push-to-start on the first active status, throttled updates with a trailing edge, an
+  `end` with a dismissal date). ES256 provider token cached and reminted every 50 minutes, the
+  gateway chosen by the **device's** environment, and the whole response taxonomy: dead tokens are
+  pruned, a `403` reminted and retried once, `429`/`5xx` retried on `1 s → 4 s → 16 s`. It depends
+  on `aulos-core` and nothing else — device registrations go through the new
+  `aulos_core::ports::DeviceStore`, so its suite runs against a `HashMap` and a `wiremock` gateway.
+- **Store + API** — migration `0003_devices.sql` (`devices`, `live_activities`, both `STRICT`),
+  five new `WriteOp`s, `impl DeviceStore for Store`, and the four idempotent `204` routes under
+  `api/v2/devices/…`. Deleting an item sweeps its Live Activity rows and its children's.
+- **Wiring** — `SubscriberSpec::apns()` (256, `DropNewest`, `StatusChanged | Completed | Removed`)
+  added to `aulos-core` and registered in `wiring.rs` **only when the notifier was built**; one
+  `Arc<dyn DeviceStore>` shared by `ApiState` and the notifier; the subscriber loop and a bounded
+  1 s drain before the shutdown ceiling; `components.apns` in `healthz` and a third
+  `events.dropped.apns` counter. A missing or unreadable `.p8` with `APNS_ENABLED=true` logs one
+  ERROR, reports `apns: degraded` and **does not stop the server** — asserted through the
+  production boot in `crates/aulos-server/tests/server.rs`.
+- **Operator setup** is in README "Push notifications (iOS)": create an APNs auth key in the Apple
+  developer portal, mount the `.p8` read-only, set `APNS_ENABLED`/`APNS_KEY_FILE`/`APNS_KEY_ID`/
+  `APNS_TEAM_ID`, and read `components.apns` out of `/healthz`. `docker/compose.example.yml` has
+  the commented block and the commented read-only volume line. The key file's *contents* are the
+  only secret; the key id and the team id are identifiers.
+
+Gates after the round: `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets
+-D warnings` clean, `cargo test --workspace` **1951 passed / 0 failed** (79 test binaries + the
+doctests), `cargo test -p aulos-workspace-tests` 31 passed (the arch table and the DESIGN §3 layout
+list both carry `aulos-apns`), and `docker build -f docker/Dockerfile` still produces an image — the
+Dockerfile's `COPY . .` picks a new crate up with no edit. `tests/e2e/run.sh` is untouched: an
+end-to-end push needs a real team id, a real `.p8` and a real device, so it cannot run in CI.
+
+Deviations and the open items are in `docs/INTEGRATION-NOTES.md` under "Push notifications".
+
 ## Production bug round 4 — Jellyfin never indexed anything (2026-09-06)
 
 Downloads reached `finished` with the file on disk and never appeared in Jellyfin, while
@@ -306,7 +344,7 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 5. **Cutover kit**: compose snippet for the VPS (image `ghcr.io/tatoalo/aulos`), `aulos-server
    import` of the legacy `STATE_DIR` JSON, rollback = switch the image tag back. Runbook in
    DESIGN §19.
-6. Later: arm64 image, APNs notifier, minimal web status page, community plugin docs.
+6. Later: arm64 image, ~~APNs notifier~~ (**done**, 2026-09-06), minimal web status page, community plugin docs.
 
 ## Known open items (from INTEGRATION-NOTES.md)
 

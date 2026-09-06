@@ -1139,6 +1139,99 @@ Media playback and `Range` are unaffected.
 
 ---
 
+### 4.8 Devices — push registration
+
+Four routes, all behind the same auth as the rest of `api/v2`, all idempotent, all answering
+`204 No Content` with an empty body. They are the whole write surface the iOS client needs for
+APNs: one call when the app receives a device token, one when it starts a Live Activity for a
+download, and the two deletes that undo them.
+
+| Method | Path | Body | Success | Errors |
+|---|---|---|---|---|
+| PUT | `api/v2/devices/{token}` | the registration object below | `204` | 400, 401 |
+| DELETE | `api/v2/devices/{token}` | — | `204` (also for a token that was never registered) | 400, 401 |
+| PUT | `api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}` | `204` | 400, 401, **404** when the device is unknown |
+| DELETE | `api/v2/devices/{token}/live-activities/{item_id}` | — | `204` (also when nothing was registered) | 400, 401 |
+
+The registration body:
+
+```json
+{
+  "platform": "ios",
+  "bundle_id": "com.tatoalo.aulos",
+  "environment": "sandbox",
+  "alerts": true,
+  "live_activity_start_token": "<hex>",
+  "app_version": "1.0.0 (3)"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `platform` | string, required | `"ios"`. Anything else is `400 validation_failed`. |
+| `bundle_id` | string, required | the app's bundle identifier, which is also the `apns-topic` the server pushes with. |
+| `environment` | string, required | `"sandbox"` or `"production"` — which APNs gateway minted the token. A Debug/simulator build is `sandbox`, a TestFlight/App Store build is `production`. Getting it wrong makes every push fail inside APNs, so it is validated. |
+| `alerts` | boolean, optional | whether completion/failure alerts are wanted. Absent or `null` means `true`. |
+| `live_activity_start_token` | string or `null`, optional | the Live Activity **push-to-start** token (iOS 17.2+), when the app has one. `null` clears a previously reported one. |
+| `app_version` | string or `null`, optional | free-form, for the server's logs. At most 64 characters. |
+
+`{token}` and the two token fields are **hexadecimal, 32 to 200 characters**. They are lowercased
+on the way in, so a `DELETE` whose token a client happened to uppercase still finds the row it
+registered. `{item_id}` is validated as a ULID but **need not name an item that exists** — the app
+starts a Live Activity the moment the user taps download, which can beat the server's own row.
+
+`PUT api/v2/devices/{token}` is an upsert keyed on the token: a repeat call refreshes every field
+except the server's record of when the token was *first* seen. That is the call the app makes on
+every launch. `DELETE api/v2/devices/{token}` forgets the device **and every Live Activity
+registered under it**; deleting an item likewise forgets the Live Activity registrations for it and
+for its children, so a client never has to clean those up itself.
+
+The `PUT` on a live activity is the one route here that can `404`: without a registered device the
+server does not know which gateway to push to, so the registration would be undeliverable. Register
+the device first. The matching `DELETE` is a `204` even then — the caller wants the registration
+gone and it is gone.
+
+Because the success answer is `204`, there is nowhere to return a `warnings` list: a field this
+build does not know is ignored (and logged), never a `400`. §4.1's forward-compatibility rule
+therefore still holds — a newer client is never rejected for saying more than the server
+understands.
+
+#### Live Activity content state
+
+The server sends Live Activity pushes for items that have a registration: a `start` when the item
+first leaves `queued` for an active status, `update`s as it progresses, and an `end` when it
+settles. Every one of them carries the same `content-state` object, and an app's
+`ActivityAttributes.ContentState` must decode exactly these seven keys — all of them always
+present, `camelCase`, `null` where the value is unknown:
+
+```json
+{
+  "status": "downloading",
+  "percent": 42.5,
+  "speed": 2100000.0,
+  "eta": 68,
+  "downloadedBytes": 123,
+  "totalBytes": 456,
+  "message": "Merging formats"
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `status` | string | the v2 status word (§3.1). |
+| `percent` | number | `0`–`100`, always a number. |
+| `speed` | number or `null` | bytes per second. |
+| `eta` | integer or `null` | seconds remaining. |
+| `downloadedBytes` | integer or `null` | bytes written so far. |
+| `totalBytes` | integer or `null` | the expected total. |
+| `message` | string or `null` | the live stage line — the same text as `item.msg` (§2.3). |
+
+The push envelopes themselves are APNs concerns rather than protocol ones (`event` is `start`,
+`update` or `end`; the `end` push carries a `dismissal-date`), and the attributes a `start` push
+declares are `AulosDownloadAttributes` with `itemId`, `url` and `title`.
+
+---
+
 ## 5. WebSocket
 
 ### 5.1 Connecting
@@ -1995,3 +2088,5 @@ as `[String: JSONValue]` and applying present keys is ten lines and covers it co
 | see whether the server is healthy | `GET <p>healthz` |
 | understand why a download failed | `item.error.code`, then `item.error.message` |
 | understand why an option did not apply | `GET api/v2/debug/options?item_id=<id>` |
+| receive push notifications | `PUT api/v2/devices/{token}` with the registration body (§4.8) on every launch; `DELETE` the same path to stop |
+| drive a Live Activity from the server | `PUT api/v2/devices/{token}/live-activities/{item_id}` with `{"update_token":"<hex>"}`; `DELETE` it when the activity ends |

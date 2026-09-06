@@ -60,6 +60,19 @@ services:
       TELEGRAM_BOT_ENABLED: "true"
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
+      # iOS push notifications (docs/DESIGN.md §25). The .p8 is the only secret here: APNS_KEY_ID
+      # and APNS_TEAM_ID are identifiers, not credentials. Mount the key read-only and keep it out
+      # of the image. With APNS_ENABLED=true and an unreadable key the server logs an ERROR, runs
+      # with push disabled and reports `apns: degraded` — it does not refuse to start.
+      # APNS_ENABLED: "true"
+      # APNS_KEY_FILE: /config/AuthKey_ABCD1234EF.p8
+      # APNS_KEY_ID: ABCD1234EF
+      # APNS_TEAM_ID: TEAM123456
+      # APNS_TOPIC defaults to com.tatoalo.aulos; a device's own bundle_id wins when it reports one.
     volumes:
       - /srv/media:/downloads
       - /srv/aulos/config:/config
+      # The APNs signing key, if you enabled push above. Read-only, and a single file rather than a
+      # directory so nothing else in it can be reached: it is the one credential in this file that
+      # is not an environment variable.
+      # - /srv/aulos/apns/AuthKey_ABCD1234EF.p8:/config/AuthKey_ABCD1234EF.p8:ro

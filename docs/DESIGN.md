@@ -187,7 +187,13 @@ impl EventRouter {
 | `aggregator` | 1024 | `Block` | `Added \| StatusChanged \| Completed \| Removed \| SubscriptionChanged \| SubscriptionRemoved \| YtdlOptionsReloaded \| ProvidersReloaded \| HealthChanged \| Notice` (everything — it is the wire) | `aulos-queue::aggregator` (§15.1) |
 | `hooks` | 256 | `DropNewest` | `Finishing \| Completed` | `aulos-hooks::dispatcher` (§13) |
 | `telegram` | 512 | `DropNewest` | `Added \| StatusChanged \| Completed \| Removed \| Notice` | `aulos-telegram` (§12.1) |
-| *(future)* `apns` | 256 | `DropNewest` | `Completed \| Notice` | a `Notifier` impl (§12.6) |
+| `apns` | 256 | `DropNewest` | `StatusChanged \| Completed \| Removed` | `aulos-apns` (§25) |
+
+`apns` is the one subscriber other than the aggregator that asks for the progress-driven
+`StatusChanged` flood, because a Live Activity **is** a progress ring; the notifier throttles those
+per `(item, device)` rather than at the router (§25.2). It takes `Removed` so a re-added id can
+start a fresh activity, and it is registered **only when the notifier was built** — an inbox with
+no reader fills, drops, and turns `events.dropped.apns` into a lie.
 
 The `SubscriptionScheduler` is a **producer only** (`SubscriptionChanged`, `SubscriptionRemoved`);
 it consumes no events, so it registers no inbox. The earlier topology sketches implied otherwise.
@@ -240,8 +246,9 @@ Workspace `resolver = "3"`, edition 2024, `rust-version = "1.95"`.
 | `aulos-telegram` | aulos-core, aulos-store, aulos-queue, teloxide, governor, indexmap, rand, tokio, tokio-util, url | `bot`, `commands`, `config_ui`, `urls`, `watch`, `render`, `limiter` |
 | `aulos-subscriptions` | aulos-core, aulos-store, aulos-provider, aulos-queue, tokio, tokio-util, rand, url | `manager`, `scheduler`, `check`, `detect`, `model`, `public` |
 | `aulos-hooks` | aulos-core, aulos-provider, reqwest, quick-xml, time, tokio, tokio-util, url | `dispatcher`, `jellyfin`, `nfo`, `audio_sync`, `ffprobe`, `manifest_hook` (community `[[hook]]`) — reaches item state **only** through `aulos_core::ports::HookStore` (§13), never through `aulos-store` or `aulos-queue` |
+| `aulos-apns` | aulos-core, reqwest(http2), jsonwebtoken, tokio, tokio-util | `jwt`, `client`, `payload`, `notifier`, `health` — reaches device registrations **only** through `aulos_core::ports::DeviceStore` (§25), never through `aulos-store`; the second `Notifier` implementation after `aulos-telegram` (§12.6) |
 | `aulos-server` | everything | `main`, `wiring`, `pot`, `signals`, `bootstrap`, `cli` |
-| `aulos-workspace-tests` | aulos-core (dev), toml (dev) | dev-only crate, `publish = false`, **no `src/`** — it exists to own `tests/arch.rs`, the §3 gate. It is the twelfth workspace member and the target of `cargo test -p aulos-workspace-tests arch` (§18.4). |
+| `aulos-workspace-tests` | aulos-core (dev), toml (dev) | dev-only crate, `publish = false`, **no `src/`** — it exists to own `tests/arch.rs`, the §3 gate. It is the thirteenth workspace member and the target of `cargo test -p aulos-workspace-tests arch` (§18.4). |
 
 **The ubiquitous five.** `serde`, `serde_json`, `thiserror`, `tracing` and `async-trait` are
 permitted in **every** crate, are omitted from the rows above, and are ignored by the gate. They
@@ -286,6 +293,10 @@ earlier draft of this document:
   SQLite directly behind the engine's back would leave `size` permanently wrong on every connected
   client until a restart). The hook tests run against a `HashMap`-backed fake with no SQLite and no
   engine at all.
+- **`aulos-apns` uses a port for the same reason.** `aulos_core::ports::DeviceStore` is the
+  `HookStore` of §25: `aulos-store` implements it, `aulos-api` writes device and Live Activity
+  registrations through it, and `aulos-apns` reads and prunes through it, so the push crate needs
+  neither `aulos-store` nor `aulos-queue` and its whole suite runs against a `HashMap`.
 - **`aulos-api` does not depend on `aulos-subscriptions`.** `SubscriptionsHandle` is a handle over
   an mpsc of `SubCmd`, so it lives in `aulos-core::subscription` next to `SubscriptionView`, and
   `aulos-subscriptions::Manager` owns the receiving half. That keeps the API a leaf over three
@@ -3230,6 +3241,12 @@ table, and changes nothing else. No device-token table, no APNs key and no separ
 notifier ship now: webhooks are already covered by the community `[[hook]]` manifest (§13.5), and
 a push service is a separate deployment decision.
 
+**Amendment: that later is now — see §25.** `aulos-apns` is exactly the crate this paragraph
+predicted: `interested = |_| true`, a device-token table behind `aulos_core::ports::DeviceStore`,
+one more `EventRouter` subscriber, and no change to any existing crate. The paragraph is left
+standing because it is the design decision that made the seam cheap enough to take. The webhook
+sentence is unchanged: community `[[hook]]`s still cover webhooks and no webhook notifier ships.
+
 ---
 
 ## 13. Post-completion hooks (`aulos-hooks`)
@@ -4021,11 +4038,12 @@ Legacy sits at 250–400 MB because it forks an interpreter per download.
 10 spawn the POT supervisor (if AULOS_POT_ENABLED)                         §16.2
 11 build the EventRouter, `subscribe()` every consumer of §2.2.1's table, hand the EventSender to
    every producer; spawn Store actor, EventHub, Aggregator, QueueEngine (the router is spawned
-   after the last `subscribe()`, i.e. after step 14)
+   after the last `subscribe()`, i.e. after step 14). The `DeviceStore` port and the APNs notifier
+   are built here too, because `telegram` and `apns` are subscribed only when they will be read
 12 boot recovery: re-queue in-flight items, recompute group counters       §8.9
 13 spawn HookDispatcher, SubscriptionScheduler, ClearScheduler, ConfigWatcher, PluginWatcher
-14 spawn the Telegram actor (if enabled and configured), then `EventRouter::spawn()` — no
-   subscriber may be registered after this point
+14 spawn the Telegram actor (if enabled and configured) and the APNs subscriber loop (if push was
+   armed), then `EventRouter::spawn()` — no subscriber may be registered after this point
 14b install the SIGHUP/SIGQUIT handlers (their reload targets now exist)   §16.4
 15 bind HOST:PORT (TLS when HTTPS=true), start axum with graceful shutdown
 16 log "aulos-server <version> listening on <addr><prefix> (v1 shim: on|off)"
@@ -4106,7 +4124,10 @@ the one condition that makes the service useless. The Docker `HEALTHCHECK` uses 
     "nfo":          { "status":"ok", "runs_total":7, "failures_total":0 },
     "audio_sync":   { "status":"ok", "runs_total":2, "failures_total":0,
                       "phase":"pre_terminal" },
-    "events":       { "status":"ok", "dropped":{"hooks":0,"telegram":0} },
+    "events":       { "status":"ok", "dropped":{"hooks":0,"telegram":0,"apns":0} },
+    "apns":         { "status":"disabled", "devices":0, "live_activities":0, "sent_total":0,
+                      "failed_total":0, "pruned_tokens_total":0,
+                      "last_error":null, "last_sent_at":null },
     "subscriptions":{ "status":"ok", "total":7, "failing":1, "next_due_in_s":412 },
     "importer":     { "status":"ok", "imported_at":1757000000000, "warnings":2 }
   },
@@ -4177,7 +4198,7 @@ counter, §16.7 names the `healthz` path so the two can be reconciled.
 
 | Signal | Behaviour |
 |---|---|
-| `SIGTERM` / `SIGINT` (installed at §16.1 step 0, before the boot's slow steps) | 1. stop accepting HTTP (axum graceful); 2. close WS clients with `1001 "server shutting down"` so they reconnect rather than error; 3. stop the subscription scheduler and the Telegram poller; 4. **let in-flight downloads finish** for up to `AULOS_SHUTDOWN_GRACE_SECS` (20); 5. then `killpg SIGTERM` each job, 5 s, `SIGKILL`; 6. mark still-active items `queued` with `msg="Interrupted by shutdown"` so the next boot resumes them; 7. final aggregator flush; 8. drain the store actor, `wal_checkpoint(TRUNCATE)`, `PRAGMA optimize`, close; 9. `SIGTERM` the POT child; 10. `TaskTracker::wait()` with a 10 s ceiling, then exit 0. |
+| `SIGTERM` / `SIGINT` (installed at §16.1 step 0, before the boot's slow steps) | 1. stop accepting HTTP (axum graceful); 2. close WS clients with `1001 "server shutting down"` so they reconnect rather than error; 3. stop the subscription scheduler and the Telegram poller; 4. **let in-flight downloads finish** for up to `AULOS_SHUTDOWN_GRACE_SECS` (20); 5. then `killpg SIGTERM` each job, 5 s, `SIGKILL`; 6. mark still-active items `queued` with `msg="Interrupted by shutdown"` so the next boot resumes them; 7. final aggregator flush, and the APNs loop drains its in-flight pushes for one second and then cancels the rest (§25.5); 8. drain the store actor, `wal_checkpoint(TRUNCATE)`, `PRAGMA optimize`, close; 9. `SIGTERM` the POT child; 10. `TaskTracker::wait()` with a 10 s ceiling, then exit 0. |
 | `SIGHUP` | reload `YTDL_OPTIONS*` and re-scan `AULOS_PLUGINS_DIR` (`docker kill -s HUP` is a nice ops affordance). |
 | `SIGQUIT` | log every task's state at ERROR and continue — a debug aid for a wedged container. |
 | panic in a task | caught by the spawn wrapper, logged with the span; the owning item fails with `internal` and the request id. A panic in the **engine or store actor** is fatal by design: `abort()` after logging, because a corrupted queue is worse than a restart, and boot recovery is designed for exactly the hard-kill case. |
@@ -4385,7 +4406,10 @@ invalidating an inode-level watch. We watch the **parent directory**, non-recurs
 ### 17.3 Complete env var table
 
 Legend: **L** = legacy name, meaning and default preserved · **L\*** = legacy name, behaviour note
-in the Notes column · **N** = new (`AULOS_*`).
+in the Notes column · **N** = new (`AULOS_*`) · **N\*** = new and deliberately **not** `AULOS_`-prefixed,
+because the `APNS_*` family names Apple's own identifiers and an operator copying them out of the
+developer portal should not have to re-prefix them. Unlike `AULOS_*`, an unrecognised `APNS_*`
+variable is ignored rather than fatal (§17.1), which is the price of the exception.
 
 | Env var | Default | Type | Notes | |
 |---|---|---|---|---|
@@ -4443,6 +4467,12 @@ in the Notes column · **N** = new (`AULOS_*`).
 | `TELEGRAM_STALL_TIMEOUT_SECONDS` | `180` | int | bot stall warning | L |
 | `TELEGRAM_HARD_TIMEOUT_SECONDS` | `7200` | int | bot "taking longer" warning | L |
 | `TELEGRAM_MAX_URLS_PER_MESSAGE` | `10` | int | | L |
+| `APNS_ENABLED` | `false` | bool | arms the `aulos-apns` notifier (§25). `false` ⇒ `healthz` `apns: disabled` and no subscriber | N\* |
+| `APNS_KEY_FILE` | `''` | path | the `.p8` ES256 signing key. The **path** is printed by `check-config`; the file's contents are the secret and are never read into `Config`. Missing or unreadable with `APNS_ENABLED=true` ⇒ ERROR at boot, `apns: degraded`, the server still starts (§25.6) | N\* |
+| `APNS_KEY_ID` | `''` | str | the provider token's `kid`. **Not a secret** | N\* |
+| `APNS_TEAM_ID` | `''` | str | the provider token's `iss`. **Not a secret** | N\* |
+| `APNS_TOPIC` | `com.tatoalo.aulos` | str | the default bundle id, and the `apns-topic` for a device that reported none. A device's own `bundle_id` wins when present | N\* |
+| `APNS_BASE_URL_OVERRIDE` | `''` | str | **test only.** Points both gateways at one base URL so the `aulos-apns` suite can run against a local mock (§25.9). Empty in every real deployment | N\* |
 | `METUBE_VERSION` | `dev` | str | reported by `/version` and `healthz`; `AULOS_VERSION` is an accepted alias | L |
 | `PLUGINS_DIR` | `/config/plugins` | path | the default for `AULOS_PLUGINS_DIR`. **Not a legacy variable** — it appears in neither `_DEFAULTS` nor anywhere else in the Python source; it is introduced by BRIEF §9 and is un-prefixed contrary to BRIEF §15, which §23.1 records as a deliberate deviation | N\* |
 | `PUID` / `PGID` / `UID` / `GID` / `UMASK` / `CHOWN_DIRS` | `1000` / `1000` / — / — / `022` / `true` | entrypoint | `UID`/`GID` still win over `PUID`/`PGID`; `CHOWN_DIRS` gains a `recursive` value (§18.2) | L\* |
@@ -5567,6 +5597,260 @@ prefixes. The two halves meet in the third mode, `AULOS_WEB_BASE=<base URL inclu
 which points the serving subset of the same suite at a real binary and skips everything that needs
 the scripted queue. That mode is the manual integration check; it is documented in
 `tools/web/README.md` and deliberately not wired into CI.
+
+---
+
+## 25. Push notifications (`aulos-apns`)
+
+BRIEF's "out of scope" list kept APNs for later and §12.6 left the `Notifier` seam for it. This is
+that later. `aulos-apns` is the second implementation of `aulos_core::event::Notifier`, and it
+exists so the phone can hear about a download nobody is looking at: one alert when a top-level item
+or a group reaches a terminal status, and a Live Activity that runs on the lock screen from the
+moment bytes start moving until the item finishes.
+
+The iOS app is written against the contract in §25.4 and §25.8 **byte for byte**, so the payload
+builders are pure functions of an `ItemView` with tests that compare whole `serde_json::Value`s.
+A key that changes name, moves, appears or disappears fails in this repository rather than on a
+phone.
+
+### 25.1 Shape and dependencies
+
+| Module | Concern |
+|---|---|
+| `jwt` | the ES256 provider token: minting, the 50-minute cache, the forced remint |
+| `client` | the HTTP/2 client, the response taxonomy, the retry ladder |
+| `payload` | the alert and Live Activity payloads, as pure functions |
+| `notifier` | event handling, the start-once set, the update throttle, the bounded task set |
+| `health` | the `healthz` component |
+
+`aulos-apns` depends on `aulos-core` and nothing else in the workspace. Device registrations are
+reached through the **`aulos_core::ports::DeviceStore`** port (§7.1's `HookStore` neighbour):
+`aulos-store` implements it, `aulos-api` writes through it on the `PUT`/`DELETE` device routes, and
+`aulos-apns` reads and prunes through it. That is what keeps the whole crate testable against a
+`HashMap` with no SQLite and no engine anywhere in its test tree, exactly as `aulos-hooks` is.
+
+`ApnsNotifier::new` returns `Result<Option<Self>, ApnsError>` so the three outcomes — off,
+misconfigured, running — are three distinguishable values rather than a boolean and a log line.
+`aulos-server`'s `wiring::build_apns` is that match, and it never propagates the error (§25.6):
+
+```rust
+let devices: Arc<dyn DeviceStore> = Arc::new(store.clone());   // the same Arc ApiState gets
+match ApnsNotifier::new(&cfg, Arc::clone(&devices), Arc::clone(&clock)) {
+    Ok(None)           => { ApnsHealth::disabled().apply(&health); None }        // APNS_ENABLED=false
+    Ok(Some(notifier)) => Some(notifier),                                        // subscribe it
+    Err(e)             => { tracing::error!(…); ApnsHealth::misconfigured(&e.to_string()).apply(&health); None }
+}
+```
+
+Three wiring facts follow from that, and each is a way to get it silently wrong:
+
+- **One `Arc<dyn DeviceStore>`, not two.** `ApiState::with_devices` is handed the same handle the
+  notifier reads, so `healthz`'s `devices` gauge counts the rows the `PUT` routes actually wrote.
+  Two independent `Arc`s over the same `Store` work today and stop working the day one of them
+  grows a cache.
+- **`SubscriberSpec::apns()` is registered only when the notifier exists**, exactly as the Telegram
+  inbox is (§2.2.1), and the inbox's `dropped_handle` is taken *before* the inbox is moved into the
+  loop — otherwise `events.dropped.apns` could only ever be a hard-coded `0`.
+- **The subscriber loop belongs to the wiring.** `aulos-core` hands out an `EventInbox`, not a
+  `Notifier` driver, so `wiring::run_apns` is the `while let Some(ev) = inbox.recv().await` task.
+  It ends when the last `EventSender` drops — which §16.4 arranges by awaiting the engine first —
+  then gives the notifier `APNS_DRAIN_WINDOW` (1 s) to land what is in flight and calls
+  `shutdown()` to cancel the rest. That is inside `CONSUMER_DRAIN_CEILING` on purpose: the bound is
+  the loop's own, not a race against the outer timeout.
+
+### 25.2 What each event does
+
+| Event | Action |
+|---|---|
+| `StatusChanged` from `queued`/`resolving` into `preparing`/`downloading` | Live Activity **push-to-start**, to every device that offered a start token. Top-level items only, at most once per item. |
+| `StatusChanged` (any, including the `from == to` progress re-diff) | Live Activity **update** to every registration for that item, throttled per (item, device). |
+| `Completed` | Live Activity **end** to every registration, then `remove_live_activities_for`; plus one **alert** per device with `alerts == true`, when the item is top-level or a group and its status is `finished` or `error`. |
+| `Removed` | forget the item's cached state, so a re-added id may start a fresh activity. |
+
+`Removed` needs **no** `remove_live_activities_for` from the notifier, and that is a store fact
+rather than an omission: every removal path in `aulos-queue` funnels through `remove_rows`, whose
+one write is `WriteOp::DeleteItems`, and that op sweeps the `live_activities` rows for each id *and*
+for its children before the `DELETE FROM items` (§7). A delete, a clear, the `CLEAR_COMPLETED_AFTER`
+sweep and a group cascade are therefore all covered by the same code, including the case the
+notifier could not cover — a row removed while the process was not running.
+
+Three rules are easy to get wrong and are each pinned by a test:
+
+- **A group gets one alert; its children get none.** `Completed` for an item with a `group_id` is
+  dropped on the floor, or a 40-episode season would ring the phone 41 times. The group's body
+  carries the roll-up: `"<title> — N of M done"` from `children_done`/`children_total` (§8.6).
+- **`canceled` is not worth an alert** — the user is standing at the phone that cancelled it. But
+  *every* terminal status ends the Live Activity, because a cancelled download must not leave a
+  progress ring spinning on the lock screen.
+- **A paused item does not start twice.** `queued → downloading → queued → downloading` is an
+  ordinary pause/resume, so the ids already started are remembered until the item completes or is
+  removed.
+
+`interested()` is `|_| true`. A device registration is per user, not per source, so unlike
+`TelegramNotifier` (§12.6) there is nothing to filter on.
+
+### 25.3 The provider token
+
+A JWT signed **ES256** with the `.p8` at `APNS_KEY_FILE`, header `{alg: ES256, kid: APNS_KEY_ID}`,
+claims `{iss: APNS_TEAM_ID, iat: <unix seconds>}` and **no `exp`** — Apple derives expiry from
+`iat` and rejects a token that carries one. It is cached and reminted every **50 minutes**: Apple
+accepts 20–60 minutes and rate-limits providers that mint one per request, so 50 sits in the middle
+of the band with ten minutes of slack for a slow clock.
+
+The key is parsed **once, at construction**, so a malformed `APNS_KEY_FILE` is reported at boot
+rather than on the first completed download. `jsonwebtoken` with the `rust_crypto` backend does the
+signing; the tests decode what it produced with the public half of a committed throwaway P-256 key
+pair, so they verify a real signature rather than assert that the encoder agrees with itself.
+
+### 25.4 Payloads
+
+**Content state** — exactly seven keys, always present, camelCase. A Live Activity's `ContentState`
+is a Swift `Codable` struct: a missing key is a decode failure and a frozen activity on the device,
+so "omit when null" is not available here even though it is the house style everywhere else.
+
+```json
+{ "status": "downloading", "percent": 42.5, "speed": 2100000.0, "eta": 68,
+  "downloadedBytes": 123, "totalBytes": 456, "message": "Merging formats" }
+```
+
+`status` is the v2 status word (§4.2), `percent` is the `f64` of `ItemView.percent`, and
+`totalBytes` is `total_bytes` falling back to `total_bytes_estimate` — that is the rule
+`ItemView.total_bytes_estimate` gives every client, and for this payload the notifier *is* the
+client: HLS and fragmented downloads have no exact total, and a progress ring with no denominator
+is the case the fallback exists for.
+
+**Alert** (`apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: now+3600`,
+`apns-collapse-id: <item id>`, `apns-topic: <device bundle_id>`):
+
+```json
+{ "aps": { "alert": { "title": "Download finished", "body": "Big Buck Bunny" },
+           "sound": "default", "thread-id": "aulos", "interruption-level": "active" },
+  "item_id": "01JB…", "status": "finished",
+  "url": "https://…", "download_url": "download/Big%20Buck%20Bunny.mp4" }
+```
+
+Title is `Download finished` for `finished` and `Download failed` otherwise; body is the item title,
+or `"<title> — N of M done"` for a group.
+
+**Live Activity** (`apns-push-type: liveactivity`,
+`apns-topic: <bundle_id>.push-type.liveactivity`), three events:
+
+```json
+// start   apns-priority 10
+{ "aps": { "timestamp": 1772582400, "event": "start", "content-state": { … },
+           "attributes-type": "AulosDownloadAttributes",
+           "attributes": { "itemId": "01JB…", "url": "https://…", "title": "Big Buck Bunny" },
+           "alert": { "title": "Downloading", "body": "Big Buck Bunny" } } }
+
+// update  apns-priority 5
+{ "aps": { "timestamp": 1772582402, "event": "update", "content-state": { … } } }
+
+// end     apns-priority 10
+{ "aps": { "timestamp": 1772582500, "event": "end", "content-state": { … },
+           "dismissal-date": 1772583400 } }
+```
+
+`timestamp` is unix **seconds**; `dismissal-date` is `now + 900`. `apns-expiration` is `now+3600`
+on a start and an end, and **`0` on an update** — a progress frame that could not be delivered
+immediately is worthless by the time a queue drains, and Apple asks providers to say so.
+
+### 25.5 Talking to Apple
+
+`POST <base>/3/device/<token>`, HTTP/2, with the provider token as `authorization: bearer <jwt>`.
+The gateway is chosen by the **device's** environment, because a token minted by a Debug/simulator
+build is only valid against the sandbox: `api.sandbox.push.apple.com:443` for `sandbox`,
+`api.push.apple.com:443` for `production`. `APNS_BASE_URL_OVERRIDE` collapses both onto one base
+URL and exists **only for the tests** (§25.9).
+
+| Answer | What happens |
+|---|---|
+| `200` | delivered; `sent_total++`, the degraded flag clears |
+| `400 BadDeviceToken` / `400 DeviceTokenNotForTopic`, `410 Unregistered` | the token is dead: `remove_device` for a device or push-to-start token, `remove_live_activity` for an update token; `pruned_tokens_total++` |
+| `403 InvalidProviderToken` / `403 ExpiredProviderToken` | remint the JWT and retry **once**; a second `403` logs an ERROR naming `APNS_KEY_ID`/`APNS_TEAM_ID`/`APNS_KEY_FILE` and turns `healthz` `apns` to `degraded` |
+| `429`, `5xx`, transport failure or timeout | retry on the `1 s → 4 s → 16 s` ladder — three retries, four requests — then give up for that push |
+| any other `4xx` | WARN with Apple's `reason`, and drop |
+
+An APNs answer is never an `Err`: three of the five rows are *instructions*, so they are
+`Outcome` values and `ApnsError` is reserved for a misconfigured server (§25.6).
+
+**Nothing blocks the event inbox on the network.** `on_event` does in-memory bookkeeping and at
+most one `DeviceStore` read; every HTTP request is a spawned task, bounded by **8** simultaneous
+requests, **256** outstanding tasks and a **10 s** per-request timeout. Past 256 the push is
+dropped and counted rather than queued without bound.
+
+**Two clocks, on purpose.** Wall-clock values (`aps.timestamp`, `apns-expiration`, `last_sent_at`)
+come from the injected `Clock`. Every *interval* — the throttle window, the registration cache, the
+trailing-edge deadline — is measured with `tokio::time::Instant`, because those deadlines are handed
+straight to `tokio::time::sleep_until`. Mixing the two lets a frozen test clock hand `sleep_until` a
+deadline that has already passed and spin the timer task, which is what it did once.
+
+### 25.6 Enabled, misconfigured, off
+
+`APNS_ENABLED=true` with a missing or unreadable key file **logs an ERROR at boot, runs with the
+notifier disabled, and reports `apns: degraded`**. It does not refuse to start: a push service that
+cannot sign a JWT is not a reason to take the download server down, and the operator finds out from
+`healthz` and the log rather than from a restart loop. The same holds for a blank `APNS_KEY_ID` or
+`APNS_TEAM_ID` and for a `.p8` that is not an ES256 key.
+
+### 25.7 `healthz`
+
+```json
+"apns": { "status": "ok", "devices": 2, "live_activities": 1,
+          "sent_total": 41, "failed_total": 0, "pruned_tokens_total": 1,
+          "last_error": null, "last_sent_at": 1772582400000 }
+```
+
+`status` is `disabled` when `APNS_ENABLED=false`, `degraded` when the server is misconfigured
+(§25.6) or the last push failed with a non-retryable provider error, and `ok` otherwise. It is
+never `down`: a push service that cannot reach Apple does not make this server unusable (§16.3).
+
+`devices` is read from the store on every poll. `live_activities` is the number of registrations
+the **notifier currently has cached** rather than a `SELECT COUNT(*)`, because the `DeviceStore`
+port has no global count — it is exact for every item the notifier has looked at inside the
+throttle window, and `0` before any item has run. That is a deliberately small lie in the direction
+of a smaller number; if it ever needs to be exact, the port grows a `count_live_activities`.
+
+### 25.8 The device routes
+
+Owned by `aulos-api`, listed here because they are the other half of the same contract
+(PROTOCOL §4.8). All four are guarded like every v2 route and answer the JSON error envelope on
+failure.
+
+| Route | Body | Answer |
+|---|---|---|
+| `PUT <p>api/v2/devices/{token}` | `{"platform":"ios","bundle_id":"…","environment":"sandbox"\|"production","alerts":true,"live_activity_start_token":"<hex>"\|null,"app_version":"1.0.0 (3)"}` | `204`; idempotent upsert keyed on `token` (lowercase hex, 32–200 chars, validated) |
+| `DELETE <p>api/v2/devices/{token}` | — | `204`, idempotent |
+| `PUT <p>api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}` | `204`; `404` envelope when the device is unknown; `item_id` validated as a ULID but need not exist |
+| `DELETE <p>api/v2/devices/{token}/live-activities/{item_id}` | — | `204`, idempotent |
+
+Removals are idempotent because APNs tells the notifier about dead tokens the app may already have
+deleted.
+
+### 25.9 Tests
+
+`crates/aulos-apns/tests`, all of it against a `HashMap` `DeviceStore` and a `wiremock` gateway:
+
+- `payloads.rs` — every payload case compared as a whole `Value`, including the seven-key content
+  state, the null-everywhere case, the estimate fallback, and the group body.
+- `provider_token.rs` — header, claims, the absent `exp`, the 50-minute cache, the forced remint,
+  and that `Debug` never prints the key. The token is verified with the public key.
+- `gateway.rs` — the whole §25.5 table: headers, `200`, `410`, the three `400`s, the `403`
+  remint-and-retry, the `403` that survives it, `429` backoff, `5xx` giving up after three retries,
+  a non-JSON body, and an unreachable gateway.
+- `notifier.rs` — the §25.2 rules, pruning the right row for each token kind, the throttle's
+  trailing edge, the store-read budget, `APNS_ENABLED=false`, and an unreadable key file.
+
+The **wiring** is covered where it lives, in `crates/aulos-server/tests/server.rs`, through the
+production boot (`run_with`) rather than a test-only assembly: `healthz` names an `apns` component
+in the stock rig and reports it `disabled`; `APNS_ENABLED=true` with a nonexistent `.p8` reports
+`degraded` with a non-empty `last_error` **and the server still binds and serves** (§25.6 — the one
+regression a stray `?` would introduce and nothing else would catch); and a device registered
+through `PUT <p>api/v2/devices/{token}` shows up as `components.apns.devices == 1`, which is what
+proves the routes and the notifier share one `DeviceStore`.
+
+The mock gateway speaks HTTP/1.1 and that is not a compromise: reqwest picks the protocol by ALPN,
+so the same client that speaks HTTP/2 to `api.push.apple.com` speaks HTTP/1.1 to
+`http://127.0.0.1:…`. That is the whole reason `APNS_BASE_URL_OVERRIDE` exists.
 
 ---
 

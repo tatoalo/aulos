@@ -38,6 +38,7 @@ services:
       # Optional integrations, all off unless enabled:
       # JELLYFIN_SYNC_ENABLED / JELLYFIN_URL / JELLYFIN_API_KEY / JELLYFIN_PATH_MAP
       # TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_CHAT_IDS
+      # APNS_ENABLED / APNS_KEY_FILE / APNS_KEY_ID / APNS_TEAM_ID  (iOS push, docs/DESIGN.md §25)
     volumes:
       - /srv/media:/downloads
       - /srv/aulos/config:/config
@@ -99,6 +100,52 @@ has the measurements.
 `last_request_at`, `last_status` (the HTTP code Jellyfin returned) and the usual
 `runs_total` / `failures_total`. `mode` and `last_status` together are how you tell a working
 sync from one that is being politely accepted and ignored.
+
+### Push notifications (iOS)
+
+The Aulos iOS app can be told about a download it is not looking at: one alert when a top-level
+item or a playlist finishes or fails, and a Live Activity that runs the progress ring on the lock
+screen from the moment bytes start moving. Both go through Apple's push service, so the server
+needs a signing key of your own — there is no shared one.
+
+1. **Create an APNs auth key.** In the [Apple Developer portal](https://developer.apple.com/account)
+   → *Certificates, Identifiers & Profiles* → *Keys* → **+**, tick **Apple Push Notifications
+   service (APNs)** and register it. You get a one-time `AuthKey_XXXXXXXXXX.p8` download and a
+   **Key ID**; your **Team ID** is in the top-right of the same page. One key covers both the
+   sandbox and the production gateway, and every app in the team.
+2. **Put the key where the container can read it, and nowhere else.** It is the only secret of the
+   four settings — the key id and the team id are identifiers. Keep it out of the image and out of
+   git; mount it read-only:
+
+   ```yaml
+   environment:
+     APNS_ENABLED: "true"
+     APNS_KEY_FILE: /config/AuthKey_ABCD1234EF.p8
+     APNS_KEY_ID: ABCD1234EF
+     APNS_TEAM_ID: TEAM123456
+   volumes:
+     - /srv/aulos/apns/AuthKey_ABCD1234EF.p8:/config/AuthKey_ABCD1234EF.p8:ro
+   ```
+
+   `APNS_TOPIC` defaults to `com.tatoalo.aulos` and only matters for a device that registers
+   without reporting its own bundle id, which the shipped app always does.
+3. **Register the phone.** Nothing else to do on the server: the app `PUT`s its device token to
+   `<prefix>api/v2/devices/{token}` on launch and the server starts pushing. The routes are behind
+   the same auth as the rest of v2 (`docs/PROTOCOL.md` §4.8).
+
+`GET /healthz` reports `components.apns`:
+
+| `status` | What it means |
+|---|---|
+| `disabled` | `APNS_ENABLED` is `false`. Nothing is wired, and this is not a failure. |
+| `ok` | The key parsed and the last push (if any) was accepted. |
+| `degraded` | Either the key file is missing/unreadable/not an ES256 `.p8` — check `last_error` and the ERROR line at boot — or Apple rejected the provider token, which means `APNS_KEY_ID`/`APNS_TEAM_ID` do not match the key. |
+
+The detail also carries `devices`, `live_activities`, `sent_total`, `failed_total`,
+`pruned_tokens_total`, `last_error` and `last_sent_at`. A misconfigured key **never stops the
+server**: it logs one ERROR, reports `degraded` and serves everything else normally. Tokens Apple
+tells us are dead (`410 Unregistered`, `400 BadDeviceToken`) are forgotten automatically, which is
+what `pruned_tokens_total` counts — an app deleted from a phone cleans itself up.
 
 ## The web UI
 
@@ -344,6 +391,7 @@ legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `A
 | `crates/aulos-telegram` | teloxide bot |
 | `crates/aulos-subscriptions` | Subscription manager and scheduler |
 | `crates/aulos-hooks` | Jellyfin, NFO, audio-sync and community hooks |
+| `crates/aulos-apns` | Apple push: alerts and Live Activities for the iOS app |
 | `crates/aulos-server` | The binary: wiring, POT sidecar supervisor, config watcher, signals |
 | `docker/` | `Dockerfile`, `entrypoint.sh`, `compose.example.yml` |
 | `plugins/examples/` | Worked example plugins |
