@@ -267,7 +267,11 @@ impl Engine {
             // A pre-download problem is **not** terminal: the row lands in `queued` with
             // `auto_start = false` and a populated `error` (DESIGN §8.4).
             Some(e) => (FieldUpdate::Set(e), false),
-            None => (FieldUpdate::Clear, before.request.auto_start),
+            // The **row's** flag, not the request's: they agree at insert (`crate::add`), and
+            // they stop agreeing exactly when a `start` arrives while the row is still resolving
+            // (PROTOCOL §4.2). Reading the request back here is what used to park such an item as
+            // `queued(auto_start = false)` for ever.
+            None => (FieldUpdate::Clear, before.auto_start),
         };
         if !self
             .write_status(
@@ -478,7 +482,10 @@ impl Engine {
         // A `pre_error` child is `queued(auto_start = false)` with a populated error — never
         // `status = error`, which would put an upcoming livestream in the shipped client's Failed
         // section and stop it ever starting (DESIGN §8.4).
-        let auto_start = pre_error.is_none() && parent.request.auto_start;
+        // The parent's live flag, for the same reason `resolve_single` reads the row rather than
+        // the request: a `start` sent while the playlist was still resolving has to reach the
+        // children it is about to produce.
+        let auto_start = pre_error.is_none() && parent.auto_start;
         let title = if entry.title.trim().is_empty() {
             Box::<str>::from(entry.url.as_str())
         } else {

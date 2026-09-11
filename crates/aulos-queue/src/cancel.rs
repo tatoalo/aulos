@@ -36,6 +36,36 @@ impl Engine {
                 continue;
             };
             match item.status {
+                // The iOS flow: the app adds with `auto_start: false` and sends `start` in the
+                // next breath, while the row is still `resolving` — resolution takes seconds, so
+                // this is the *common* ordering rather than a race. Refused as `not_startable`,
+                // the item then parked as `queued(auto_start = false)` for ever, because the end
+                // of resolution writes the flag and the row still said "no". Flipping it here is
+                // what "start this item" means at any point before it is queued (PROTOCOL §4.2).
+                Status::Resolving if !item.auto_start => {
+                    let at = self.clock.now_ms();
+                    if !self
+                        .apply(
+                            vec![WriteOp::SetAutoStart {
+                                id,
+                                auto_start: true,
+                                at,
+                            }],
+                            Durability::Batched,
+                        )
+                        .await
+                    {
+                        result.skip(id, SkipReason::NotStartable);
+                        continue;
+                    }
+                    self.patch(id, |i| i.auto_start = true);
+                    self.publish_changed(id, Status::Resolving, Status::Resolving)
+                        .await;
+                    self.sync_group_of(id).await;
+                    result.applied.push(id);
+                }
+                // Already on its way to the scheduler: `start` is idempotent.
+                Status::Resolving => result.applied.push(id),
                 Status::Queued => {
                     if !item.auto_start {
                         let at = self.clock.now_ms();

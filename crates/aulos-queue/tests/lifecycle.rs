@@ -911,3 +911,106 @@ async fn an_action_on_an_evicted_row_does_not_disturb_the_done_window() {
     let cancel = h.handle.actions(Action::Cancel, vec![old], None).await;
     assert_eq!(cancel.applied, vec![old]);
 }
+
+// ---------------------------------------------------------------------------
+// `start` while the row is still resolving (PROTOCOL §4.2)
+// ---------------------------------------------------------------------------
+
+/// A provider whose resolution parks until the test opens the gate.
+///
+/// A wall-clock sleep would make the window this exercises a race rather than a barrier: the
+/// point is that the `start` is handled **while** the row is `resolving`, not merely soon after
+/// the add.
+struct GatedResolve {
+    inner: FakeProvider,
+    gate: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl aulos_provider::Provider for GatedResolve {
+    fn id(&self) -> aulos_provider::ProviderId {
+        self.inner.id()
+    }
+
+    fn matches(&self, url: &url::Url) -> aulos_provider::Match {
+        self.inner.matches(url)
+    }
+
+    fn catalog(&self) -> Arc<aulos_core::FormatCatalog> {
+        self.inner.catalog()
+    }
+
+    async fn resolve(
+        &self,
+        url: &url::Url,
+        ctx: aulos_provider::ResolveCtx<'_>,
+    ) -> Result<Vec<aulos_provider::MediaEntry>, aulos_provider::ProviderError> {
+        self.gate.cancelled().await;
+        self.inner.resolve(url, ctx).await
+    }
+
+    async fn download(
+        &self,
+        ctx: aulos_provider::DownloadCtx<'_>,
+        sink: aulos_provider::ProgressSink,
+    ) -> Result<aulos_provider::Outcome, aulos_provider::ProviderError> {
+        self.inner.download(ctx, sink).await
+    }
+}
+
+#[tokio::test]
+async fn start_during_resolution_schedules_the_item_once_it_resolves() {
+    let gate = tokio_util::sync::CancellationToken::new();
+    let h = Harness::builder()
+        .provider(Arc::new(GatedResolve {
+            inner: support::fake(),
+            gate: gate.clone(),
+        }))
+        .build()
+        .await;
+    let mut req = request("https://fake.test/watch/impatient");
+    req.auto_start = false;
+    let id = h.add_request(req).await.unwrap().ids[0];
+    let parked = h
+        .until(id, "the row to be resolving", |i| {
+            i.status == Status::Resolving
+        })
+        .await;
+    assert!(!parked.auto_start);
+
+    // This is the iOS flow: add with `auto_start: false`, then start immediately.
+    let result = h.handle.actions(Action::Start, vec![id], None).await;
+    assert_eq!(
+        result.applied,
+        vec![id],
+        "a start on a resolving row is applied, not refused: {result:?}"
+    );
+    assert!(
+        h.item(id).await.unwrap().auto_start,
+        "the flag flipped while the row was still resolving"
+    );
+
+    gate.cancel();
+    h.until_status(id, Status::Finished).await;
+}
+
+#[tokio::test]
+async fn start_during_resolution_is_idempotent() {
+    let gate = tokio_util::sync::CancellationToken::new();
+    let h = Harness::builder()
+        .provider(Arc::new(GatedResolve {
+            inner: support::fake(),
+            gate: gate.clone(),
+        }))
+        .build()
+        .await;
+    let id = h.add("https://fake.test/watch/already").await;
+    h.until(id, "the row to be resolving", |i| {
+        i.status == Status::Resolving
+    })
+    .await;
+    let result = h.handle.actions(Action::Start, vec![id], None).await;
+    assert_eq!(result.applied, vec![id], "{result:?}");
+    gate.cancel();
+    h.until_status(id, Status::Finished).await;
+}
