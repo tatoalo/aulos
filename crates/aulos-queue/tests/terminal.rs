@@ -62,6 +62,10 @@ struct Gated {
     inner: FakeProvider,
     /// The `Postprocessing` line to emit before parking, if any.
     line: Option<&'static str>,
+    /// A `Downloading` frame emitted **after** the postprocessing one, if any: the late frame a
+    /// provider produces when a postprocessor of its own ran before the first byte, or when its
+    /// last progress line overtakes its own postprocessor line.
+    late: Option<&'static str>,
     gate: Gate,
     ending: Ending,
     /// Calls with an index below this run straight through, so a *restarted* run can be the one
@@ -76,6 +80,7 @@ impl Gated {
             inner: FakeProvider::from_toml("id = \"fake\"\nscore = 200\nhosts = [\"fake.test\"]\n")
                 .unwrap(),
             line: None,
+            late: None,
             gate: Gate::new(),
             ending,
             gate_from: 0,
@@ -86,6 +91,12 @@ impl Gated {
     /// Emits `line` as a `postprocessing` stage frame before parking.
     fn with_line(mut self, line: &'static str) -> Self {
         self.line = Some(line);
+        self
+    }
+
+    /// Emits `line` as a `downloading` stage frame *after* the postprocessing one.
+    fn with_late_downloading(mut self, line: &'static str) -> Self {
+        self.late = Some(line);
         self
     }
 
@@ -135,6 +146,9 @@ impl Provider for Gated {
                 // Exactly what the shim emits for
                 // `{"t":"pp","postprocessor":"MoveFiles","status":"started"}` (DESIGN §9.5).
                 sink.stage(Stage::Postprocessing, Some(line.into())).await;
+            }
+            if let Some(late) = self.late {
+                sink.stage(Stage::Downloading, Some(late.into())).await;
             }
             tokio::select! {
                 () = self.gate.cancelled() => {}
@@ -461,4 +475,44 @@ async fn pausing_inside_the_pre_terminal_phase_frees_the_row_for_its_next_run() 
     let done = h.until_status(id, Status::Finished).await;
     assert_eq!(done.msg, None);
     assert_eq!(done.size, Some(1_024), "the second run's outcome landed");
+}
+
+/// A provider's own line for a frame that arrives after it has already reported postprocessing.
+const LATE_LINE: &str = "Still downloading…";
+
+/// A stage frame that would move a row *backwards* along `preparing → downloading →
+/// postprocessing` is a late one, and a late frame is not a reason to log at WARN on a download
+/// that is going perfectly well. It carries its line onto the row it finds and leaves the status
+/// where it is.
+#[tokio::test]
+async fn a_late_downloading_frame_keeps_its_line_without_dragging_the_row_back() {
+    let provider = Arc::new(
+        Gated::new(Ending::Finish)
+            .with_line(MOVE_FILES)
+            .with_late_downloading(LATE_LINE),
+    );
+    let gate = provider.gate();
+    let h = Harness::builder().provider(provider).build().await;
+    let id = h.add("https://fake.test/watch/late").await;
+
+    let row = h
+        .until(id, "the late frame's line", |i| {
+            i.msg.as_deref() == Some(LATE_LINE)
+        })
+        .await;
+    assert_eq!(
+        row.status,
+        Status::Postprocessing,
+        "a late frame never moves a row back down the happy path"
+    );
+    // And no published view ever showed the row going backwards either.
+    let statuses: Vec<Status> = h.events.changes(id).iter().map(|v| v.status).collect();
+    let back = statuses
+        .windows(2)
+        .any(|w| w[0] == Status::Postprocessing && w[1] == Status::Downloading);
+    assert!(!back, "got {statuses:?}");
+
+    gate.cancel();
+    let done = h.until_status(id, Status::Finished).await;
+    assert_eq!(done.msg, None, "the terminal write still clears the line");
 }

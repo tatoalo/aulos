@@ -136,6 +136,14 @@ impl Engine {
     ///   `msg`, `status` and `phase` until `HooksFinished` (DESIGN §13). Without this arm a late
     ///   frame overwrites the hook's label mid-run, and a late `downloading` frame would drag a
     ///   row that is genuinely postprocessing back to `downloading`.
+    ///
+    /// A frame that would move the row **backwards** along `preparing → downloading →
+    /// postprocessing` is a fourth case, and a milder one: the provider still owns the row, the
+    /// frame is simply behind it. yt-dlp produces these whenever a postprocessor of its own runs
+    /// before the first byte (DESIGN §9.5), and handing the backwards edge to
+    /// [`Engine::write_status`] made a perfectly healthy download log
+    /// `refused an illegal transition` at WARN. The line it carries is still the newest thing the
+    /// provider has said about this job, so it is written onto the status the row already has.
     pub(crate) async fn handle_stage(&mut self, id: ItemId, stage: Stage, msg: Option<Box<str>>) {
         self.beats.frame(id, self.clock.now_ms());
         let Some(item) = self.cached(id) else {
@@ -148,7 +156,17 @@ impl Engine {
             return;
         }
         let patch = msg.map_or(FieldUpdate::Keep, FieldUpdate::Set);
-        self.write_status(id, stage.status(), patch, FieldUpdate::Keep, None)
+        let mut to = stage.status();
+        if let (Some(want), Some(have)) = (happy_path_rank(to), happy_path_rank(item.status))
+            && want < have
+        {
+            tracing::debug!(
+                item = %id, from = %item.status, to = %to,
+                "a late stage frame kept its line but not its status"
+            );
+            to = item.status;
+        }
+        self.write_status(id, to, patch, FieldUpdate::Keep, None)
             .await;
     }
 
@@ -432,6 +450,20 @@ impl Engine {
                 remove_file_quietly(Path::new(&candidate));
             }
         }
+    }
+}
+
+/// Where a status sits on the forward run of DESIGN §4.2's happy path, or `None` when it is not
+/// on it at all.
+///
+/// Only the three running statuses are ordered here, which is exactly the span a provider's stage
+/// frames move a row through — nothing else is comparable, and nothing else may be clamped.
+fn happy_path_rank(status: Status) -> Option<u8> {
+    match status {
+        Status::Preparing => Some(0),
+        Status::Downloading => Some(1),
+        Status::Postprocessing => Some(2),
+        _ => None,
     }
 }
 
