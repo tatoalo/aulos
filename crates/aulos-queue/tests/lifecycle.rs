@@ -758,3 +758,156 @@ fn failing(code: &str) -> FakeProvider {
     ))
     .unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// rows the bounded done window has evicted (DESIGN §8.10, §15.5; PROTOCOL §4.2, §4.7)
+// ---------------------------------------------------------------------------
+//
+// `GET api/v2/items` is store-backed, so it lists every terminal row ever written; the engine's
+// working set holds only the most recent `AULOS_MEM_DONE_ITEMS` of them. An action naming a row
+// the client can see but the window has dropped used to answer `not_found`, and a `clear` swept
+// the row out of SQLite while leaving its media behind with nothing referencing it. These pin
+// the fallback to the store row.
+
+/// Finishes `url` and then pushes it out of a one-row done window with a second download.
+async fn finish_then_evict(h: &Harness, url: &str) -> (aulos_core::ItemId, std::path::PathBuf) {
+    let id = h.add(url).await;
+    let row = h.until_status(id, Status::Finished).await;
+    let file = h
+        .download_dir()
+        .join(row.filename.as_ref().unwrap().as_path());
+    assert!(file.exists(), "the download is on disk");
+    let newer = h.add("https://fake.test/watch/newer").await;
+    h.until_status(newer, Status::Finished).await;
+    h.settle().await;
+    (id, file)
+}
+
+#[tokio::test]
+async fn delete_of_an_evicted_finished_row_removes_the_row_and_its_file() {
+    let h = Harness::builder()
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .build()
+        .await;
+    let (old, file) = finish_then_evict(&h, "https://fake.test/watch/ghost").await;
+
+    let result = h
+        .handle
+        .actions(Action::Delete, vec![old], Some(true))
+        .await;
+    assert_eq!(
+        result.applied,
+        vec![old],
+        "a terminal row outside the window is still deletable: {result:?}"
+    );
+    h.until_all("the evicted row is gone", |rows| {
+        rows.iter().all(|r| r.id != old)
+    })
+    .await;
+    h.until_gone(&file).await;
+}
+
+#[tokio::test]
+async fn delete_of_an_evicted_row_keeps_its_file_when_asked_to() {
+    let h = Harness::builder()
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .build()
+        .await;
+    let (old, file) = finish_then_evict(&h, "https://fake.test/watch/keepme").await;
+
+    let result = h
+        .handle
+        .actions(Action::Delete, vec![old], Some(false))
+        .await;
+    assert_eq!(result.applied, vec![old]);
+    h.until_all("the evicted row is gone", |rows| {
+        rows.iter().all(|r| r.id != old)
+    })
+    .await;
+    h.settle().await;
+    assert!(file.exists(), "delete_file = false keeps the download");
+}
+
+#[tokio::test]
+async fn clear_with_delete_file_unlinks_the_files_of_evicted_rows() {
+    let h = Harness::builder()
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .build()
+        .await;
+    let (old, file) = finish_then_evict(&h, "https://fake.test/watch/orphan").await;
+
+    let result = h.handle.clear(Some(true)).await;
+    assert!(
+        result.applied.contains(&old),
+        "the clear reports the evicted row: {result:?}"
+    );
+    h.until_all("every terminal row is gone", <[aulos_core::Item]>::is_empty)
+        .await;
+    h.until_gone(&file).await;
+}
+
+#[tokio::test]
+async fn retry_of_an_evicted_error_row_requeues_it() {
+    let h = Harness::builder()
+        .provider(Arc::new(failing("auth_required")))
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .env("AULOS_AUTO_RETRY_MAX", "0")
+        .build()
+        .await;
+    let old = h.add("https://fake.test/watch/first").await;
+    h.until_status(old, Status::Error).await;
+    let newer = h.add("https://fake.test/watch/second").await;
+    h.until_status(newer, Status::Error).await;
+    h.settle().await;
+
+    let result = h.handle.actions(Action::Retry, vec![old], None).await;
+    assert_eq!(
+        result.applied,
+        vec![old],
+        "an evicted error row is still retryable: {result:?}"
+    );
+    let row = h
+        .until(old, "the retried row leaves the error", |i| {
+            i.attempt == 1 && i.status != Status::Error
+        })
+        .await;
+    assert!(row.auto_start, "a retry schedules the row");
+}
+
+#[tokio::test]
+async fn an_evicted_row_is_not_found_only_once_it_is_really_gone() {
+    let h = Harness::builder()
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .build()
+        .await;
+    let (old, _) = finish_then_evict(&h, "https://fake.test/watch/twice").await;
+    h.handle
+        .actions(Action::Delete, vec![old], Some(false))
+        .await;
+    h.until_all("the evicted row is gone", |rows| {
+        rows.iter().all(|r| r.id != old)
+    })
+    .await;
+
+    let again = h.handle.actions(Action::Delete, vec![old], None).await;
+    assert!(again.applied.is_empty());
+    assert_eq!(again.skipped[0].reason, SkipReason::NotFound);
+}
+
+#[tokio::test]
+async fn an_action_on_an_evicted_row_does_not_disturb_the_done_window() {
+    let h = Harness::builder()
+        .env("AULOS_MEM_DONE_ITEMS", "1")
+        .build()
+        .await;
+    let (old, _) = finish_then_evict(&h, "https://fake.test/watch/window").await;
+    // `pause` is refused on a terminal row, so nothing may move because of it — least of all the
+    // newest row, which is the one the window is holding.
+    let refused = h.handle.actions(Action::Pause, vec![old], None).await;
+    assert_eq!(refused.skipped[0].reason, SkipReason::NotPausable);
+    let rows = h.rows().await;
+    assert_eq!(rows.len(), 2, "both rows are still there");
+    // And a cancel of an already-terminal row is still the idempotent ack of PROTOCOL §4.2.
+    let cancel = h.handle.actions(Action::Cancel, vec![old], None).await;
+    assert_eq!(cancel.applied, vec![old]);
+}

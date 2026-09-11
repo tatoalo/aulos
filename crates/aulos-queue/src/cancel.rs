@@ -30,8 +30,8 @@ impl Engine {
     /// the v1 shim was compensating for in the API layer.
     pub(crate) async fn handle_start(&mut self, ids: Vec<ItemId>) -> ActionsResult {
         let mut result = ActionsResult::default();
-        for id in self.expand_targets(ids, &mut result) {
-            let Some(item) = self.cached(id) else {
+        for id in self.expand_targets(ids, &mut result).await {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
             };
@@ -95,8 +95,8 @@ impl Engine {
     /// [`crate::EngineCmd::Pause`] (DESIGN §8.7).
     pub(crate) async fn handle_pause(&mut self, ids: Vec<ItemId>) -> ActionsResult {
         let mut result = ActionsResult::default();
-        for id in self.expand_targets(ids, &mut result) {
-            let Some(item) = self.cached(id) else {
+        for id in self.expand_targets(ids, &mut result).await {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
             };
@@ -181,8 +181,8 @@ impl Engine {
     /// [`crate::EngineCmd::Cancel`] (DESIGN §8.7).
     pub(crate) async fn handle_cancel(&mut self, ids: Vec<ItemId>) -> ActionsResult {
         let mut result = ActionsResult::default();
-        for id in self.expand_targets(ids, &mut result) {
-            let Some(item) = self.cached(id) else {
+        for id in self.expand_targets(ids, &mut result).await {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
             };
@@ -232,8 +232,8 @@ impl Engine {
     /// [`crate::EngineCmd::Retry`] (DESIGN §8.8).
     pub(crate) async fn handle_retry(&mut self, ids: Vec<ItemId>) -> ActionsResult {
         let mut result = ActionsResult::default();
-        for id in self.expand_targets(ids, &mut result) {
-            let Some(item) = self.cached(id) else {
+        for id in self.expand_targets(ids, &mut result).await {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
             };
@@ -263,6 +263,13 @@ impl Engine {
         if !self.apply(retry_ops(id, at), Durability::Batched).await {
             return false;
         }
+        // A row the done window had evicted came back from SQLite ([`Engine::row`]) and has to
+        // re-enter the working set before anything can patch, publish or schedule it — it is
+        // about to be non-terminal, which is exactly what the working set is for. It is *not*
+        // re-counted into its group's accumulator: eviction never took it out of one.
+        self.items
+            .entry(id)
+            .or_insert_with(|| std::sync::Arc::clone(item));
         let from = item.status;
         self.patch(id, |i| {
             i.status = Status::Queued;
@@ -326,13 +333,13 @@ impl Engine {
         let remove_files = delete_file.unwrap_or(self.cfg.delete_file_on_trashcan);
         let mut result = ActionsResult::default();
         let mut doomed: Vec<ItemId> = Vec::new();
-        for id in self.expand_targets(ids, &mut result) {
-            if self.cached(id).is_none() {
+        for id in self.expand_targets(ids, &mut result).await {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
-            }
+            };
             // Deleting a group cancels any active child first, then relies on ON DELETE CASCADE.
-            if !self.cached(id).is_some_and(|i| i.status.is_terminal()) {
+            if !item.status.is_terminal() {
                 self.cancel_one(id).await;
             }
             doomed.push(id);
@@ -403,7 +410,7 @@ impl Engine {
         let mut seen: HashSet<ItemId> = HashSet::with_capacity(ids.len());
         let ids: Vec<ItemId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
         if remove_files {
-            let paths: Vec<PathBuf> = ids.iter().flat_map(|id| self.files_of(*id)).collect();
+            let paths = self.files_to_remove(&ids).await;
             if !paths.is_empty() {
                 drop(tokio::task::spawn_blocking(move || {
                     for path in paths {
@@ -435,16 +442,48 @@ impl Engine {
         self.publish_removed(ids, reason).await;
     }
 
+    /// Every path the named rows produced, reading SQLite for the ones the done window evicted.
+    ///
+    /// The fallback is the whole point: a `clear` and the `CLEAR_COMPLETED_AFTER` sweep both take
+    /// their id list straight out of SQLite, so most of what they remove was never in the working
+    /// set — and a path list built from the cache alone silently skipped every one of them,
+    /// deleting the record and leaving the media behind with nothing left to reference it
+    /// (PROTOCOL §4.7). One query covers however many rows are missing, and none at all is run
+    /// when the window still holds them.
+    async fn files_to_remove(&self, ids: &[ItemId]) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut missing: HashSet<ItemId> = HashSet::new();
+        for id in ids {
+            match self.cached(*id) {
+                Some(item) => paths.extend(self.files_of(&item)),
+                None => {
+                    missing.insert(*id);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return paths;
+        }
+        match self.store.items(aulos_store::ItemFilter::terminal()).await {
+            Ok(page) => {
+                for item in page.rows.iter().filter(|i| missing.contains(&i.id)) {
+                    paths.extend(self.files_of(item));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read the rows a removal is about to unlink");
+            }
+        }
+        paths
+    }
+
     /// Every path an item produced (DESIGN §8.10).
     ///
     /// `filename`, **every** `chapter_files`/`subtitle_files` entry, the StreamingCommunity
     /// `.info.json` and `.nfo` siblings, and the scratch directory. Legacy orphaned all of those.
-    fn files_of(&self, id: ItemId) -> Vec<PathBuf> {
+    fn files_of(&self, item: &aulos_core::Item) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        let Some(item) = self.cached(id) else {
-            return paths;
-        };
-        let dir = self.out_dir_for(&item);
+        let dir = self.out_dir_for(item);
         if let Some(name) = item.filename.as_ref() {
             let primary = dir.join(name.as_path());
             if let Some(stem) = primary.file_stem() {
@@ -459,7 +498,7 @@ impl Engine {
         for file in item.chapter_files.iter().chain(item.subtitle_files.iter()) {
             paths.push(dir.join(&*file.filename));
         }
-        paths.push(self.tmp_dir_for(id));
+        paths.push(self.tmp_dir_for(item.id));
         paths
     }
 
@@ -525,12 +564,21 @@ impl Engine {
     // helpers
     // -----------------------------------------------------------------------
 
-    /// Expands group ids into themselves plus their non-terminal children, and reports unknown
-    /// ids as [`SkipReason::NotFound`] (DESIGN §8.7: "a group cancel cascades").
-    fn expand_targets(&self, ids: Vec<ItemId>, result: &mut ActionsResult) -> Vec<ItemId> {
+    /// Expands group ids into themselves plus their children, and reports unknown ids as
+    /// [`SkipReason::NotFound`] (DESIGN §8.7: "a group cancel cascades").
+    ///
+    /// Both lookups fall back to SQLite for what the bounded done window has evicted
+    /// ([`Engine::row`]): a terminal row the client can still list is a legitimate target, and so
+    /// are a group's finished children — the delete that misses them leaves their files orphaned
+    /// even though `ON DELETE CASCADE` takes their rows.
+    async fn expand_targets(
+        &mut self,
+        ids: Vec<ItemId>,
+        result: &mut ActionsResult,
+    ) -> Vec<ItemId> {
         let mut out: Vec<ItemId> = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(item) = self.items.get(&id) else {
+            let Some(item) = self.row(id).await else {
                 result.skip(id, SkipReason::NotFound);
                 continue;
             };
@@ -541,6 +589,11 @@ impl Engine {
                     .filter(|c| c.group_id == Some(id))
                     .map(|c| (c.ord, c.id))
                     .collect();
+                for (ord, child) in self.stored_children(id).await {
+                    if !children.iter().any(|(_, c)| *c == child) {
+                        children.push((ord, child));
+                    }
+                }
                 children.sort_unstable();
                 for (_, child) in children {
                     if !out.contains(&child) {
@@ -553,6 +606,19 @@ impl Engine {
             }
         }
         out
+    }
+
+    /// One group's children as `(ord, id)`, straight from SQLite.
+    async fn stored_children(&self, group: GroupId) -> Vec<(i64, ItemId)> {
+        let filter =
+            aulos_store::ItemFilter::default().with_group(aulos_store::GroupScope::Of(group));
+        match self.store.items(filter).await {
+            Ok(page) => page.rows.into_iter().map(|c| (c.ord, c.id)).collect(),
+            Err(e) => {
+                tracing::warn!(group = %group, error = %e, "cannot list a group's children");
+                Vec::new()
+            }
+        }
     }
 
     /// Removes an id from every ready deque.

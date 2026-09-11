@@ -627,6 +627,33 @@ impl Engine {
         self.items.get(&id).cloned()
     }
 
+    /// The row for an id: the working set first, then SQLite.
+    ///
+    /// The working set holds every non-terminal row but only the most recent
+    /// `AULOS_MEM_DONE_ITEMS` terminal ones ([`Engine::mark_done`]), while `GET api/v2/items` and
+    /// `GET api/v2/items/{id}` are store-backed and list **every** terminal row ever written. An
+    /// action naming a row the client can see therefore has to find it here too: answering
+    /// `not_found` for it left a ghost row that could be neither deleted nor retried, and let a
+    /// `clear` sweep the record out of SQLite while its media stayed on disk with nothing
+    /// referencing it (PROTOCOL §4.2, §4.7).
+    ///
+    /// Only a **terminal** store row is admitted. A non-terminal row that is not cached would
+    /// mean the working set had lost something it is supposed to hold, and acting on it — with no
+    /// slot, no deque entry and no job — is not something any action path is prepared for.
+    pub(crate) async fn row(&self, id: ItemId) -> Option<Arc<Item>> {
+        if let Some(item) = self.cached(id) {
+            return Some(item);
+        }
+        match self.store.item(id).await {
+            Ok(Some(item)) if item.status.is_terminal() => Some(Arc::new(item)),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(item = %id, error = %e, "cannot read a row outside the done window");
+                None
+            }
+        }
+    }
+
     /// Mutates a cached row in place and returns the new `Arc`.
     pub(crate) fn patch(&mut self, id: ItemId, f: impl FnOnce(&mut Item)) -> Option<Arc<Item>> {
         let slot = self.items.get_mut(&id)?;

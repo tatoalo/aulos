@@ -633,7 +633,22 @@ impl Aggregator {
                     self.arm_urgent();
                 }
             }
-            DomainEvent::StatusChanged { view, .. } => self.install(view),
+            DomainEvent::StatusChanged { id, from, to, view } => {
+                // A retry of a row the done window had already evicted is the one transition
+                // `reindex` cannot read off the views it holds: it never saw the terminal one, so
+                // it cannot tell "history came back to the working set" from "a brand new row".
+                // `done_total` counts every terminal row in SQLite, not just the window, so it
+                // has to come down here or the client pages for history that is no longer there.
+                if from.is_terminal()
+                    && !to.is_terminal()
+                    && !self.current.contains_key(id)
+                    && self.done_total > 0
+                {
+                    self.done_total -= 1;
+                    self.state_dirty = true;
+                }
+                self.install(view);
+            }
             DomainEvent::Completed(view) => {
                 self.install(view);
                 self.pending_completed.push(view.id);
