@@ -513,8 +513,12 @@ def build_options(job):
 # --------------------------------------------------------------------------------------------
 
 _AUTH_RE = re.compile(r"sign in|log in|members-only|private video", re.IGNORECASE)
+# `404`/`410` on the media or its page: the thing is gone. §1.6's `unavailable` is what tells a
+# client to offer Delete rather than Retry, which is the right advice for a dead link.
 _UNAVAILABLE_RE = re.compile(
-    r"video unavailable|removed by the uploader|account.*terminated", re.IGNORECASE
+    r"video unavailable|removed by the uploader|account.*terminated"
+    r"|http error 404|http error 410",
+    re.IGNORECASE,
 )
 _UPCOMING_RE = re.compile(r"premieres in|scheduled to start", re.IGNORECASE)
 _NO_FORMAT_RE = re.compile(r"requested format is not available", re.IGNORECASE)
@@ -523,6 +527,27 @@ _BOT_RE = re.compile(
 )
 _HTTP_5XX_RE = re.compile(r"HTTP Error 5\d\d")
 _THROTTLED_RE = re.compile(r"HTTP Error 429|too many requests", re.IGNORECASE)
+# A full disk usually reaches us as yt-dlp's own prose rather than as an `OSError` with a readable
+# `errno`: it catches the `OSError` and re-raises a `DownloadError` carrying the text
+# ("Unable to create directory: [Errno 28] No space left on device"). Without the pattern that is
+# an `internal`, which PROTOCOL §1.6 reserves for a server bug.
+_DISK_RE = re.compile(
+    r"no space left on device|\[errno 28\]|disk quota exceeded|not enough (?:free )?space",
+    re.IGNORECASE,
+)
+# A page or API fetch that failed for any reason other than one of the specific codes above is a
+# transport failure, which §1.6 says is worth retrying — and which the server has already retried.
+_NETWORK_RE = re.compile(
+    r"unable to (?:download|fetch) (?:the )?(?:webpage|api page|json|xml|m3u8|mpd|media file|data)"
+    r"|read timed out|connection (?:reset|aborted|refused)"
+    r"|temporary failure in name resolution|name or service not known",
+    re.IGNORECASE,
+)
+# The two `errno` values that mean "there is nowhere to put this", by name rather than by number:
+# `EDQUOT` is 122 on Linux and 69 on Darwin.
+_DISK_ERRNOS = frozenset(
+    value for value in (getattr(errno, name, None) for name in ("ENOSPC", "EDQUOT")) if value
+)
 
 
 def _ytdlp_exception(name):
@@ -559,7 +584,7 @@ def classify(exc, live_status=None):
         code = "unsupported_url"
     elif isinstance(exc, _ytdlp_exception("GeoRestrictedError")):
         code = "geo_restricted"
-    elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+    elif _is_disk_full(exc) or _DISK_RE.search(message):
         code = "disk_full"
     elif _BOT_RE.search(message):
         # Checked **before** ``auth_required``, one row earlier than the DESIGN §9.6 table lists
@@ -578,7 +603,7 @@ def classify(exc, live_status=None):
         code = "no_format"
     elif _THROTTLED_RE.search(message):
         code = "throttled"
-    elif _HTTP_5XX_RE.search(message) or _is_transport(exc):
+    elif _HTTP_5XX_RE.search(message) or _NETWORK_RE.search(message) or _is_transport(exc):
         code = "network"
     elif isinstance(exc, _ytdlp_exception("PostProcessingError")):
         code = "postprocessing_failed"
@@ -593,6 +618,18 @@ def classify(exc, live_status=None):
         "fatal": code != "canceled",
         "provider_code": type(exc).__name__,
     }
+
+
+def _is_disk_full(exc):
+    """Whether ``exc``, or anything it wraps, is an out-of-space ``OSError``."""
+    seen = 0
+    current = exc
+    while isinstance(current, BaseException) and seen < 8:
+        if isinstance(current, OSError) and current.errno in _DISK_ERRNOS:
+            return True
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
 
 
 def _is_transport(exc):

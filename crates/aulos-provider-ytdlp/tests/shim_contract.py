@@ -314,6 +314,53 @@ def test_error_classification():
         ({"class": "OSError", "message": "no space", "errno": 28}, "disk_full"),
         ({"class": "KeyboardInterrupt", "message": "term"}, "canceled"),
         ({"class": "RuntimeError", "message": "a bug"}, "internal"),
+        # A full disk reaches us as yt-dlp's own prose far more often than as an `OSError` with a
+        # readable `errno`: it catches the `OSError` and re-raises a `DownloadError` carrying the
+        # text. Classifying that as `internal` told the user the server had a bug (PROTOCOL §1.6).
+        (
+            {
+                "class": "DownloadError",
+                "message": (
+                    "Unable to create directory: [Errno 28] No space left on device: "
+                    "'/downloads/Music'"
+                ),
+            },
+            "disk_full",
+        ),
+        (
+            {
+                "class": "DownloadError",
+                "message": "unable to write data: [Errno 28] No space left on device",
+            },
+            "disk_full",
+        ),
+        ({"class": "OSError", "message": "Disk quota exceeded", "errno": 122}, "disk_full"),
+        # The generic extractor on a dead link. `unavailable` is §1.6's "removed, deleted" — and
+        # it is the code that tells the client to offer Delete rather than Retry.
+        (
+            {
+                "class": "DownloadError",
+                "message": (
+                    "Unable to download webpage: HTTP Error 404: Not Found "
+                    "(caused by <HTTPError 404: Not Found>)"
+                ),
+            },
+            "unavailable",
+        ),
+        ({"class": "ExtractorError", "message": "HTTP Error 410: Gone"}, "unavailable"),
+        # A page fetch that failed for any other reason is transport, which §1.6 says is worth
+        # retrying and the server already did.
+        (
+            {
+                "class": "ExtractorError",
+                "message": "Unable to download webpage: <urlopen error timed out>",
+            },
+            "network",
+        ),
+        (
+            {"class": "ExtractorError", "message": "Unable to download API page: read timeout"},
+            "network",
+        ),
     ]
     for spec, want in cases:
         with tempfile.TemporaryDirectory() as tmp:
