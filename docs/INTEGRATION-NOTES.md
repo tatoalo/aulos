@@ -2717,3 +2717,43 @@ Page only — `crates/aulos-api/web/`, `tools/web/` and the CI budget line. No R
   asserts no `longtask` over 50 ms, and fails intermittently on a loaded machine. It was verified to
   fail the same way on unmodified `main` (1 in 4 runs there, 2 in 6 with the panel), so the panel is
   not the cause — but the assertion is a wall-clock gate on shared hardware and will keep doing this.
+
+## Per-install push routing — `X-Aulos-Install` (2026-09-11)
+
+Decision 42's second header, so an iPhone add stops lighting up the iPad. `X-Aulos-Install: <id>`
+(8–64 of `[A-Za-z0-9._-]`) lands in `source.ref` on an `ios` add and, as the `install_id` field of
+`PUT api/v2/devices/{token}`, in a new nullable `devices.install_id` column (migration `0004`). The
+APNs alert and the Live Activity push-to-start go to the registrations whose `install_id` matches
+the item's `ref`; update, end and `Removed` are untouched. PROTOCOL §1.3, §4.1, §4.8; DESIGN §25.2.
+
+- **One validator, two verdicts.** `v2::downloads::install_id` is the whole shape rule and both
+  call sites use it. The **header** treats a malformed value as absent (a proxy must not be able to
+  turn a good add into a `400`, which is §1.3's standing promise); the **field** is a
+  `400 validation_failed` like every other field on that route, because a device registered under a
+  wrong install id does not fail — it stops being alerted, weeks later, with nothing in any log.
+- **Two nulls, deliberately asymmetric.** An item with `ref = null` (a build that predates the
+  header) alerts every device, which is the fan-out that shipped before the key existed; a *device*
+  with `install_id = NULL` is not a match for an item that *does* name an install. So a server
+  upgraded ahead of its app behaves exactly as before, and an app that sends the header on its adds
+  but not on its registrations goes silent — which is why PROTOCOL §4.8 says to send both or
+  neither. Pinned by `an_ios_item_without_an_install_alerts_every_device` and
+  `a_device_with_no_install_is_not_the_install_that_added_the_item`.
+- **The start's early return is install-aware, so the item's one start is not spent on nobody.**
+  The latch is still taken after the device read (§25.2), but the "can anyone receive a start?"
+  test now asks about *matching* devices; otherwise the adding install registering its
+  push-to-start token late would find the item already latched.
+  (`a_start_for_another_install_does_not_burn_the_items_one_start`.)
+- **`migrations/0004_device_install_id.sql` is a bare `ALTER TABLE … ADD COLUMN`, with no index.**
+  Nothing queries by it: the notifier's one read is the whole `devices` table (single digits at
+  household scale) and the match happens in Rust next to the `APNS_PUSH_ALL` and `alerts` tests it
+  shares a filter with. SQLite appends the column to the table's stored DDL, which is why
+  `schema.sql` and the `insta` snapshot now read `, install_id TEXT) STRICT;`.
+- **No install id is logged or reported.** `healthz.apns.devices` stays a count, nothing in
+  `aulos-apns` logs the value, and the access-log hex redaction (§16.5) is unchanged — an install
+  id is not a secret, but it is an identifier and there is no reason for it to be in a log line.
+
+### Left for the client
+
+The server half is complete and inert until the app sends the header: the iOS work (minting the id
+into the App Group defaults, sending it from both targets, repeating it as `install_id` on every
+registration) is decision 42's other half and is not in this repo.

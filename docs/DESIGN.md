@@ -470,7 +470,7 @@ pub struct DownloadRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SourceRef {
     pub kind: SourceKind,          // "api_v2" | "api_v1" | "ios" | "telegram" | "subscription" | "restart" | "retry"
-    pub r#ref: Option<Box<str>>,   // chat id, subscription id, or request id — always the key, may be null
+    pub r#ref: Option<Box<str>>,   // chat id, subscription id, adding install id ("ios"), or request id — always the key, may be null
 }
 ```
 
@@ -5403,9 +5403,9 @@ Every open question raised by the three candidate proposals, decided. There are 
 | 39 | Where does the `DomainEvent` fan-out live, and what type is it? | **An explicit `EventRouter` task in `aulos-core::event`, owning the single receiver and issuing one bounded `EventInbox` per subscriber** (§2.2.1). Not a `broadcast` channel: it cannot express per-subscriber capacity or drop policy, and it drops the *oldest* message for a slow reader, which for a `Completed` event silently skips a hook. Not four consumers each taking "the" `mpsc::Receiver`, which does not compile. |
 | 40 | v1 `GET <p>history` `done[]`: the in-memory window or the whole store? | **The whole store**, `AULOS_V1_HISTORY_MAX=0` by default (§11.4). v1 has no `truncated`, no `done_total` and no paging, and `HistoryResponse` declares all three arrays non-optional, so a window would silently drop thousands of rows out of the shipped client at cutover. v2 stays windowed and honest. |
 | 41 | Should a retry or a boot recovery re-attribute the item to itself? | **No — `source` is written once, at the add, and never rewritten** (§4.4, §8.8, §8.9). It was `kind: "retry"` / `kind: "restart"` until per-origin notification routing needed the field: `source.ref` is the only copy of the Telegram chat that asked, and `source.kind` is how §25 tells an item the phone added from one it did not, so re-attributing made a retried download report to nobody. `Priority::of` now takes the fact explicitly (`retried = item.attempt > 0`), which is a column and therefore survives a restart. Both enum values stay so rows written by an older build still decode. |
-| 42 | How does the server tell an add from the iOS app apart from any other `api/v2` add? | **A request header, `X-Aulos-Client: ios/<version>`, read in one place and mapped to `SourceKind::Ios`** (PROTOCOL §1.3, §4.4). Not a request *field*: attribution belongs to the caller, not to one item of a batch, and a header cannot collide with the §4.3 key set. Not the `User-Agent`: that is whatever HTTP stack the app links against, and `URLSession`'s default string would have made every Shortcuts user an iOS user. Only the token before the `/` is interpreted and an unknown client is `api_v2`, so the header can never turn a good add into a failure. The operator's rule it exists for: *"notifications on iOS only if the item was added via the iOS app; if I add a video via Telegram, Telegram will suffice, and vice versa."* |
+| 42 | How does the server tell an add from the iOS app apart from any other `api/v2` add? | **A request header, `X-Aulos-Client: ios/<version>`, read in one place and mapped to `SourceKind::Ios`** (PROTOCOL §1.3, §4.4). Not a request *field*: attribution belongs to the caller, not to one item of a batch, and a header cannot collide with the §4.3 key set. Not the `User-Agent`: that is whatever HTTP stack the app links against, and `URLSession`'s default string would have made every Shortcuts user an iOS user. Only the token before the `/` is interpreted and an unknown client is `api_v2`, so the header can never turn a good add into a failure. The operator's rule it exists for: *"notifications on iOS only if the item was added via the iOS app; if I add a video via Telegram, Telegram will suffice, and vice versa."* **Extended 2026-09-11 — a second header, `X-Aulos-Install: <id>`, says *which install* is calling** (8–64 of `[A-Za-z0-9._-]`; PROTOCOL §1.3). The first header alone cannot answer the operator's rule applied *inside* the app — an iPhone add lighting up the iPad — because `X-Aulos-Client` is `ios/<version>` on every device the app is installed on. So the app mints one opaque id per install, stores it in the App Group defaults (shared with the share extension), and sends it on every request; the add puts it in `source.ref` for the `ios` kind and only that kind, and the device registration repeats it as `install_id` (§4.8). §25.2 matches the two. Not a device token: that is APNs' and rotates, is scoped to one target of one app, and is a secret in a URL. Not the `{token}` path of the registration either — an add has no device token to send, and the phone's *share extension* has no APNs token at all. The header shape is the field shape so one validator serves both, and a malformed **header** is absent while a malformed **field** is a `400`, because a proxy must not be able to break an add but a silently mis-registered device goes quiet with nothing in any log. `ref = null` (an app build that predates the header) stays "every device", so a server upgraded ahead of its app behaves exactly as it did before. |
 | 43 | Which items does the Telegram bot report on, now that a second notifier exists? | **The chat that asked (`source.kind == "telegram"`), plus every subscription, plus everything else only with `AULOS_TELEGRAM_WATCH_ALL` — which now defaults to `false`** (§12.6, amending decision 26). A subscription is unconditional and that is the load-bearing part: an auto-download has no originating channel, so there is nobody to report back to, and Telegram is the only push surface for background work — gating it on the knob would make the one class of download nothing else covers completely silent. An `ios` add is APNs' to announce, so reporting it here as well is exactly the duplicate the operator asked us to stop sending. `interested()` is defined as "`chats_for()` would name somebody" rather than as a parallel condition: a `true` that yields an empty chat set books a watch nothing can deliver, and §12.5's watchdogs then tick for it forever. |
-| 44 | And which items does APNs push for? | **`source.kind == "ios"`, or everything with `APNS_PUSH_ALL=true` (default `false`)** (§25.2). The mirror of 43, and the gate is narrower than it first looks: it covers the two pushes that fan out to *devices*, the activity **start** and the **alert**. `Removed` is not gated — it is bookkeeping, and skipping it leaks per-item state for every non-iOS download the process ever sees. **Updating** and **ending** a Live Activity are not gated either, and that is one rule, not two: both are addressed to a registration the app made for that one item (its own add, or one it adopted at launch from a server push-start), so the registration is the permission, the knob can be flipped at runtime while an activity is live, and an activity nobody updates freezes at its first frame while one nobody ends is a progress ring with nothing left to close it. The update is also the only thing that fills the record cache the ungated end falls back on when the store cannot be read, so gating it silently emptied that fallback for exactly the non-iOS items it protects. The **alert** additionally fires for an item that had a registration whatever its origin, because `source` is immutable (§4.4) and an iOS add that dedupes onto a live Telegram item never rewrites it (§8.5) — the registration is then the only record that the phone is watching that download. Not a per-device preference instead of a global knob: `alerts` already exists per device for "do I want alerts at all", and a second per-device axis for "…from which origin" is a settings screen nobody asked for. |
+| 44 | And which items does APNs push for? | **`source.kind == "ios"`, or everything with `APNS_PUSH_ALL=true` (default `false`)** (§25.2). The mirror of 43, and the gate is narrower than it first looks: it covers the two pushes that fan out to *devices*, the activity **start** and the **alert**. `Removed` is not gated — it is bookkeeping, and skipping it leaks per-item state for every non-iOS download the process ever sees. **Updating** and **ending** a Live Activity are not gated either, and that is one rule, not two: both are addressed to a registration the app made for that one item (its own add, or one it adopted at launch from a server push-start), so the registration is the permission, the knob can be flipped at runtime while an activity is live, and an activity nobody updates freezes at its first frame while one nobody ends is a progress ring with nothing left to close it. The update is also the only thing that fills the record cache the ungated end falls back on when the store cannot be read, so gating it silently emptied that fallback for exactly the non-iOS items it protects. The **alert** additionally fires for an item that had a registration whatever its origin, because `source` is immutable (§4.4) and an iOS add that dedupes onto a live Telegram item never rewrites it (§8.5) — the registration is then the only record that the phone is watching that download. Not a per-device preference instead of a global knob: `alerts` already exists per device for "do I want alerts at all", and a second per-device axis for "…from which origin" is a settings screen nobody asked for. **Narrowed 2026-09-11**: for an `ios` item that names its install in `source.ref`, those same two device fan-outs go only to the registrations whose `install_id` matches (decision 42, §25.2). A `null` `ref` and `APNS_PUSH_ALL=true` both keep the old fan-out, and the update/end/`Removed` answers above are untouched — the install key narrows *who*, never *whether*. |
 | 1 | A Socket.IO shim for the overlap window? | **No.** BRIEF §8 says Socket.IO is not provided. `<p>socket.io` returns 501 with a pointer; the v2 iOS build is installed **before** the swap, which is what keeps the shipped build (blank queue without a handshake) from ever meeting it (§11.6, R2). |
 | 2 | Should the v1 shim synthesise a parent row for a group? | **No.** Groups are omitted from `/history`; only children appear. A parent row that never progresses is worse than nothing in the old client (§11.4). |
 | 3 | `canceled` in v1 `/history`? | **Omitted entirely.** The shipped `DownloadStatus` has no `canceled` case and maps unknown → `.pending`, so a cancelled row would be stuck in "In Progress" forever. Legacy made cancels vanish; this is faithful (§11.4). |
@@ -5882,15 +5882,44 @@ Three wiring facts follow from that, and each is a way to get it silently wrong:
 
 | Event | Action |
 |---|---|
-| `StatusChanged` from `queued`/`resolving` into `preparing`/`downloading` | Live Activity **push-to-start**, to every device that offered a start token. Top-level items only, at most once per item. |
+| `StatusChanged` from `queued`/`resolving` into `preparing`/`downloading` | Live Activity **push-to-start**, to every device that offered a start token **and belongs to the adding install**. Top-level items only, at most once per item. |
 | `StatusChanged` (any, including the `from == to` progress re-diff) | Live Activity **update** to every registration for that item, throttled per (item, device). |
-| `Completed` | Live Activity **end** to every registration, then `remove_live_activities_for`; plus one **alert** per device with `alerts == true`, when the item is top-level or a group and its status is `finished` or `error`. |
+| `Completed` | Live Activity **end** to every registration, then `remove_live_activities_for`; plus one **alert** per device with `alerts == true` **that belongs to the adding install**, when the item is top-level or a group and its status is `finished` or `error`. |
 | `Removed` | forget the item's cached state, so a re-added id may start a fresh activity. |
 
 The **push-to-start** and the **alert** are gated on the item's origin — see the `interested()`
-paragraph at the end of this section. The Live Activity **update** and **end** are not: both are
-addressed to a registration the app made for that one item, so the registration, not the row, is
-the permission. `Removed` is bookkeeping and is never gated.
+paragraph at the end of this section — and then narrowed to one *install* of that origin, below.
+The Live Activity **update** and **end** are neither: both are addressed to a registration the app
+made for that one item, so the registration, not the row, is the permission. `Removed` is
+bookkeeping and is never gated.
+
+**Which device, and not only whether (decision 42).** `interested()` answers "does the phone hear
+about this item"; `source.ref` answers "which phone". An add from the app carries the calling
+install there — the `X-Aulos-Install` header (PROTOCOL §1.3) — and a device registration carries
+its own in `install_id` (§4.8, PROTOCOL §4.8); the two device fan-outs go where they agree. So a
+download started on the iPhone alerts the iPhone and the iPad in the next room stays quiet, which
+is the operator's rule applied inside one origin rather than between origins. `install_matches` is
+the whole predicate and three of its four arms are the fan-out that shipped before the key existed:
+
+| item | device | alert / start |
+|---|---|---|
+| `kind = ios`, `ref = A` | `install_id = A` | **sent** |
+| `kind = ios`, `ref = A` | `install_id = B`, or `NULL` | withheld — some other install |
+| `kind = ios`, `ref = null` (a build that predates the header) | any | sent — the items are indistinct |
+| any kind, `APNS_PUSH_ALL = true` | any | sent — the escape hatch is "every device", full stop |
+| `kind != ios` | any | the origin gate decides; `ref` is a chat or subscription id no device can match |
+
+The start's early return is install-aware for the same reason its latch is taken late: when the
+only device holding a push-to-start token belongs to another install, nothing is sent **and the
+item's one start is not spent**, so the adding install registering its token thirty seconds into
+the download still gets an activity.
+
+A `NULL` `install_id` is "an app build that does not report one", not "no install", and the
+asymmetry in the last two table rows is deliberate: the moment one install identifies itself, an
+unidentified registration is some *other* install. A deployment upgraded ahead of its app
+therefore behaves exactly as it did before — every `ref` is `null` — and one where the app sends
+the header on its adds but not on its registrations goes quiet, which is why PROTOCOL §4.8 says to
+send both or neither.
 
 `Removed` needs **no** `remove_live_activities_for` from the notifier, and that is a store fact
 rather than an omission: every removal path in `aulos-queue` funnels through `remove_rows`, whose
@@ -6122,7 +6151,7 @@ failure.
 
 | Route | Body | Answer |
 |---|---|---|
-| `PUT <p>api/v2/devices/{token}` | `{"platform":"ios","bundle_id":"…","environment":"sandbox"\|"production","alerts":true,"live_activity_start_token":"<hex>"\|null,"app_version":"1.0.0 (3)"}` | `204`; idempotent upsert keyed on `token` (lowercase hex, 32–200 chars, validated) |
+| `PUT <p>api/v2/devices/{token}` | `{"platform":"ios","bundle_id":"…","environment":"sandbox"\|"production","alerts":true,"live_activity_start_token":"<hex>"\|null,"install_id":"…"\|null,"app_version":"1.0.0 (3)"}` | `204`; idempotent upsert keyed on `token` (lowercase hex, 32–200 chars, validated) |
 | `DELETE <p>api/v2/devices/{token}` | — | `204`, idempotent |
 | `PUT <p>api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}` | `204`; `404` envelope when the device is unknown; `item_id` validated as a ULID but need not exist |
 | `DELETE <p>api/v2/devices/{token}/live-activities/{item_id}` | — | `204`, idempotent |
@@ -6139,6 +6168,16 @@ The `{token}` path segment is a **secret in a URL**, the only one on the v2 surf
 middleware shortens any path segment of 32-or-more hexadecimal characters to its first eight
 (§16.5), so `ENABLE_ACCESSLOG=true` — or the DEBUG level an operator turns up to debug push — does
 not write device tokens to disk.
+
+`install_id` is optional, is shaped exactly like the `X-Aulos-Install` header the same install
+sends on its adds (8–64 of `[A-Za-z0-9._-]`, one validator in `v2::downloads::install_id`), and
+lands in the nullable `devices.install_id` column that migration `0004` adds. It is the routing key
+§25.2 matches against an item's `source.ref`. The header and the field share a shape and *not* a
+verdict on a malformed value: the header is silently ignored, because a proxy that mangles it must
+never be able to break an add, while the field is a `400 validation_failed` like every other field
+on this route, because a device stored under a wrong install id does not fail — it simply stops
+being alerted, weeks later, with nothing in any log. Neither the column nor the id is ever logged
+or reported by `healthz`; `devices` stays a count (§25.7).
 
 Removals are idempotent because APNs tells the notifier about dead tokens the app may already have
 deleted.

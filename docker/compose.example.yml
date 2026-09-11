@@ -74,9 +74,10 @@ services:
       # APNS_TEAM_ID: TEAM123456
       # APNS_TOPIC defaults to com.tatoalo.aulos; a device's own bundle_id wins when it reports one.
       # The mirror of AULOS_TELEGRAM_WATCH_ALL: by default the phone is pushed only for downloads
-      # the app itself added (the share sheet counts), so a Telegram add does not also ring here.
-      # Turn this on to be pushed for every download, whoever added it. A Live Activity that has
-      # started is always ended either way.
+      # the app itself added (the share sheet counts), so a Telegram add does not also ring here —
+      # and only the device that added one, so an iPhone download leaves the iPad quiet. Turn this
+      # on to be pushed on every device for every download, whoever added it. A Live Activity that
+      # has started is always updated and ended either way.
       # APNS_PUSH_ALL: "true"
     volumes:
       - /srv/media:/downloads

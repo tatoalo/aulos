@@ -80,12 +80,13 @@ or header on any `api/v2/*` route is affected, and the UI adds no endpoint you n
 
 ### 1.3 Headers
 
-**Request headers.** Both are optional; neither can make a request fail.
+**Request headers.** All three are optional; none of them can make a request fail.
 
 | Header | Meaning |
 |---|---|
 | `X-Request-Id` | 1–64 printable ASCII characters. Echoed back on the response, so it is the key to correlating your logs with the server's. Anything else is ignored and a fresh id is minted. |
 | `X-Aulos-Client` | optional; a client that wants its adds attributed to it. The iOS app sends `ios/<version>`. Only the token before the slash is interpreted (ASCII-case-insensitively); unknown clients are `api_v2`. It sets `Item.source.kind` on `POST api/v2/downloads` (§2.3, §4.1) and does nothing anywhere else. |
+| `X-Aulos-Install` | optional; **which installation** of that client is calling — the iPhone as opposed to the iPad. 8–64 characters of `[A-Za-z0-9._-]`, surrounding whitespace trimmed; **anything else is treated as absent, never as a `400`**. Mint one opaque id per install (a UUID is the obvious choice), store it, and send it on every request from every target of the app. On `POST api/v2/downloads` it sets `Item.source.ref` when the resolved kind is `"ios"` (§4.1); on `PUT api/v2/devices/{token}` the same value is sent as the `install_id` field (§4.8). Together they are what makes a completion alert reach the device the download was started from. It does nothing anywhere else. |
 
 **Response headers.**
 
@@ -464,7 +465,7 @@ never to appear in a `delta` frame. Read them once from `added`/`snapshot` and n
 | Key | Type | Notes |
 |---|---|---|
 | `kind` | `string` | `"api_v2"` \| `"api_v1"` \| `"ios"` \| `"telegram"` \| `"subscription"` \| `"restart"` \| `"retry"` |
-| `ref` | `string \| null` | the chat id, the subscription id, or a request id — whichever applies. `null` when there is nothing to reference. |
+| `ref` | `string \| null` | the chat id, the subscription id, the adding install's id (`kind == "ios"`, from `X-Aulos-Install`, §1.3), or a request id — whichever applies. `null` when there is nothing to reference. |
 
 **`source` records where the item came from, and it never changes afterwards.** A retry — manual
 or automatic — and a boot recovery both leave it exactly as it was, so a download that was asked
@@ -476,7 +477,8 @@ to itself on a boot recovery or a retry, so rows written back then can still car
 client must still decode them. No row written by this build ever gets either value.
 
 `"ios"` is set by the `X-Aulos-Client` request header (§1.3); every other client of
-`POST api/v2/downloads` is `"api_v2"`.
+`POST api/v2/downloads` is `"api_v2"`. For an `"ios"` item `ref` is the adding install's id from
+`X-Aulos-Install` (§1.3), or `null` when the app did not send one.
 
 ### 2.4 Rendering guidance
 
@@ -705,6 +707,12 @@ Response `202`:
 - Send `X-Aulos-Client: ios/<version>` (§1.3) if you are the iOS app and want the items you add to
   carry `source.kind == "ios"`. It is the only thing that sets that kind, it applies to the batch
   body as well as the single one, and sending nothing is `"api_v2"` exactly as before.
+- Send `X-Aulos-Install: <id>` (§1.3) alongside it and the items carry
+  `source.ref == "<id>"` as well — the install that added them. It applies to the batch body too,
+  and it only ever refines the `"ios"` kind: with any other client the add is unchanged and
+  `source.ref` stays `null`. A value outside the documented shape, or no header at all, is
+  `source.ref == null`, which is what an older app build has always produced and what the server
+  reads as "every iOS device" when it routes the alert (§4.8).
 
 Errors: `400 validation_failed` (with `field`), `400 unknown_preset`, `400 overrides_disabled`,
 `400 folder_invalid`, `400 unsupported_url`, `413 payload_too_large`, `503 state_unavailable`.
@@ -727,6 +735,11 @@ Errors: `400 validation_failed` (with `field`), `400 unknown_preset`, `400 overr
 | `delete` | Removes the record (cancelling first if it is running), and optionally the files. |
 
 Read the server's supported set from `capabilities.actions` rather than hard-coding it.
+
+The **shipped web page and iOS app always send `"delete_file": false`** on both `delete` and
+`clear`, explicitly, so a delete from either never unlinks a file. That is a client convention, not
+a server rule: the parameter and `DELETE_FILE_ON_TRASHCAN` are unchanged and still do exactly what
+this table says for a `curl` or API caller.
 
 Response `200`:
 
@@ -1136,7 +1149,8 @@ v1 `POST <p>delete {"where":"done"}`. Without it a v2-only deployment would have
 id at a time. `{"where":"done"}` and `{}` both mean "every terminal row" — `"done"` is the only accepted
 scope, and any other value is a `400 validation_failed` naming `where`. The optional
 `delete_file` (boolean) overrides `DELETE_FILE_ON_TRASHCAN` for this call; omitted or `null`
-means "follow the server configuration". The response lists the ids that went, and each one
+means "follow the server configuration", and the shipped clients send an explicit `false` here as
+they do on `delete` (§4.2). The response lists the ids that went, and each one
 also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
 
 `api/v2/debug/options` is worth knowing about: it answers "why did my `YTDL_OPTIONS` not take
@@ -1186,6 +1200,7 @@ The registration body:
   "environment": "sandbox",
   "alerts": true,
   "live_activity_start_token": "<hex>",
+  "install_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
   "app_version": "1.0.0 (3)"
 }
 ```
@@ -1197,6 +1212,7 @@ The registration body:
 | `environment` | string, required | `"sandbox"` or `"production"` — which APNs gateway minted the token. A Debug/simulator build is `sandbox`, a TestFlight/App Store build is `production`. Getting it wrong makes every push fail inside APNs, so it is validated. |
 | `alerts` | boolean, optional | whether completion/failure alerts are wanted. Absent or `null` means `true`. |
 | `live_activity_start_token` | string or `null`, optional | the Live Activity **push-to-start** token (iOS 17.2+), when the app has one. `null` clears a previously reported one. |
+| `install_id` | string or `null`, optional | **which installation of the app this device is** — the same value you send as `X-Aulos-Install` (§1.3), same shape: 8–64 characters of `[A-Za-z0-9._-]`. Absent or `null` is "this build does not report one". Unlike the header, a malformed value here is a `400 validation_failed` on `install_id`: a header a proxy mangled must not break an add, but a device registered under the wrong install would just go quiet weeks later with nothing in any log. |
 | `app_version` | string or `null`, optional | free-form, for the server's logs. At most 64 characters. |
 
 **A registered device is not pushed for every download.** The server *starts* an activity and sends
@@ -1205,6 +1221,15 @@ an alert for items whose `source.kind` is `"ios"` — i.e. the ones added with
 bot and a web add by nobody. `alerts` is a further filter on top of that, not an override. An
 operator can widen it server-side with `APNS_PUSH_ALL=true`; there is no client-visible way to ask
 for it, and none is needed, because a client that wants a push simply sends the header on its adds.
+
+**And not every registered device is pushed for an iOS download.** When the item carries an install
+in `source.ref` (`X-Aulos-Install`, §1.3), the alert and the push-to-start go only to the devices
+registered with a matching `install_id` — so a download started on the phone does not light up the
+iPad. The two legacy shapes both mean "every alerting device", which is the behaviour that shipped
+before either field existed: a `source.ref` of `null` (an app build that did not send the header),
+and `APNS_PUSH_ALL=true`. A device whose registration has no `install_id` therefore hears about
+every `null`-ref item and about none of the items a header-sending build added — send the field and
+the header together, from every target of the app, and the question does not arise.
 **Updating and ending a Live Activity are never filtered:** an activity registered through the
 route below is updated and then closed whatever added the item — the registration is the request —
 and an item that had one also gets the completion alert, because a `PUT` here is the app saying it
