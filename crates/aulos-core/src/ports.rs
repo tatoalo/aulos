@@ -1,5 +1,5 @@
-//! Cross-crate seams: the [`HookStore`] and [`DeviceStore`] ports, [`HookPhase`] and
-//! [`FieldUpdate`].
+//! Cross-crate seams: the [`HookStore`], [`DeviceStore`] and [`ProgressReader`] ports,
+//! [`HookPhase`] and [`FieldUpdate`].
 //!
 //! These types are declared here because they are the *vocabulary* two crates share without
 //! either depending on the other:
@@ -15,12 +15,18 @@
 //! - [`DeviceStore`] is how the APNs notifier (`aulos-apns`, DESIGN §25) reads and prunes device
 //!   registrations without depending on `aulos-store`; `aulos-store` implements it and `aulos-api`
 //!   writes registrations through it.
+//! - [`ProgressReader`] is how a *subscriber* — the Telegram actor, the APNs notifier — reads the
+//!   live numbers of an item it is already reporting on, without either of them depending on
+//!   `aulos-queue`'s published snapshot type (DESIGN §15.1, §25.4). `aulos-queue::StateView`
+//!   implements it.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
 use crate::id::{ItemId, UnixMs};
-use crate::item::EntryBlob;
+use crate::item::{EntryBlob, ItemView};
 
 /// When a hook runs relative to the terminal status write (DESIGN §13).
 ///
@@ -296,6 +302,27 @@ pub trait DeviceStore: Send + Sync {
     /// # Errors
     /// [`PortError::Store`] if the write could not be applied.
     async fn remove_live_activities_for(&self, item: ItemId) -> Result<(), PortError>;
+}
+
+/// The freshest published view of one item — progress **pulled**, never pushed (DESIGN §15.1).
+///
+/// `DomainEvent::StatusChanged` carries a view the engine builds with a `None` progress cell, so
+/// its `percent` is `0.0` for every non-group item until `Finished`; the real numbers live in the
+/// aggregator's published snapshot and reach clients as a `delta`. A notifier that wants them has
+/// two options: flood the [`crate::event::EventRouter`] with a progress event per frame, or ask
+/// for the current view when it is about to draw something. The router's per-subscriber queues are
+/// `DropNewest`, so a progress flood can evict a `Completed` — which is why this port exists and
+/// why it is a **pull**.
+///
+/// Implemented by `aulos-queue::StateView`, whose read is a wait-free `ArcSwap` load: calling this
+/// once per board row per second, or once per Live Activity update, costs nothing worth measuring
+/// and never blocks the aggregator.
+///
+/// `None` means the snapshot does not carry the item — it was never published, or it has already
+/// aged out of the `done` window — and the caller falls back on whatever view it already has.
+pub trait ProgressReader: Send + Sync + std::fmt::Debug {
+    /// The current published view of `id`, or `None` when the snapshot does not carry it.
+    fn view(&self, id: ItemId) -> Option<Arc<ItemView>>;
 }
 
 /// What can go wrong on a port call.

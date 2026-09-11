@@ -26,7 +26,7 @@
 //! | Telegram per-chat defaults | [`telegram`] |
 //! | `healthz` state | [`health`] |
 //! | the plugin reload report | [`reload`] |
-//! | cross-crate seams: `HookStore`, `HookPhase`, `FieldUpdate` | [`ports`] |
+//! | cross-crate seams: `HookStore`, `ProgressReader`, `HookPhase`, `FieldUpdate` | [`ports`] |
 //! | configuration | [`config`], [`ytdl_options`] |
 //! | paths, containment, the URL prefix | [`paths`], [`prefix`] |
 //! | time and progress | [`clock`], [`progress`] |
@@ -89,7 +89,7 @@ pub use item::{EntryBlob, FileRef, FileSlot, Item, ItemView, Kind, ViewExtras};
 pub use paths::{PathError, Paths, RelDir, RelPath, contain, sanitize_path_component};
 pub use ports::{
     ApnsEnvironment, DeviceRecord, DeviceStore, FieldUpdate, HookPhase, HookStore,
-    LiveActivityRecord, PortError,
+    LiveActivityRecord, PortError, ProgressReader,
 };
 pub use prefix::{Prefix, PrefixFixup};
 pub use progress::{ACTIVE_CEILING, Normalizer, PhaseTag, ProgressCell, RawProgress};

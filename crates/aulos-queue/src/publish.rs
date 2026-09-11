@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use aulos_core::ports::ProgressReader;
 use aulos_core::{BootId, GroupId, ItemId, ItemView, Seq, Status};
 use serde::{Deserialize, Serialize};
 
@@ -249,6 +250,20 @@ impl StateView {
     }
 }
 
+/// The published snapshot **is** the progress reader the subscribers pull from (DESIGN §15.1).
+///
+/// `DomainEvent::StatusChanged` carries an engine view whose progress cell is `None`
+/// (`Engine::view`), so its `percent` is `0.0` until the item finishes. The merged numbers only
+/// ever exist here, which is why the Telegram board and the APNs Live Activity read them through
+/// this port instead of the event: pulling one `ArcSwap` load per redraw cannot evict anything,
+/// whereas publishing a progress event per frame can — the router's per-subscriber queues are
+/// `DropNewest`.
+impl ProgressReader for StateView {
+    fn view(&self, id: ItemId) -> Option<Arc<ItemView>> {
+        self.load().get(id).map(Arc::clone)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +316,33 @@ mod tests {
         assert_eq!(p.get(b.id).map(|v| v.id), Some(b.id));
         assert!(p.get(view(Status::Queued, 3).id).is_none());
         assert_eq!(p.all().count(), 2);
+    }
+
+    #[test]
+    fn the_state_view_answers_the_progress_reader_port_with_live_numbers() {
+        // The port exists because the engine's `StatusChanged` view carries a `None` progress
+        // cell: a subscriber that reads `percent` off the event sees `0.0` for the whole download.
+        let mut live = (*view(Status::Downloading, 1)).clone();
+        live.percent = 61.5;
+        live.speed = Some(2_048.0);
+        let live = Arc::new(live);
+        let mut by_id = HashMap::new();
+        by_id.insert(live.id, 0);
+        let state = StateView::new(BootId::new());
+        state.store(Arc::new(Published {
+            items: Arc::from([Arc::clone(&live)]),
+            by_id: Arc::new(by_id),
+            ..Published::empty(BootId::new())
+        }));
+
+        let reader: &dyn ProgressReader = &state;
+        let seen = reader.view(live.id).expect("the snapshot carries it");
+        assert!((seen.percent - 61.5).abs() < f64::EPSILON);
+        assert_eq!(seen.speed, Some(2_048.0));
+        assert!(
+            reader.view(view(Status::Queued, 2).id).is_none(),
+            "an item the snapshot does not carry reads as None, not as zero progress"
+        );
     }
 
     #[test]
