@@ -15,7 +15,9 @@ use aulos_core::event::{AddReason, DomainEvent, RemoveReason};
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::Status;
 use aulos_telegram::{Call, Command, Incoming, MessageId, TelegramConfig, TgError, TgInitError};
-use support::{CHAT, Harness, OTHER_CHAT, added, added_batch, changed, completed, tg_view, view};
+use support::{
+    CHAT, Harness, OTHER_CHAT, added, added_batch, changed, completed, progressing, tg_view, view,
+};
 
 fn command(chat: i64, command: Command) -> Incoming {
     Incoming::Command { chat, command }
@@ -1441,4 +1443,82 @@ async fn the_startup_gates_refuse_to_build_an_actor() {
         .err(),
         Some(TgInitError::MissingToken)
     );
+}
+
+// ---------------------------------------------------------------------------
+// live progress, pulled from the published snapshot (DESIGN §15.1, §12.4)
+// ---------------------------------------------------------------------------
+
+/// The bug this pins: `Engine::view` builds every `StatusChanged` view with a `None` progress
+/// cell, so a board that only ever read events showed `0%` from the first tick to the last.
+#[tokio::test]
+async fn the_bar_moves_on_the_tick_with_no_event_at_all() {
+    let mut h = Harness::new().await;
+    let id = ItemId::new();
+    let v = tg_view(id, "A clip", Status::Downloading, CHAT);
+    assert_eq!(v.percent, 0.0, "the event view really is empty");
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    assert!(h.transport.calls()[0].text().contains("  0%"));
+    h.transport.clear();
+
+    // Only the snapshot moves — not one further event reaches the actor.
+    h.progress
+        .publish(progressing(id, "A clip", 40.0, Some(1_048_576.0), Some(30)));
+    h.advance(Duration::from_millis(3_000)).await;
+    let edits = h.transport.edits();
+    assert_eq!(edits.len(), 1, "{edits:?}");
+    assert!(edits[0].text().contains("40%"), "{}", edits[0].text());
+
+    h.progress
+        .publish(progressing(id, "A clip", 75.0, Some(2_097_152.0), Some(10)));
+    h.advance(Duration::from_millis(3_000)).await;
+    let edits = h.transport.edits();
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert!(edits[1].text().contains("75%"), "{}", edits[1].text());
+}
+
+/// The pull must not defeat the guard the whole rate budget depends on: a snapshot whose numbers
+/// have not moved is not a change, so it must not mark the board dirty.
+#[tokio::test]
+async fn an_unchanged_snapshot_still_issues_no_api_call() {
+    let mut h = Harness::new().await;
+    let id = ItemId::new();
+    let v = tg_view(id, "A clip", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.progress
+        .publish(progressing(id, "A clip", 12.0, None, None));
+    h.tick().await;
+    assert_eq!(h.transport.count(), 1, "the board was created");
+
+    // Twelve seconds of ticks over a snapshot that says the same thing every time.
+    for _ in 0..12 {
+        h.advance(Duration::from_secs(1)).await;
+    }
+    assert_eq!(h.transport.count(), 1, "still just the first send");
+}
+
+/// A terminal row is the user's receipt: whatever the snapshot still holds for it, the row keeps
+/// the numbers it ended on.
+#[tokio::test]
+async fn a_finished_row_is_never_rewritten_by_the_snapshot() {
+    let mut h = Harness::new().await;
+    let id = ItemId::new();
+    let mut v = tg_view(id, "A clip", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    h.transport.clear();
+
+    v.status = Status::Finished;
+    v.percent = 100.0;
+    h.observe(&completed(&v)).await;
+    // A stale generation of the snapshot, still mid-download.
+    h.progress
+        .publish(progressing(id, "A clip", 62.0, None, None));
+    h.advance(Duration::from_millis(3_000)).await;
+
+    let edits = h.transport.edits();
+    assert_eq!(edits.len(), 1, "{edits:?}");
+    assert!(edits[0].text().contains("✅"), "{}", edits[0].text());
+    assert!(!edits[0].text().contains("62%"), "{}", edits[0].text());
 }

@@ -57,6 +57,7 @@ use aulos_core::clock::{Clock, SystemClock};
 use aulos_core::config::Config;
 use aulos_core::event::{EventInbox, EventRouter, Notifier, SubscriberSpec};
 use aulos_core::health::HealthRegistry;
+use aulos_core::ports::ProgressReader;
 use aulos_core::subscription::SubscriptionsHandle;
 use aulos_hooks::{AudioSyncHook, Hook, HookDispatcher, JellyfinHook, ManifestHook, NfoHook};
 use aulos_provider::Provider;
@@ -432,6 +433,14 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     //
     // The APNs notifier is a `Notifier`, not an actor: `aulos-core` hands out an `EventInbox`, so
     // the driving loop lives here (the Telegram actor owns its own, which is why it has a `spawn`).
+    //
+    // Both subscribers pull live progress from the published snapshot (DESIGN §15.1): the events
+    // they receive carry an engine view whose progress cell is `None`, so without the reader a
+    // Telegram bar sits at 0 % and a Live Activity freezes at its first frame. The snapshot only
+    // exists from step 12 on, which is why the reader is injected here rather than at
+    // `build_apns`/`TelegramActor::new`.
+    let progress: Arc<dyn ProgressReader> = Arc::new(state.clone());
+    let apns = apns.map(|n| n.with_progress(Arc::clone(&progress)));
     let apns_health = apns.as_ref().map(ApnsNotifier::health_handle);
     let apns_task = match (apns, apns_inbox) {
         (Some(notifier), Some(inbox)) => Some(tokio::spawn(run_apns(notifier, inbox))),
@@ -445,6 +454,7 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
         &health,
         telegram_inbox,
         http_token.clone(),
+        Arc::clone(&progress),
     )
     .await;
     let telegram_tasks = telegram.tasks;
@@ -990,6 +1000,7 @@ async fn spawn_telegram(
     health: &Arc<HealthRegistry>,
     inbox: Option<aulos_core::event::EventInbox>,
     shutdown: CancellationToken,
+    progress: Arc<dyn ProgressReader>,
 ) -> TelegramWiring {
     let tg_cfg = Arc::new(TelegramConfig::from_config(cfg));
     let Some(inbox) = inbox else {
@@ -1014,7 +1025,9 @@ async fn spawn_telegram(
         engine.clone(),
         catalog,
         Arc::clone(clock),
-    ) {
+    )
+    .map(|actor| actor.with_progress(progress))
+    {
         Ok(actor) => actor,
         Err(TgInitError::Disabled) => {
             tracing::info!("the Telegram bot is disabled");

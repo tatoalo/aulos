@@ -36,6 +36,55 @@ pub const CHAT: i64 = 4_242;
 /// A second allowed chat, for the fan-out tests.
 pub const OTHER_CHAT: i64 = -100_777;
 
+/// A `HashMap` standing in for the aggregator's published snapshot.
+///
+/// The board pulls its live percent/speed/eta through `aulos_core::ports::ProgressReader`
+/// (DESIGN §15.1), so a test can move a bar without an aggregator and without a real download.
+#[derive(Debug, Default)]
+pub struct FakeProgress {
+    views: std::sync::Mutex<std::collections::HashMap<ItemId, Arc<ItemView>>>,
+}
+
+impl FakeProgress {
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Publishes (or replaces) one item's view.
+    pub fn publish(&self, view: ItemView) {
+        self.views.lock().unwrap().insert(view.id, Arc::new(view));
+    }
+}
+
+impl aulos_core::ports::ProgressReader for FakeProgress {
+    fn view(&self, id: ItemId) -> Option<Arc<ItemView>> {
+        self.views.lock().unwrap().get(&id).map(Arc::clone)
+    }
+}
+
+/// The same view as [`view`], with the transient progress fields filled in — what the aggregator
+/// publishes and what no `DomainEvent` ever carries.
+#[must_use]
+pub fn progressing(
+    id: ItemId,
+    title: &str,
+    percent: f64,
+    speed: Option<f64>,
+    eta: Option<i64>,
+) -> ItemView {
+    let mut v = view(
+        id,
+        title,
+        Status::Downloading,
+        SourceRef::bare(SourceKind::ApiV2),
+    );
+    v.percent = percent;
+    v.speed = speed;
+    v.eta = eta;
+    v
+}
+
 /// A driven actor plus everything a test needs to observe it.
 pub struct Harness {
     pub dir: TempDir,
@@ -46,6 +95,7 @@ pub struct Harness {
     pub clock: Arc<FakeClock>,
     pub catalog: Arc<FormatCatalog>,
     pub actor: TelegramActor,
+    pub progress: Arc<FakeProgress>,
     pub events: EventSender,
     pub inbox: Option<EventInbox>,
     _engine: JoinHandle<()>,
@@ -167,7 +217,7 @@ impl HarnessBuilder {
         }));
         let transport = MockTransport::new();
         let catalog = Arc::new(ytdlp_catalog());
-        let mut actor = TelegramActor::with_transport(
+        let actor = TelegramActor::with_transport(
             Arc::clone(&tg),
             store.clone(),
             engine_handle.clone(),
@@ -176,9 +226,15 @@ impl HarnessBuilder {
             Arc::clone(&transport) as Arc<dyn aulos_telegram::Transport>,
         )
         .expect("the actor must build");
+        // Always wired: an empty snapshot answers `None` for every id, which is exactly the
+        // fallback the actor had before the port existed, so no other test changes behaviour.
+        let progress = FakeProgress::new();
+        let mut actor = actor
+            .with_progress(Arc::clone(&progress) as Arc<dyn aulos_core::ports::ProgressReader>);
         actor.load().await.expect("load");
 
         Harness {
+            progress,
             dir,
             cfg,
             store,

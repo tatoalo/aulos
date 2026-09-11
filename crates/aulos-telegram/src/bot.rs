@@ -23,6 +23,7 @@ use aulos_core::config::{Config, TelegramBoard};
 use aulos_core::event::{AddReason, DomainEvent, EventInbox};
 use aulos_core::id::ItemId;
 use aulos_core::item::{ItemView, Kind};
+use aulos_core::ports::ProgressReader;
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::Status;
 use aulos_core::telegram::ChatConfig;
@@ -271,6 +272,12 @@ pub struct TelegramActor {
     /// non-`teloxide` transport).
     bot: Option<teloxide::Bot>,
     health: Arc<HealthCell>,
+    /// Where a live row's percent/speed/eta come from on every tick (DESIGN §15.1).
+    ///
+    /// `None` leaves the board on the numbers the events carry, which for a non-group item is a
+    /// bar frozen at 0 % for the whole download: the engine builds every `StatusChanged` view with
+    /// a `None` progress cell.
+    progress: Option<Arc<dyn ProgressReader>>,
 }
 
 impl std::fmt::Debug for TelegramActor {
@@ -375,9 +382,23 @@ impl TelegramActor {
             incoming_rx,
             bot: None,
             health: Arc::new(HealthCell::default()),
+            progress: None,
         };
         me.publish_health();
         me
+    }
+
+    /// Injects the progress reader the board pulls its live numbers from (DESIGN §15.1, §12.4).
+    ///
+    /// Without it the board is what it was: the bar only moves when a status word does, which for
+    /// a plain item means never until it finishes. With it, every tick refreshes the
+    /// percent/speed/eta of each row that is downloading or post-processing, and the board is
+    /// marked dirty only when the rendered body actually changed — so the 3 s per-chat edit
+    /// limiter and the byte-identical skip still decide what leaves the process.
+    #[must_use]
+    pub fn with_progress(mut self, reader: Arc<dyn ProgressReader>) -> Self {
+        self.progress = Some(reader);
+        self
     }
 
     /// The sender the long-polling loop (or a test) pushes updates into.
@@ -773,6 +794,10 @@ impl TelegramActor {
             return;
         }
 
+        // Before anything is decided: the rows' own numbers. Progress never arrives as an event
+        // (DESIGN §15.1), so a board that only reacted to events showed a bar stuck at 0 %.
+        self.refresh_progress();
+
         // Decide which boards to redraw and which to retire. Nothing is swept: a terminal row
         // stays on the board until the board itself retires (DESIGN §12.4).
         let mut retire: Vec<i64> = Vec::new();
@@ -809,6 +834,56 @@ impl TelegramActor {
             .collect();
         for chat in chats {
             self.redraw(chat).await;
+        }
+    }
+
+    /// Refreshes every live row's progress from the reader, once per tick (DESIGN §15.1).
+    ///
+    /// Only rows that are actually moving are touched — `downloading` and `postprocessing`. A
+    /// queued row has nothing to show, and a terminal one is a receipt whose numbers must not be
+    /// rewritten by a snapshot that is about to drop it.
+    ///
+    /// The dirty flag is raised only when the *rendered body* changed, which is what keeps a
+    /// download whose percent moves inside the same rounded digit from spending a chat's edit
+    /// budget. The body is also what [`Self::redraw`] compares against `last_rendered`, so the two
+    /// guards agree by construction rather than by coincidence.
+    fn refresh_progress(&mut self) {
+        let Some(reader) = self.progress.as_deref() else {
+            return;
+        };
+        for board in self.boards.values_mut() {
+            let live: Vec<ItemId> = board
+                .jobs
+                .values()
+                .filter(|l| is_progressing(l.status))
+                .map(|l| l.id)
+                .collect();
+            if live.is_empty() {
+                continue;
+            }
+            let before = render::render_body(&board.lines());
+            for id in live {
+                let Some(view) = reader.view(id) else {
+                    continue;
+                };
+                let Some(line) = board.jobs.get_mut(&id) else {
+                    continue;
+                };
+                line.percent = view.percent;
+                line.speed = view.speed;
+                line.eta = view.eta;
+                // A group's roll-up is recomputed the same way in the snapshot as on the event,
+                // so this can only ever be fresher — never a regression.
+                if line.group.is_some() {
+                    line.group = Some((
+                        view.children_done.unwrap_or(0),
+                        view.children_total.unwrap_or(0),
+                    ));
+                }
+            }
+            if render::render_body(&board.lines()) != before {
+                board.dirty = true;
+            }
         }
     }
 
@@ -1044,6 +1119,15 @@ impl TelegramActor {
             tracing::error!("Failed to send Telegram message to {chat}: {e}");
         }
     }
+}
+
+/// The two statuses whose numbers move on their own, and which therefore deserve a pulled refresh.
+///
+/// `preparing` is out because nothing has a percent yet; `queued` is parked; a terminal row is the
+/// user's receipt and keeps whatever it ended on.
+#[must_use]
+const fn is_progressing(status: Status) -> bool {
+    matches!(status, Status::Downloading | Status::Postprocessing)
 }
 
 /// Why an item failed: its `msg` when it has one, else its `error.message` (DESIGN §12.5).
