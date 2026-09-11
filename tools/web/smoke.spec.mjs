@@ -39,6 +39,8 @@ const IDS = {
   dl: ID('DL'), group: ID('GRP'), c1: ID('C1'), c2: ID('C2'), c3: ID('C3'),
   pp: ID('PP'), resolving: ID('RES'), waiting: ID('WAIT'), fin: ID('FIN'), err: ID('ERR'),
 };
+/** The mock's three seeded subscriptions, plus the one its ticker scripts into existence. */
+const SUBS = { a: ID('SUBA'), b: ID('SUBB'), c: ID('SUBC'), scripted: ID('SUBS') };
 
 async function startMock(opts = {}) {
   const args = ['mock-server.mjs', '--port', String(opts.port ?? 0)];
@@ -218,22 +220,36 @@ test('every action button posts the action PROTOCOL §4.2 names', withMock({}, a
     ['api/v2/items/actions', 'start', [IDS.err]],
     ['api/v2/items/actions', 'delete', [IDS.fin]],
   ]);
+  // D3: the shipped page never removes a file from disk, and says so rather than inheriting
+  // whatever `DELETE_FILE_ON_TRASHCAN` is set to. Only `delete` carries the key.
+  expect(log[3].body).toEqual({ action: 'delete', ids: [IDS.fin], delete_file: false });
+  for (const e of log.slice(0, 3)) expect(e.body.delete_file).toBeUndefined();
 
   // The removed frame took the finished row out; the paused one moved to "Waiting for you".
   await expect(page.locator(`.row[data-id="${IDS.fin}"]`)).toHaveCount(0);
   await expect(page.locator(`#rows-waiting .row[data-id="${IDS.dl}"]`)).toBeVisible();
 }));
 
-test('Clear deletes every terminal id, after a confirm', withMock({}, async ({ page, mock, request }) => {
+test('Clear posts §4.7 items/clear with delete_file: false, after a confirm', withMock({}, async ({ page, mock, request }) => {
   await open(page, mock);
   page.once('dialog', (d) => d.accept());
   await page.click('#clear');
 
   await expect.poll(async () => (await mock.log(request)).length).toBe(1);
   const [entry] = await mock.log(request);
-  expect(entry.body.action).toBe('delete');
-  expect(entry.body.ids.sort()).toEqual([IDS.err, IDS.fin].sort());
+  expect(entry.method).toBe('POST');
+  expect(entry.path).toBe('api/v2/items/clear');
+  expect(entry.body).toEqual({ where: 'done', delete_file: false });
   await expect(page.locator('#sec-done')).toBeHidden();
+}));
+
+test('Clear asks first, and a dismissed confirm sends nothing', withMock({}, async ({ page, mock, request }) => {
+  await open(page, mock);
+  page.once('dialog', (d) => d.dismiss());
+  await page.click('#clear');
+  await page.waitForTimeout(300);
+  expect(await mock.log(request)).toEqual([]);
+  await expect(page.locator('#sec-done')).toBeVisible();
 }));
 
 test('the more menu reaches the actions the row does not show inline', withMock({}, async ({ page, mock, request }) => {
@@ -774,6 +790,182 @@ test('DEFAULT_THEME=auto still lets the OS preference decide', async ({ browser 
     mock.stop();
   }
 });
+
+/* ---------------------------------------------------------- subscriptions */
+
+test('the snapshot seeds the subscriptions panel', withMock({ freeze: true }, async ({ page, mock }) => {
+  await open(page, mock);
+  await expect(page.locator('#sec-subs')).toBeVisible();
+  await expect(page.locator('#subs-empty')).toBeHidden();
+  await expect(page.locator('#rows-subs > .row')).toHaveCount(3);
+
+  const a = page.locator(`.row[data-sub="${SUBS.a}"]`);
+  await expect(a.locator('.row-title')).toHaveText('Veritasium');
+  await expect(a.locator('.st')).toHaveText('Active');
+  await expect(a.locator('.rest')).toContainText('youtube.com');
+  await expect(a.locator('.rest')).toContainText('every 60 min');
+  await expect(a.locator('.rest')).toContainText('checked 3 min ago');
+  await expect(a.locator('.rest')).toContainText(/due in 5[5-7] min/);
+  await expect(a.locator('.rest')).toContainText('317 seen');
+  await expect(a.locator('.sw')).toHaveAttribute('aria-checked', 'true');
+  await expect(a.locator('.sub-err')).toBeHidden();
+
+  // Disabled: the switch is off, the word says so, and there is no "next due" to promise.
+  const b = page.locator(`.row[data-sub="${SUBS.b}"]`);
+  await expect(b.locator('.st')).toHaveText('Paused');
+  await expect(b.locator('.rest')).toContainText('never checked');
+  await expect(b.locator('.rest')).not.toContainText('due in');
+  await expect(b.locator('.sw')).toHaveAttribute('aria-checked', 'false');
+
+  // Failing: the badge carries the count and the server's error text gets its own line.
+  const c = page.locator(`.row[data-sub="${SUBS.c}"]`);
+  await expect(c.locator('.st')).toHaveText('Failed ×3');
+  await expect(c.locator('.st')).toHaveClass(/err/);
+  await expect(c.locator('.sub-err')).toHaveText('HTTP Error 404: Not Found');
+
+  expect(await page.evaluate(() => window.__csp)).toEqual([]);
+}));
+
+test('subscription frames create, spin and remove a row in place', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const row = page.locator(`.row[data-sub="${SUBS.scripted}"]`);
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row.locator('.row-title')).toHaveText('Scripted feed');
+  await expect(row.locator('.rest')).toContainText('never checked');
+
+  const before = await row.elementHandle();
+  await expect(row.locator('.st')).toHaveText('Checking…', { timeout: 10_000 });
+  await expect(row.locator('.disc')).toHaveClass(/spin/);
+  await expect(row.locator('[data-sact="check"]')).toBeDisabled();
+
+  await expect(row.locator('.st')).toHaveText('Active', { timeout: 10_000 });
+  await expect(row.locator('.rest')).toContainText('checked just now');
+  await expect(row.locator('.rest')).toContainText('2 seen');
+  // The same node throughout: an upsert patches the row, it never rebuilds it.
+  expect(await before.evaluate((el, other) => el === other, await row.elementHandle())).toBe(true);
+
+  await expect(row).toHaveCount(0, { timeout: 10_000 });
+}));
+
+test('Check now and Check all post to the §4.7 routes', withMock({ freeze: true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  await page.click(`.row[data-sub="${SUBS.a}"] [data-sact="check"]`);
+
+  await expect.poll(async () => (await mock.log(request)).length).toBe(1);
+  const [one] = await mock.log(request);
+  expect(one.method).toBe('POST');
+  expect(one.path).toBe(`api/v2/subscriptions/${SUBS.a}/check`);
+  await expect(page.locator(`.row[data-sub="${SUBS.a}"] .st`)).toHaveText('Checking…');
+
+  await page.click('#subs-check');
+  await expect.poll(async () => (await mock.log(request)).length).toBe(2);
+  const [, all] = await mock.log(request);
+  expect(all.path).toBe('api/v2/subscriptions/check');
+  expect(all.body).toEqual({});                       // §4.7: `{}` means "every one of them"
+  await expect(page.locator('.toast')).toContainText('Checking 3 subscriptions');
+}));
+
+test('adding a subscription posts the §9 body, and 400/409 show the server sentence', withMock({ freeze: true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  await page.click('#subs-new');
+  await expect(page.locator('#sub-form')).toBeVisible();
+
+  await page.fill('#sub-url', 'https://www.youtube.com/@veritasium');
+  await page.click('#sub-save');
+  await expect(page.locator('#sub-err')).toHaveText('This URL is already subscribed');
+
+  await page.fill('#sub-url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  await page.click('#sub-save');
+  await expect(page.locator('#sub-err')).toContainText('not a channel or playlist');
+  await expect(page.locator('#rows-subs > .row')).toHaveCount(3);   // neither one landed
+
+  await page.fill('#sub-url', 'https://www.youtube.com/@newfeed');
+  await page.fill('#sub-name', 'New feed');
+  await page.fill('#sub-every', '15');
+  await page.click('#sub-save');
+  await expect(page.locator('#sub-form')).toBeHidden();
+
+  const log = await mock.log(request);
+  expect(log).toHaveLength(3);
+  expect(log[2].method).toBe('POST');
+  expect(log[2].path).toBe('api/v2/subscriptions');
+  expect(log[2].body).toEqual({
+    url: 'https://www.youtube.com/@newfeed',
+    name: 'New feed',
+    check_interval_minutes: 15,
+    download_type: 'video',
+    format: 'mp4',
+    quality: 'best',
+    codec: 'auto',
+    folder: null,
+  });
+
+  await expect(page.locator('#rows-subs > .row')).toHaveCount(4);
+  await expect(page.locator('#rows-subs .row-title').filter({ hasText: 'New feed' })).toBeVisible();
+  await expect(page.locator('#sub-url')).toHaveValue('');
+}));
+
+test('the toggle, the inline editor and delete use PATCH and DELETE', withMock({ freeze: true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  const a = page.locator(`.row[data-sub="${SUBS.a}"]`);
+
+  await a.locator('.sw').click();
+  await expect(a.locator('.sw')).toHaveAttribute('aria-checked', 'false');
+  await expect(a.locator('.st')).toHaveText('Paused');
+
+  await a.locator('[data-sact="edit"]').click();
+  await expect(a.locator('.subedit')).toBeVisible();
+  await expect(a.locator('.e-name')).toHaveValue('Veritasium');
+  await expect(a.locator('.e-every')).toHaveValue('60');
+  await a.locator('.e-name').fill('Veritasium (renamed)');
+  await a.locator('.e-every').fill('90');
+  await a.locator('.e-save').click();
+  await expect(a.locator('.subedit')).toBeHidden();
+  await expect(a.locator('.row-title')).toHaveText('Veritasium (renamed)');
+  await expect(a.locator('.rest')).toContainText('every 90 min');
+
+  page.once('dialog', (d) => d.accept());
+  await a.locator('[data-sact="delete"]').click();
+  await expect(a).toHaveCount(0);
+  await expect(page.locator('#rows-subs > .row')).toHaveCount(2);
+
+  const log = await mock.log(request);
+  expect(log.map((e) => [e.method, e.path])).toEqual([
+    ['PATCH', `api/v2/subscriptions/${SUBS.a}`],
+    ['PATCH', `api/v2/subscriptions/${SUBS.a}`],
+    ['DELETE', `api/v2/subscriptions/${SUBS.a}`],
+  ]);
+  expect(log[0].body).toEqual({ enabled: false });
+  expect(log[1].body).toEqual({ name: 'Veritasium (renamed)', check_interval_minutes: 90 });
+}));
+
+test('a dismissed delete confirm leaves the subscription alone', withMock({ freeze: true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  page.once('dialog', (d) => d.dismiss());
+  await page.click(`.row[data-sub="${SUBS.a}"] [data-sact="delete"]`);
+  await page.waitForTimeout(300);
+  expect(await mock.log(request)).toEqual([]);
+  await expect(page.locator(`.row[data-sub="${SUBS.a}"]`)).toBeVisible();
+}));
+
+/* "3 min ago" and "due in 57 min" are the only two strings on the page that go wrong on their own,
+   with no frame to correct them. The clock is installed before the navigation so the page's 30 s
+   timer is the fake one; nothing here touches the socket. */
+test('relative times re-render on their own timer, with no frame', withMock({ freeze: true }, async ({ page, mock }) => {
+  await page.clock.install();
+  await page.goto(mock.base);
+  const rest = page.locator(`.row[data-sub="${SUBS.a}"] .rest`);
+
+  // A frozen clock runs no rAF, so nudge it until the snapshot it already received is painted.
+  await expect
+    .poll(async () => { await page.clock.runFor(200); return rest.textContent().catch(() => ''); }, { timeout: 20_000 })
+    .toContain('checked 3 min ago');
+
+  await page.clock.runFor('04:10');
+  const after = await rest.textContent();
+  expect(after).toContain('checked 7 min ago');
+  expect(after).toMatch(/due in 5[123] min/);         // 57 minus the four that just passed
+}));
 
 /* ------------------------------------------------------------ screenshots */
 
