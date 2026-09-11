@@ -290,11 +290,13 @@ fi
 
 log "sidecars and the terminal row"
 stem="${filename%.*}"
+# Since ef5e947 the NFO hook consumes the .info.json and always deletes it once the .nfo is
+# written, so with the hook on the sidecar must be gone, not beside the media.
 if docker exec "$NAME" test -f "/downloads/${stem}.info.json"; then
-  ok "the .info.json is beside the media"
-else
   docker exec "$NAME" ls -la /downloads || true
-  fail "the .info.json is not beside the media (writeinfojson was on)"
+  fail "the .info.json survived (the NFO hook deletes it after writing the .nfo)"
+else
+  ok "the .info.json was consumed by the NFO hook"
 fi
 if docker exec "$NAME" test -f "/downloads/${stem}.nfo"; then
   ok "the built-in NFO hook wrote ${stem}.nfo"
