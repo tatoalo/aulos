@@ -199,6 +199,39 @@ async fn a_phase_frame_updates_the_message_without_regressing_the_status() {
     );
 }
 
+/// yt-dlp runs some postprocessors — SponsorBlock, the thumbnail converter — **before** the first
+/// byte is downloaded, so their `pp` frames arrive ahead of every `progress` frame. Reporting
+/// those as `postprocessing` put the row two stages ahead of itself, and the `downloading` frame
+/// that followed was then a backwards edge the engine refused with
+/// `refused an illegal transition` at WARN on a download that was going perfectly well.
+#[tokio::test]
+async fn a_postprocessor_that_runs_before_the_first_byte_stays_in_preparing() {
+    let (outcome, msgs) = replay_with_messages("download_pre_pp.jsonl", &download_job()).await;
+    assert!(matches!(outcome.unwrap(), RunnerOutcome::Downloaded(_)));
+
+    let stages: Vec<Stage> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            ProgressMsg::Stage { stage, .. } => Some(*stage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        [Stage::Preparing, Stage::Downloading, Stage::Postprocessing],
+        "the stage sequence only ever moves forward, got {stages:?}"
+    );
+    // The label is still reported — it is what the user sees while the pre-download pass runs.
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            ProgressMsg::Stage { stage: Stage::Preparing, msg: Some(line), .. }
+                if &**line == "SponsorBlock…"
+        )),
+        "got {msgs:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_non_zero_retcode_is_a_failure_even_without_an_error_frame() {
     let e = replay("download_retcode.jsonl", &download_job())

@@ -1,0 +1,9 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.8.30.232658.dev0","python":"3.13.2","pid":4821,"plugins":["bgutil_ytdlp_pot_provider"],"pot":{"available":true,"url":"http://127.0.0.1:4416"}}
+{"v":1,"t":"pp","n":2,"ts":1772668801.2,"postprocessor":"SponsorBlock","status":"started","filepath":null}
+{"v":1,"t":"pp","n":3,"ts":1772668801.6,"postprocessor":"SponsorBlock","status":"finished","filepath":null,"finaldir":null,"subtitles":[],"chapters":[]}
+{"v":1,"t":"progress","n":4,"ts":1772668802.0,"status":"downloading","filename":null,"tmpfilename":"/downloads/Rick.mp4.part","downloaded_bytes":262144,"total_bytes":null,"total_bytes_estimate":58720256,"speed":1310720.0,"eta":44,"elapsed":0.3,"stream":"video"}
+{"v":1,"t":"progress","n":5,"ts":1772668804.0,"status":"finished","filename":"/downloads/Rick.mp4","downloaded_bytes":58720256,"total_bytes":58720256,"speed":null,"eta":null,"elapsed":5.4,"stream":"video"}
+{"v":1,"t":"pp","n":6,"ts":1772668805.0,"postprocessor":"MoveFiles","status":"started","filepath":"/downloads/Rick.mp4"}
+{"v":1,"t":"pp","n":7,"ts":1772668806.0,"postprocessor":"MoveFiles","status":"finished","filepath":"/downloads/Rick.mp4","finaldir":null,"subtitles":[],"chapters":[]}
+{"v":1,"t":"result","n":8,"ts":1772668807.0,"ok":true,"retcode":0,"filename":"/downloads/Rick.mp4","size":62390272,"artifacts":[{"role":"media","path":"/downloads/Rick.mp4","size":62390272}]}
+{"v":1,"t":"bye","n":9,"ts":1772668808.0,"elapsed_ms":12700,"frames":9,"peak_rss_kb":91240}

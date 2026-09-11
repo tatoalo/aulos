@@ -724,14 +724,24 @@ impl<'a> Consumer<'a> {
         }
     }
 
+    /// One `pp` frame (DESIGN §9.5).
+    ///
+    /// A postprocessor that runs **before the first byte** — yt-dlp's `pre_process` stage, where
+    /// SponsorBlock and the thumbnail converter live — is part of preparing the job, not of
+    /// postprocessing its output: announcing `postprocessing` there put the row two stages ahead
+    /// of itself, and the first `progress` frame that followed was then a backwards edge the
+    /// engine refused with a WARN on a download that was going perfectly well. The label is still
+    /// reported, on the stage the job is actually in.
     async fn on_pp(&mut self, pp: PpFrame, sink: &ProgressSink) {
         match pp.status.as_str() {
             "started" => {
-                self.stage = Stage::Postprocessing;
                 let msg = format!("{}…", pp.postprocessor).into_boxed_str();
-                sink.stage(Stage::Postprocessing, Some(msg)).await;
+                if self.started_downloading {
+                    self.stage = Stage::Postprocessing;
+                }
+                sink.stage(self.stage, Some(msg)).await;
             }
-            "processing" if self.stage != Stage::Postprocessing => {
+            "processing" if self.started_downloading && self.stage != Stage::Postprocessing => {
                 self.stage = Stage::Postprocessing;
                 sink.stage(Stage::Postprocessing, None).await;
             }
