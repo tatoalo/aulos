@@ -202,13 +202,13 @@ Item-terminal errors (these appear in `Item.error`, never as an HTTP status):
 | `auth_required` | the site needs credentials or cookies (login, members-only, private) | no — upload cookies |
 | `bot_check` | YouTube bot check; the POT sidecar is probably unhealthy | no — check `healthz` |
 | `geo_restricted` | not available in this region | no |
-| `unavailable` | removed, deleted, or the account was terminated | no |
+| `unavailable` | removed, deleted, or the account was terminated — including a plain `404`/`410` on the media or its page | no |
 | `not_yet_live` | an upcoming stream. Usually you meet this code on a **`queued`** item rather than a failed one (§2.3) — the server keeps such an item parked and unscheduled, and its subscription re-queues it when the stream starts | later, and the server may do it for you |
 | `no_format` | the requested format is not available for this item | change the selection |
-| `network` | transport error, HTTP 5xx, or a timeout | **yes**, and the server already retried |
+| `network` | transport error, HTTP 5xx, or a timeout — a page or API fetch that failed for any reason other than one of the codes above it in this table lands here | **yes**, and the server already retried |
 | `throttled` | HTTP 429 | **yes**, later |
 | `postprocessing_failed` | ffmpeg or a postprocessor failed | maybe |
-| `disk_full` | out of disk space | no |
+| `disk_full` | out of disk space, or over quota | no |
 | `tool_missing` | a required binary is absent from the image | no |
 | `provider_degraded` | the provider that handles this URL is misconfigured | no — check `healthz` |
 | `timeout` | a resolve, job or stall deadline expired | yes |
@@ -219,6 +219,10 @@ Item-terminal errors (these appear in `Item.error`, never as an HTTP status):
 
 A sensible client offers a **Retry** button for `network`, `throttled`, `timeout`,
 `postprocessing_failed` and `not_yet_live`, and offers **Delete** for the rest.
+
+`internal` in an `Item.error` means a bug **in this server**, never an upstream failure — so it is
+the one item-terminal code worth reporting as a defect. Anything the provider could plausibly say
+about the site, the network or the disk has a code of its own above.
 
 ---
 
@@ -728,7 +732,7 @@ Errors: `400 validation_failed` (with `field`), `400 unknown_preset`, `400 overr
 
 | Action | What it does |
 |---|---|
-| `start` | `queued` with `auto_start == false` → `auto_start = true`. On a terminal item it is a `retry`. |
+| `start` | `queued` with `auto_start == false` → `auto_start = true`. On a **`resolving`** item it sets the same flag, so the item goes to the scheduler the moment resolution finishes — you may send it immediately after an `auto_start: false` add without waiting for the row to leave `resolving`. On a terminal item it is a `retry`. |
 | `pause` | The inverse. `queued(auto_start=true)` is un-scheduled; a `preparing`/`downloading`/`postprocessing` item is stopped and parked as `queued(auto_start=false)` with its partial file kept, so `start` resumes rather than restarts. `attempt` is unchanged. `resolving` and terminal items are `not_pausable`. |
 | `cancel` | Terminal. Stops the job, removes partials, `status = "canceled"`. Use this when the user means "stop and forget", and `pause` when they mean "not now". |
 | `retry` | `error`/`canceled` → `queued`, `attempt += 1`. |
@@ -753,6 +757,10 @@ Response `200`:
 "not_retryable" | "not_pausable"`.
 Every action is **idempotent**: cancelling a cancelled item succeeds with it listed in `skipped`,
 and pausing an already-paused item succeeds the same way.
+
+`not_found` means the row is **gone**, not merely old: any id `GET api/v2/items` still lists is a
+valid target, however long ago it finished and however far it has dropped out of the `done` window
+of §4.3. A `delete` of such a row removes its files exactly as it would for a recent one.
 
 `DELETE api/v2/items/{id}?delete_file=true` is the single-item shorthand and returns `204`.
 
@@ -1150,7 +1158,9 @@ id at a time. `{"where":"done"}` and `{}` both mean "every terminal row" — `"d
 scope, and any other value is a `400 validation_failed` naming `where`. The optional
 `delete_file` (boolean) overrides `DELETE_FILE_ON_TRASHCAN` for this call; omitted or `null`
 means "follow the server configuration", and the shipped clients send an explicit `false` here as
-they do on `delete` (§4.2). The response lists the ids that went, and each one
+they do on `delete` (§4.2). It applies to **every** row the call removes, including the history
+that is far outside the `done` window — a clear never leaves a file behind with no row naming it.
+The response lists the ids that went, and each one
 also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
 
 `api/v2/debug/options` is worth knowing about: it answers "why did my `YTDL_OPTIONS` not take

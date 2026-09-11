@@ -2823,3 +2823,58 @@ so the bar sat at `0 %` and the island never moved.
   `crates/aulos-provider/src/command/sha256.rs`), `clippy::useless_format`
   (`crates/aulos-provider/tests/plugin_command.rs`) and a large `Err` variant
   (`crates/aulos-api/tests/support/mod.rs`). With those three allowed the workspace is clean.
+
+## Protocol stress-test findings — queue and ytdlp (2026-09-11)
+
+Four defects a protocol stress run of the server turned up, all fixed on
+`fix/queue-stress-findings`. PROTOCOL §1.6, §4.2 and §4.7 were updated where the contract wording
+changed.
+
+- **A terminal row outside the `AULOS_MEM_DONE_ITEMS` window was a ghost.** `GET api/v2/items` is
+  store-backed and lists every terminal row ever written; every action path looked the id up in the
+  engine's working set alone, so `delete`, `retry` and `DELETE api/v2/items/{id}` answered
+  `not_found` for a row the client could see — while `clear` *did* remove the row from SQLite and
+  did **not** unlink its file, because the path list was built from the cache too. Actions now fall
+  back to the store row (terminal rows only; a non-terminal row that is not cached would mean the
+  working set had lost something it is supposed to hold), a retry re-admits the row, and the same
+  fallback builds the unlink list — which closes the identical hole in the `CLEAR_COMPLETED_AFTER`
+  sweep and in a group delete, whose evicted children were leaving their files behind while
+  `ON DELETE CASCADE` took their rows. `crates/aulos-queue/tests/lifecycle.rs`, six tests from
+  `delete_of_an_evicted_finished_row_removes_the_row_and_its_file`.
+- **`start` immediately after an `auto_start: false` add was refused.** That is the iOS flow, and
+  it failed three times out of three with no delay and worked with a three-second one, which made
+  it look like a race rather than the ordinary ordering: the row is still `resolving` when the
+  start arrives. It was `not_startable`, and the item then parked as `queued(auto_start = false)`
+  for ever — nobody sends the start twice, and the end of resolution wrote the flag back from the
+  *request*. `start` on a resolving row now flips the flag and is reported applied, and both ends
+  of resolution read the flag off the **row**. (`start_during_resolution_schedules_the_item_once_it_resolves`.)
+- **Seven percent of healthy downloads logged `refused an illegal transition … from=postprocessing
+  to=downloading` at WARN.** Two halves. The cause is yt-dlp's `pre_process` postprocessors
+  (SponsorBlock, the thumbnail converter), whose `pp` frames arrive *before* the first `progress`
+  frame: the shim reported them as `postprocessing`, which put the row two stages ahead of itself
+  and made the first progress frame a backwards edge. Those labels now go onto the stage the job
+  is actually in (`download_pre_pp.jsonl`,
+  `a_postprocessor_that_runs_before_the_first_byte_stays_in_preparing`). Provider-agnostically, the
+  engine now clamps any stage frame that would move a row backwards along `preparing → downloading
+  → postprocessing`: it keeps the frame's line, leaves the status alone, and says so at DEBUG
+  (`a_late_downloading_frame_keeps_its_line_without_dragging_the_row_back`).
+- **`internal` was collecting failures that are not server bugs.** A full disk reaches the shim's
+  classifier as yt-dlp's own prose far more often than as an `OSError` with a readable `errno` — it
+  catches the `OSError` and re-raises a `DownloadError` carrying the text — so
+  `Unable to create directory: [Errno 28] No space left on device` was an `internal`. It is
+  `disk_full` now, matched on the text *and* on the wrapped exception's `errno` (looked up by name,
+  because `EDQUOT` is 122 on Linux and 69 on Darwin). `HTTP Error 404`/`410` is `unavailable` — the
+  code that makes a client offer Delete rather than Retry — and any other failed page or API fetch
+  is `network`, which §1.6 promises is retryable and which the server already retried. Seven new
+  cases in `tests/shim_contract.py`'s classifier table, covering the generic extractor and YouTube.
+
+### Notes for whoever picks this up
+
+- `cargo clippy --workspace --all-targets -- -D warnings` does not pass on `main` (three lints in
+  `aulos-provider`'s `sha256.rs` and two test files, owned by another agent at the time of writing),
+  so the gate here was run per crate without `-D warnings` and read for the changed files: clean.
+- Two tests fail on this machine **independently of these changes**, verified against a pristine
+  tree: `aulos-queue`'s `a_five_hundred_item_expansion_is_cheap_and_schedulable_immediately` is a
+  100 ms wall-clock assertion that misses under parallel load, and
+  `aulos-provider-ytdlp`'s `a_real_file_url_extract_yields_one_video_entry` wants a `formats` array
+  the locally installed yt-dlp 2026.08.19 does not emit for a `file://` URL.
