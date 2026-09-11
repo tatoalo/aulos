@@ -10,7 +10,8 @@
  *   2  icons                            7  rendering (reconcile by id, one rAF per tick)
  *   3  formatting                       8  row actions (§4.2)
  *   4  state                            9  the add flow (§4.1, §4.5, §4.6)
- *   5  REST (§1.4 auth, §1.5 errors)   10  chrome: theme, toasts, menus, sheets, boot
+ *   5  REST (§1.4 auth, §1.5 errors)   10  subscriptions (§4.7, §5.9, §9)
+ *                                      11  chrome: theme, toasts, menus, sheets, boot
  */
 
 /* ------------------------------------------------------------------ 1. env */
@@ -81,6 +82,8 @@ const P = {
   retry: '<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/>',
   external: '<path d="M7 17L17 7M9 7h8v8"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+  rss: '<circle cx="5.5" cy="18.5" r="1.7" fill="currentColor" stroke="none"/><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/>',
+  edit: '<path d="M11 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-6"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"/>',
 };
 
 function icon(name, size = 16, stroke = 2) {
@@ -119,12 +122,25 @@ function rel(ms) {
   return `${Math.floor(d / 86400)} days ago`;
 }
 
+/** `rel`'s forward-facing twin, for a subscription's `next_due` (§9). */
+function until(ms) {
+  if (!ms) return '';
+  const d = Math.round((ms - Date.now()) / 1000);
+  if (d <= 0) return 'due now';
+  if (d < 60) return 'due in under a minute';
+  if (d < 3600) return `due in ${Math.floor(d / 60)} min`;
+  if (d < 86400) { const h = Math.round(d / 3600); return `due in ${h} hour${h === 1 ? '' : 's'}`; }
+  return `due in ${Math.round(d / 86400)} days`;
+}
+
 const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 
 /* ------------------------------------------------------------- 4. state */
 
 const state = {
   items: new Map(),
+  subs: new Map(),
+  subsOk: false,
   seq: 0,
   bootId: null,
   caps: null,
@@ -242,6 +258,8 @@ function applyFrame(f) {
     case 'snapshot': {
       state.items = new Map();
       for (const it of (f.items || []).concat(f.done || [])) state.items.set(it.id, it);
+      state.subs = new Map((f.subscriptions || []).map((s) => [s.id, s]));
+      for (const id of [...subEditing]) if (!state.subs.has(id)) subEditing.delete(id);
       state.bootId = f.boot_id;
       state.doneTotal = f.done_total || 0;
       state.hasOlder = !!(f.truncated && f.truncated.done);
@@ -274,6 +292,14 @@ function applyFrame(f) {
         for (const k of Object.keys(patch)) { if (k !== 'id') cur[k] = patch[k]; }
       }
       break;
+    // §5.9: one frame type carries a creation, an edit and the result of every check, and it is
+    // an upsert on `subscription.id` — never merge it into a delta.
+    case 'subscription':
+      if (f.subscription && f.subscription.id) state.subs.set(f.subscription.id, f.subscription);
+      break;
+    case 'subscription_removed':
+      for (const id of f.ids || []) { state.subs.delete(id); subEditing.delete(id); }
+      break;
     case 'notice':
       toast(f.level || 'info', f.message || '');
       break;
@@ -291,7 +317,7 @@ function applyFrame(f) {
       toast('error', f.message || 'Protocol error');
       break;
     default:
-      break;                                        // subscription*, ytdl_options, pong: no UI
+      break;                                        // ytdl_options, pong: no UI
   }
   if (typeof f.seq === 'number') state.seq = f.seq;
   markDirty();
@@ -350,6 +376,16 @@ function flush() {
   for (const id of [...rows.keys()]) {
     if (!state.items.has(id)) { rows.get(id).el.remove(); rows.delete(id); }
   }
+
+  // Alphabetical, with the id as the tie-break: a subscription list has no `ord` and its order
+  // must not move under the pointer when a check bumps `last_checked`.
+  const subs = [...state.subs.values()]
+    .sort((a, b) => (a.name || a.url).localeCompare(b.name || b.url) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  reconcileSubs($('rows-subs'), subs);
+  $('sec-subs').hidden = !state.subsOk;
+  $('rows-subs').hidden = subs.length === 0;
+  $('subs-empty').hidden = subs.length > 0;
+  $('subs-check').hidden = subs.length === 0;
 }
 
 /** Reconcile by id: a row node is created once and then patched, never rebuilt (§2.4). */
@@ -669,8 +705,12 @@ async function runAction(id, action) {
 
 async function post(action, ids, extra) {
   if (!ids.length) return;
+  const body = Object.assign({ action, ids }, extra);
+  // Deleting a row is a list operation, never a disk operation: the page says so explicitly
+  // rather than inheriting whatever `DELETE_FILE_ON_TRASHCAN` happens to be (§4.2).
+  if (action === 'delete') body.delete_file = false;
   try {
-    const r = await api('api/v2/items/actions', { method: 'POST', body: Object.assign({ action, ids }, extra) });
+    const r = await api('api/v2/items/actions', { method: 'POST', body });
     const skipped = (r && r.skipped) || [];
     if (skipped.length && skipped.length === ids.length) toast('warning', `${action}: ${skipped[0].reason.replace(/_/g, ' ')}`);
   } catch (e) {
@@ -736,12 +776,28 @@ function pickerFromCatalog(cat) {
   };
 }
 
-function currentType() { return picker.types.find((t) => t.id === add.download_type) || picker.types[0]; }
+/* A picker and a selection are a pair, and there are two of them: the add bar's (refined per URL
+   by the catalog) and the subscription form's (the generic capabilities ladder). */
+function typeIn(p, sel) { return p.types.find((t) => t.id === sel.download_type) || p.types[0]; }
 // §4.6: honour the type's `default_format`; `formats[0]` is `Any` where it said `MP4`.
-function currentFormat() {
-  const t = currentType();
+function formatIn(p, sel) {
+  const t = typeIn(p, sel);
   const at = (id) => t.formats.find((f) => f.id === id);
-  return t && (at(add.format) || at(t.default_format) || t.formats[0]);
+  return t && (at(sel.format) || at(t.default_format) || t.formats[0]);
+}
+const currentType = () => typeIn(picker, add);
+const currentFormat = () => formatIn(picker, add);
+
+/** Clamp `sel` to what `p` actually offers, and answer with the format it settled on. */
+function clampSel(p, sel) {
+  if (!p.types.length) return null;
+  const t = typeIn(p, sel);
+  sel.download_type = t.id;
+  const f = formatIn(p, sel);
+  if (f) sel.format = f.id;
+  if (f && !f.qualities.some((q) => q.id === sel.quality)) sel.quality = f.default_quality || (f.qualities[0] && f.qualities[0].id) || 'best';
+  if (!f || !f.codecs.length) sel.codec = 'auto';
+  return f;
 }
 
 function qualityLabel(formatId, qualityId) {
@@ -757,13 +813,7 @@ function qualityLabel(formatId, qualityId) {
 
 /** Clamp the selection to what the current picker actually offers, then repaint the controls. */
 function syncPicker() {
-  if (!picker.types.length) return;
-  const t = currentType();
-  add.download_type = t.id;
-  const f = currentFormat();
-  if (f) add.format = f.id;
-  if (f && !f.qualities.some((q) => q.id === add.quality)) add.quality = f.default_quality || (f.qualities[0] && f.qualities[0].id) || 'best';
-  if (!f || !f.codecs.length) add.codec = 'auto';
+  if (!clampSel(picker, add)) return;
   renderPicker();
 }
 
@@ -864,14 +914,20 @@ function renderProv(provider, notice) {
   }
 }
 
-async function refreshDirs() {
-  if (!state.caps || !state.caps.config || !state.caps.config.custom_dirs) return;
+/** The custom-dirs list for one download type, `Base` first. `null` when the server has none. */
+async function folderOptions(type) {
+  if (!state.caps || !state.caps.config || !state.caps.config.custom_dirs) return null;
   if (!dirs) {
     try { dirs = await api('api/v2/custom-dirs'); }
-    catch { return; }
+    catch { return null; }
   }
-  const list = (add.download_type === 'audio' ? dirs.audio_download_dir : dirs.download_dir) || [];
-  const options = [{ id: '', label: 'Base' }].concat(list.filter(Boolean).map((d) => ({ id: d, label: d })));
+  const list = (type === 'audio' ? dirs.audio_download_dir : dirs.download_dir) || [];
+  return [{ id: '', label: 'Base' }].concat(list.filter(Boolean).map((d) => ({ id: d, label: d })));
+}
+
+async function refreshDirs() {
+  const options = await folderOptions(add.download_type);
+  if (!options) return;
   if (!options.some((o) => o.id === add.folder)) add.folder = '';
   fillSelect($('folder'), options, add.folder);
   fillSelect($('sheet-folder'), options, add.folder);
@@ -944,7 +1000,278 @@ async function submitAdd() {
   }
 }
 
-/* ------------------------------------------------------------ 10. chrome */
+/* ----------------------------------------------------- 10. subscriptions */
+
+/* PROTOCOL §9's object, §4.7's routes and §5.9's two frames. The snapshot seeds the list; a
+   `subscription` frame upserts a row (a check moves `checking`, `last_checked`, `seen_count`,
+   `error`) and `subscription_removed` takes it away. The REST answers are applied too, so a
+   toggle or a rename lands before the frame does. */
+
+/** The form's own selection. Its picker is the generic capabilities ladder rather than the
+ *  URL-refined catalog: a subscription is a standing order, not one download. */
+const subAdd = { download_type: 'video', format: 'mp4', quality: 'best', codec: 'auto', folder: '' };
+let subPicker = { types: [] };
+let subInterval = 60;
+const subRows = new Map();      // id → {el, refs, v}
+const subEditing = new Set();   // ids whose inline editor is open
+
+const subPath = (id) => `api/v2/subscriptions/${encodeURIComponent(id)}`;
+
+function subHost(u) {
+  try { return new URL(u).host.replace(/^www\./, ''); } catch { return u || ''; }
+}
+
+function subMeta(s) {
+  const parts = [subHost(s.url), `every ${s.check_interval_minutes} min`];
+  parts.push(s.last_checked ? `checked ${rel(s.last_checked)}` : 'never checked');
+  if (s.enabled && !s.checking) parts.push(until(s.next_due));
+  parts.push(`${s.seen_count || 0} seen`);
+  return parts.filter(Boolean).join(' · ');
+}
+
+function subWord(s) {
+  if (s.checking) return { word: 'Checking…', cls: 'dl' };
+  if (s.consecutive_failures > 0) return { word: `Failed ×${s.consecutive_failures}`, cls: 'err' };
+  return s.enabled ? { word: 'Active', cls: 'ok' } : { word: 'Paused', cls: '' };
+}
+
+/** Reconcile by id, like the queue's rows: a node is created once and then patched. */
+function reconcileSubs(container, list) {
+  let node = container.firstElementChild;
+  for (const s of list) {
+    const r = subRowFor(s.id);
+    if (node === r.el) node = node.nextElementSibling;
+    else container.insertBefore(r.el, node);
+    patchSub(r, s);
+  }
+  while (node) { const next = node.nextElementSibling; node.remove(); node = next; }
+  for (const id of [...subRows.keys()]) if (!state.subs.has(id)) subRows.delete(id);
+}
+
+function subRowFor(id) {
+  let r = subRows.get(id);
+  if (r) return r;
+  const el = document.createElement('div');
+  el.className = 'row sub';
+  el.dataset.sub = id;
+  el.innerHTML =
+    '<div class="row-main">' +
+      '<div class="disc"></div>' +
+      '<div class="row-body">' +
+        '<div class="row-title"></div>' +
+        '<div class="row-sub"><span class="st"></span><span class="rest"></span></div>' +
+        '<div class="sub-err" hidden></div>' +
+      '</div>' +
+      '<div class="row-acts">' +
+        '<button class="sw sw-sm" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button>' +
+        `<button class="iconbtn" type="button" data-sact="check" aria-label="Check now" title="Check now">${icon('retry', 16, 2.2)}</button>` +
+        `<button class="iconbtn" type="button" data-sact="edit" aria-label="Edit" title="Edit">${icon('edit', 16, 2)}</button>` +
+        `<button class="iconbtn danger" type="button" data-sact="delete" aria-label="Delete" title="Delete">${icon('trash', 16, 2)}</button>` +
+      '</div>' +
+    '</div>' +
+    '<div class="subedit" hidden>' +
+      '<label class="xfield"><span class="label">Name</span><span class="field"><input class="e-name" type="text" autocomplete="off" aria-label="Name"></span></label>' +
+      '<label class="xfield"><span class="label">Check every</span><span class="field"><input class="e-every" type="number" min="1" step="1" inputmode="numeric" aria-label="Check interval in minutes"><span class="unit">min</span></span></label>' +
+      '<div class="edit-acts"><button class="link e-cancel" type="button">Cancel</button><button class="btn-sm e-save" type="button">Save</button></div>' +
+    '</div>';
+  const refs = {
+    disc: el.querySelector('.disc'),
+    title: el.querySelector('.row-title'),
+    st: el.querySelector('.st'),
+    rest: el.querySelector('.rest'),
+    err: el.querySelector('.sub-err'),
+    sw: el.querySelector('.sw'),
+    check: el.querySelector('[data-sact="check"]'),
+    edit: el.querySelector('.subedit'),
+    name: el.querySelector('.e-name'),
+    every: el.querySelector('.e-every'),
+  };
+  refs.sw.addEventListener('click', () => subToggle(id));
+  refs.check.addEventListener('click', () => subCheck(id));
+  el.querySelector('[data-sact="edit"]').addEventListener('click', () => subEdit(id, true));
+  el.querySelector('[data-sact="delete"]').addEventListener('click', () => subDelete(id));
+  el.querySelector('.e-cancel').addEventListener('click', () => subEdit(id, false));
+  el.querySelector('.e-save').addEventListener('click', () => subSave(id));
+  r = { el, refs, v: {} };
+  subRows.set(id, r);
+  return r;
+}
+
+function patchSub(r, s) {
+  const { refs, v } = r;
+
+  const title = s.name || subHost(s.url);
+  if (v.title !== title) { refs.title.textContent = title; v.title = title; }
+
+  const w = subWord(s);
+  if (v.word !== w.word || v.cls !== w.cls) {
+    refs.st.textContent = w.word;
+    refs.st.className = `st${w.cls ? ' ' + w.cls : ''}`;
+    v.word = w.word; v.cls = w.cls;
+  }
+  const meta = subMeta(s);
+  if (v.meta !== meta) { refs.rest.textContent = meta; v.meta = meta; }
+
+  const err = s.error || '';
+  if (v.err !== err) { refs.err.textContent = err; refs.err.hidden = !err; refs.err.title = err; v.err = err; }
+
+  const disc = s.checking ? 'spin' : s.consecutive_failures > 0 ? 'err' : s.enabled ? 'dl' : '';
+  if (v.disc !== disc) {
+    refs.disc.className = `disc${disc ? ' ' + disc : ''}`;
+    refs.disc.innerHTML = disc === 'spin' ? '' : icon('rss', 16, 2.2);
+    v.disc = disc;
+  }
+
+  const on = s.enabled ? 'true' : 'false';
+  if (v.on !== on) { refs.sw.setAttribute('aria-checked', on); v.on = on; }
+  const checking = !!s.checking;
+  if (v.checking !== checking) { refs.check.disabled = checking; v.checking = checking; }
+
+  // The editor's inputs are only written when it opens, so a frame arriving mid-edit cannot
+  // overwrite what is being typed.
+  const editing = subEditing.has(s.id);
+  if (v.editing !== editing) { refs.edit.hidden = !editing; v.editing = editing; }
+}
+
+/** One REST call, reported rather than thrown: `{ok}` says whether the caller may act on it. */
+async function subCall(path, init) {
+  try { return { ok: true, body: await api(path, init) }; }
+  catch (e) { if (e.code !== 'unauthorized') toast('error', e.message); return { ok: false }; }
+}
+
+/** Apply the `Subscription` a POST/PATCH answered with, so the row moves before the frame lands. */
+function subUpsert(s) { if (s && s.id) state.subs.set(s.id, s); markDirty(); }
+
+async function subToggle(id) {
+  const s = state.subs.get(id);
+  if (!s) return;
+  s.enabled = !s.enabled;                 // optimistic; the answer and the frame are the authority
+  markDirty();
+  const r = await subCall(subPath(id), { method: 'PATCH', body: { enabled: s.enabled } });
+  if (r.ok) subUpsert(r.body);
+  else { s.enabled = !s.enabled; markDirty(); }
+}
+
+function subCheck(id) { subCall(`${subPath(id)}/check`, { method: 'POST' }); }
+
+async function subCheckAll() {
+  const r = await subCall('api/v2/subscriptions/check', { method: 'POST', body: {} });
+  if (r.ok && r.body) toast('info', `Checking ${r.body.count} subscription${r.body.count === 1 ? '' : 's'}…`);
+}
+
+async function subDelete(id) {
+  const s = state.subs.get(id);
+  if (!s) return;
+  if (!window.confirm(`Stop watching “${s.name || subHost(s.url)}”? Downloads already made are kept.`)) return;
+  const r = await subCall(subPath(id), { method: 'DELETE' });
+  if (!r.ok) return;
+  state.subs.delete(id);
+  subEditing.delete(id);
+  markDirty();
+}
+
+function subEdit(id, open) {
+  const r = subRows.get(id), s = state.subs.get(id);
+  if (!r || !s) return;
+  if (open) {
+    r.refs.name.value = s.name || '';
+    r.refs.every.value = String(s.check_interval_minutes);
+    subEditing.add(id);
+  } else subEditing.delete(id);
+  r.refs.edit.hidden = !open;
+  r.v.editing = open;
+  if (open) r.refs.name.focus();
+}
+
+async function subSave(id) {
+  const r = subRows.get(id);
+  if (!r) return;
+  const body = {
+    name: r.refs.name.value.trim(),
+    check_interval_minutes: minutes(r.refs.every.value),
+  };
+  const out = await subCall(subPath(id), { method: 'PATCH', body });
+  if (!out.ok) return;
+  subEdit(id, false);
+  subUpsert(out.body);
+}
+
+/** §9: `check_interval_minutes` has a minimum of 1, and an empty box means the server default. */
+function minutes(raw) {
+  const n = Math.round(Number(raw));
+  return isFinite(n) && n > 0 ? n : subInterval;
+}
+
+/* ---------------------------------------------------------- the add form */
+
+function subFormOpen(open) {
+  $('sub-form').hidden = !open;
+  $('subs-new').setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (!open) return;
+  if (!$('sub-every').value) $('sub-every').value = String(subInterval);
+  renderSubForm();
+  refreshSubDirs();
+  $('sub-url').focus();
+}
+
+function subErr(msg) {
+  const el = $('sub-err');
+  el.textContent = msg || '';
+  el.hidden = !msg;
+  $('sub-url').parentElement.classList.toggle('bad', !!msg);
+}
+
+function renderSubForm() {
+  const f = clampSel(subPicker, subAdd);
+  if (!f) return;
+  const t = typeIn(subPicker, subAdd);
+  const opt = (x) => ({ id: x.id, label: x.label });
+  fillSelect($('sub-type'), subPicker.types.map(opt), subAdd.download_type);
+  fillSelect($('sub-format'), t.formats.map(opt), subAdd.format);
+  fillSelect($('sub-quality'), f.qualities.map(opt), subAdd.quality);
+  $('sub-codec-x').hidden = f.codecs.length === 0;
+  if (f.codecs.length) fillSelect($('sub-codec'), f.codecs.map(opt), subAdd.codec);
+}
+
+async function refreshSubDirs() {
+  const options = await folderOptions(subAdd.download_type);
+  if (!options) return;
+  if (!options.some((o) => o.id === subAdd.folder)) subAdd.folder = '';
+  fillSelect($('sub-folder'), options, subAdd.folder);
+  $('sub-folder-x').hidden = false;
+}
+
+async function submitSub() {
+  const url = $('sub-url').value.trim();
+  if (!url) { subErr('Paste a channel or playlist link first.'); return; }
+  const body = {
+    url,
+    download_type: subAdd.download_type,
+    format: subAdd.format,
+    quality: subAdd.quality,
+    codec: subAdd.codec,
+    folder: subAdd.folder || null,
+    check_interval_minutes: minutes($('sub-every').value),
+  };
+  const name = $('sub-name').value.trim();
+  if (name) body.name = name;
+  const btn = $('sub-save');
+  btn.disabled = true;
+  try {
+    const s = await api('api/v2/subscriptions', { method: 'POST', body });
+    subErr('');
+    $('sub-url').value = '';
+    $('sub-name').value = '';
+    subFormOpen(false);
+    subUpsert(s);
+  } catch (e) {
+    // §9: a single-video URL is `400 validation_failed` and an existing one `409 conflict`; both
+    // carry the sentence to show, so show it rather than inventing one.
+    if (e.code !== 'unauthorized') subErr(e.message);
+  } finally { btn.disabled = false; }
+}
+
+/* ------------------------------------------------------------ 11. chrome */
 
 /* theme */
 
@@ -1102,15 +1429,24 @@ async function loadCapabilities() {
     if (c.default_download_type) add.download_type = c.default_download_type;
     if (c.default_format) add.format = c.default_format;
     if (c.default_quality) add.quality = c.default_quality;
+    if (c.subscription_default_check_interval) subInterval = c.subscription_default_check_interval;
+    Object.assign(subAdd, { download_type: add.download_type, format: add.format, quality: add.quality });
   }
+  // `features` is the authority on whether the surface exists at all (§4.7); an older server that
+  // does not list it gets no panel rather than four routes that 404.
+  state.subsOk = !caps.features || caps.features.includes('subscriptions');
   picker = pickerFromCapabilities(caps);
+  subPicker = pickerFromCapabilities(caps);
   syncPicker();
+  renderSubForm();
   refreshDirs();
+  markDirty();
   return caps;
 }
 
 function wire() {
   $('url-ico').innerHTML = icon('link', 18, 1.8);
+  $('sub-url-ico').innerHTML = icon('rss', 18, 1.8);
   $('empty-ico').innerHTML = icon('download', 26, 1.6);
   $('add-btn').firstElementChild.innerHTML = icon('plus', 18, 2.2);
   $('clear').firstElementChild.innerHTML = icon('trash', 12, 2.2);
@@ -1164,12 +1500,30 @@ function wire() {
     post('start', ids);
   });
 
-  $('clear').addEventListener('click', () => {
-    const ids = [...state.items.values()].filter((i) => !i.group_id && TERMINAL.has(i.status)).map((i) => i.id);
-    if (!ids.length) return;
-    if (!window.confirm(`Remove ${ids.length} completed item${ids.length === 1 ? '' : 's'} from the list?`)) return;
-    post('delete', ids);
+  // §4.7's one-call history clear, with `delete_file` pinned to false for the same reason the
+  // row delete pins it: the shipped page never removes a file from disk.
+  $('clear').addEventListener('click', async () => {
+    const n = [...state.items.values()].filter((i) => !i.group_id && TERMINAL.has(i.status)).length;
+    if (!n) return;
+    if (!window.confirm(`Remove ${n} completed item${n === 1 ? '' : 's'} from the list?`)) return;
+    try { await api('api/v2/items/clear', { method: 'POST', body: { where: 'done', delete_file: false } }); }
+    catch (e) { if (e.code !== 'unauthorized') toast('error', e.message); }
   });
+
+  $('subs-new').addEventListener('click', () => subFormOpen($('sub-form').hidden));
+  $('subs-check').addEventListener('click', subCheckAll);
+  $('sub-save').addEventListener('click', submitSub);
+  $('sub-url').addEventListener('input', () => subErr(''));
+  $('sub-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitSub(); } });
+  $('sub-type').addEventListener('change', (e) => { subAdd.download_type = e.target.value; subAdd.format = ''; renderSubForm(); refreshSubDirs(); });
+  $('sub-format').addEventListener('change', (e) => { subAdd.format = e.target.value; subAdd.quality = ''; renderSubForm(); });
+  $('sub-quality').addEventListener('change', (e) => { subAdd.quality = e.target.value; });
+  $('sub-codec').addEventListener('change', (e) => { subAdd.codec = e.target.value; });
+  $('sub-folder').addEventListener('change', (e) => { subAdd.folder = e.target.value; });
+
+  // "3 min ago" and "due in 12 min" go stale with no frame to announce it. One slow timer keeps
+  // every relative time honest; the render is diffed, so a tick with nothing to say writes no DOM.
+  setInterval(markDirty, 30000);
 
   $('show-older').addEventListener('click', async () => {
     const btn = $('show-older');
@@ -1245,6 +1599,6 @@ boot();
 // Test seam: the smoke suite reads these to assert state without scraping the DOM, and calls
 // `flushNow` to time one render tick without waiting on the frame clock.
 window.__aulos = {
-  state, rows, add, applyFrame, PREFIX,
+  state, rows, add, subRows, subAdd, applyFrame, PREFIX,
   flushNow() { if (rafId) { cancelAnimationFrame(rafId); rafId = 0; } flush(); },
 };

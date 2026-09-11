@@ -89,6 +89,37 @@
     <p class="empty-hd">Nothing in the queue</p>
     <p class="empty-sub">Paste a link above and it will appear here while it downloads.</p>
   </div>
+
+  <section class="sec" id="sec-subs" hidden aria-label="Subscriptions">
+    <div class="sec-hd">
+      <h2>Subscriptions</h2>
+      <div class="sec-acts">
+        <button class="link" id="subs-check" type="button" hidden>Check all</button>
+        <button class="link" id="subs-new" type="button" aria-expanded="false">Add</button>
+      </div>
+    </div>
+    <div class="card subform" id="sub-form" hidden>
+      <div class="add-row">
+        <div class="field url-field">
+          <span class="ico" id="sub-url-ico" aria-hidden="true"></span>
+          <input id="sub-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Channel or playlist link" placeholder="Channel or playlist link">
+        </div>
+        <button class="btn-primary" id="sub-save" type="button"><span class="btn-label">Subscribe</span></button>
+      </div>
+      <div class="subgrid">
+        <label class="xfield"><span class="label">Name</span><span class="field"><input id="sub-name" type="text" autocomplete="off" aria-label="Name" placeholder="Optional"></span></label>
+        <label class="xfield"><span class="label">Check every</span><span class="field"><input id="sub-every" type="number" min="1" step="1" inputmode="numeric" aria-label="Check interval in minutes"><span class="unit">min</span></span></label>
+        <label class="xfield"><span class="label">Type</span><span class="field sel"><select id="sub-type" aria-label="Download type"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+        <label class="xfield"><span class="label">Quality</span><span class="field sel"><select id="sub-quality" aria-label="Quality"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+        <label class="xfield"><span class="label">Format</span><span class="field sel"><select id="sub-format" aria-label="Format"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+        <label class="xfield" id="sub-codec-x"><span class="label">Codec</span><span class="field sel"><select id="sub-codec" aria-label="Codec"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+        <label class="xfield" id="sub-folder-x" hidden><span class="label">Folder</span><span class="field sel"><select id="sub-folder" aria-label="Folder"></select><span class="ico chevron" aria-hidden="true"></span></span></label>
+      </div>
+      <p class="add-err" id="sub-err" role="alert" hidden></p>
+    </div>
+    <div class="card list" id="rows-subs" hidden></div>
+    <p class="subs-empty" id="subs-empty" hidden>Nothing watched yet. Add a channel or playlist and new uploads arrive on their own.</p>
+  </section>
 </main>
 
 <div class="scrim" id="scrim" hidden></div>
