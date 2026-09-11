@@ -13,13 +13,15 @@ use axum::http::{HeaderName, HeaderValue, Method, header};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// The request headers a browser client may send (`Authorization` for the bearer token,
-/// `X-Request-Id` so a web client can correlate its own logs, `X-Aulos-Client` because PROTOCOL
-/// §1.3 promises that header can never make a request fail — a preflight rejection would).
-const ALLOWED_HEADERS: [HeaderName; 4] = [
+/// `X-Request-Id` so a web client can correlate its own logs, and `X-Aulos-Client` /
+/// `X-Aulos-Install` because PROTOCOL §1.3 promises neither header can make a request fail — a
+/// preflight rejection would).
+const ALLOWED_HEADERS: [HeaderName; 5] = [
     header::CONTENT_TYPE,
     header::AUTHORIZATION,
     crate::trace::REQUEST_ID,
     crate::v2::downloads::CLIENT_HEADER,
+    crate::v2::downloads::INSTALL_HEADER,
 ];
 
 /// The response headers a browser client must be able to read.
@@ -96,6 +98,15 @@ mod tests {
     fn a_star_and_a_list_both_install_one() {
         assert!(v2(&CorsOrigins::Any).is_some());
         assert!(v2(&CorsOrigins::List(vec!["https://a.test".into()])).is_some());
+    }
+
+    /// PROTOCOL §1.3 promises the two attribution headers can never make a request fail. From a
+    /// browser that promise *is* the preflight: a header outside `Access-Control-Allow-Headers`
+    /// never reaches the handler, so the page's add would fail before the server saw it.
+    #[test]
+    fn both_attribution_headers_survive_a_preflight() {
+        assert!(ALLOWED_HEADERS.contains(&crate::v2::downloads::CLIENT_HEADER));
+        assert!(ALLOWED_HEADERS.contains(&crate::v2::downloads::INSTALL_HEADER));
     }
 
     #[test]

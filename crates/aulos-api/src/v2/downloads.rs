@@ -59,6 +59,45 @@ pub const BATCH_FIELDS: [&str; 2] = ["items", "defaults"];
 /// it without ever changing what the server does with the header.
 pub const CLIENT_HEADER: HeaderName = HeaderName::from_static("x-aulos-client");
 
+/// `X-Aulos-Install` — *which installation* of that client is calling (PROTOCOL §1.3).
+///
+/// `X-Aulos-Client` says "the iOS app"; this says "the iPhone, not the iPad". The app mints one
+/// opaque id per install and sends it on every request, which is what lets a completion alert go
+/// to the device the download was started from instead of to every phone in the household
+/// (DESIGN §25.2, decision 42).
+pub const INSTALL_HEADER: HeaderName = HeaderName::from_static("x-aulos-install");
+
+/// The shortest install id accepted. Long enough that two households' ids colliding is not a thing
+/// to reason about, short enough that a hyphen-less UUID and a ULID both fit the range.
+const INSTALL_ID_MIN: usize = 8;
+
+/// The longest. Above any identifier a client has reason to mint, and low enough that the column
+/// it lands in stays sane.
+const INSTALL_ID_MAX: usize = 64;
+
+/// The `X-Aulos-Install` value, when it is one this server will key on (PROTOCOL §1.3).
+///
+/// 8 to 64 characters of `[A-Za-z0-9._-]`, surrounding whitespace trimmed. **Anything else is
+/// treated as absent, never as an error** — exactly like [`source_for_client`], a header a client
+/// got wrong must not turn a good add into a `400`. The caller then does what it would have done
+/// without the header, which on the add path is the same bare `SourceRef` an older app build has
+/// always produced.
+///
+/// The one place the same rule *is* a `400` is `install_id` in the `PUT api/v2/devices/{token}`
+/// body (PROTOCOL §4.8), which calls this and rejects a `None`: a registration is a field the app
+/// chose to send, not a header a proxy might have mangled, and a device stored under a wrong
+/// install would silently never be alerted.
+#[must_use]
+pub fn install_id(header: Option<&str>) -> Option<&str> {
+    let raw = header?.trim();
+    if !(INSTALL_ID_MIN..=INSTALL_ID_MAX).contains(&raw.len()) {
+        return None;
+    }
+    raw.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        .then_some(raw)
+}
+
 /// Which origin an add is attributed to, given the `X-Aulos-Client` value (PROTOCOL §1.3).
 ///
 /// This exists so notifications can route by origin (DESIGN §12.6, §25): a video added from the
@@ -97,9 +136,18 @@ pub async fn add(
 
     // One add path serves both the single and the batch body (`parse_batch` flattens them), so the
     // attribution is read once, here, and covers both.
-    let source = SourceRef::bare(source_for_client(
-        headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()),
-    ));
+    //
+    // `X-Aulos-Install` refines the iOS origin and only the iOS origin: `source.ref` is *the key*
+    // for the kind (DESIGN §4.4) — a chat id for Telegram, a subscription id for a check — and for
+    // `ios` it is the install the add came from. Every other kind keeps the bare source it had, so
+    // a browser that sends the header changes nothing.
+    let source = match (
+        source_for_client(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok())),
+        install_id(headers.get(INSTALL_HEADER).and_then(|v| v.to_str().ok())),
+    ) {
+        (SourceKind::Ios, Some(install)) => SourceRef::with_ref(SourceKind::Ios, install),
+        (kind, _) => SourceRef::bare(kind),
+    };
     let outcome = state
         .engine
         .add(requests, source)
@@ -586,6 +634,30 @@ mod tests {
         // A prefix is not a match: `iosx` is some other client.
         assert_eq!(source_for_client(Some("iosx")), SourceKind::ApiV2);
         assert_eq!(source_for_client(Some("android/1")), SourceKind::ApiV2);
+    }
+
+    /// PROTOCOL §1.3: 8–64 of `[A-Za-z0-9._-]`, trimmed, and **anything else is absent** — the
+    /// header can never be the reason an add fails.
+    #[test]
+    fn an_install_id_is_eight_to_sixty_four_safe_characters_or_nothing() {
+        assert_eq!(install_id(Some("7F3A1B2C")), Some("7F3A1B2C"));
+        assert_eq!(install_id(Some("  7F3A1B2C  ")), Some("7F3A1B2C"));
+        assert_eq!(
+            install_id(Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301")),
+            Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301")
+        );
+        assert_eq!(install_id(Some("a.b_c-d1")), Some("a.b_c-d1"));
+        assert_eq!(install_id(Some(&"a".repeat(8))).map(str::len), Some(8));
+        assert_eq!(install_id(Some(&"a".repeat(64))).map(str::len), Some(64));
+
+        // Absent, too short, too long, or carrying a character the column has no business holding.
+        assert_eq!(install_id(None), None);
+        assert_eq!(install_id(Some("")), None);
+        assert_eq!(install_id(Some("short7")), None);
+        assert_eq!(install_id(Some(&"a".repeat(65))), None);
+        assert_eq!(install_id(Some("has spaces here")), None);
+        assert_eq!(install_id(Some("semi;colon;here")), None);
+        assert_eq!(install_id(Some("éléphant-one")), None);
     }
 
     #[test]

@@ -140,6 +140,105 @@ async fn the_ios_client_header_attributes_the_add_to_the_phone() {
     .await;
 }
 
+/// PROTOCOL §1.3/§4.1: `X-Aulos-Install` puts the calling install into `source.ref` — but only
+/// alongside `X-Aulos-Client: ios/…`, and only when the value is one the server will key on.
+///
+/// This is what DESIGN §25.2 routes the alert and the push-to-start on, so it has to come back on
+/// the wire the same way a Telegram chat id does, and a malformed value has to be *absent* rather
+/// than a `400`: a proxy that mangles a header must not be able to break an add.
+#[tokio::test]
+async fn the_install_header_names_the_install_inside_the_ios_source() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+
+        let post = async |client: Option<&str>, install: Option<&str>, body: Value| {
+            let mut req = rig.http.post(rig.url("api/v2/downloads")).json(&body);
+            if let Some(client) = client {
+                req = req.header("X-Aulos-Client", client);
+            }
+            if let Some(install) = install {
+                req = req.header("X-Aulos-Install", install);
+            }
+            let response = req.send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 202);
+            response.json::<Value>().await.unwrap()
+        };
+        let source = async |body: &Value| {
+            rig.until_status(body["ids"][0].as_str().unwrap(), "queued")
+                .await["source"]
+                .clone()
+        };
+
+        // The phone: kind *and* ref.
+        let phone = post(
+            Some("ios/1.4.0 (77)"),
+            Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301"),
+            json!({ "url": YT, "auto_start": false }),
+        )
+        .await;
+        assert_eq!(
+            source(&phone).await,
+            json!({ "kind": "ios", "ref": "3F2504E0-4F89-11D3-9A0C-0305E82C3301" })
+        );
+
+        // A batch shares the add path, so every item in it carries the same install.
+        let batch = post(
+            Some("ios/1.4.0 (77)"),
+            Some("ipad.0001"),
+            json!({
+                "items": [
+                    { "url": "https://www.youtube.com/watch?v=inst-a" },
+                    { "url": "https://www.youtube.com/watch?v=inst-b" },
+                ],
+                "defaults": { "auto_start": false },
+            }),
+        )
+        .await;
+        for id in batch["ids"].as_array().unwrap() {
+            let item = rig.until_status(id.as_str().unwrap(), "queued").await;
+            assert_eq!(
+                item["source"],
+                json!({ "kind": "ios", "ref": "ipad.0001" }),
+                "{item}"
+            );
+        }
+
+        // A malformed or missing value is *absent*, never a 400 — the add still succeeds as the
+        // bare iOS source an older app build produces.
+        for (install, url) in [
+            (None, "https://www.youtube.com/watch?v=inst-none"),
+            (Some("short7"), "https://www.youtube.com/watch?v=inst-short"),
+            (
+                Some("has spaces!"),
+                "https://www.youtube.com/watch?v=inst-sp",
+            ),
+        ] {
+            let body = post(
+                Some("ios/1.4.0 (77)"),
+                install,
+                json!({ "url": url, "auto_start": false }),
+            )
+            .await;
+            assert_eq!(
+                source(&body).await,
+                json!({ "kind": "ios", "ref": null }),
+                "{install:?}"
+            );
+        }
+
+        // The header refines the iOS origin and nothing else: a web client sending it is `api_v2`
+        // with a null ref, exactly as before.
+        let web = post(
+            None,
+            Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301"),
+            json!({ "url": "https://www.youtube.com/watch?v=inst-web", "auto_start": false }),
+        )
+        .await;
+        assert_eq!(source(&web).await, json!({ "kind": "api_v2", "ref": null }));
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_batch_merges_defaults_under_each_item() {
     for_each_prefix(|prefix| async move {
