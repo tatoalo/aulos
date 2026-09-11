@@ -88,6 +88,71 @@ async fn a_device_registers_idempotently_and_deregisters_idempotently() {
     .await;
 }
 
+/// PROTOCOL §4.8's `install_id`: optional, the same shape as the `X-Aulos-Install` header
+/// (§1.3), `NULL` when absent, and a `400 validation_failed` when it is present and malformed.
+///
+/// It is what the notifier matches against an iOS item's `source.ref` (DESIGN §25.2), so it has to
+/// reach the store verbatim, and a repeat `PUT` has to be able to both set and clear it — the app
+/// re-registers on every launch and that call is the only thing that can correct a wrong value.
+#[tokio::test]
+async fn a_device_registers_the_install_it_belongs_to() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let path = format!("api/v2/devices/{}", token("ab"));
+        const INSTALL: &str = "3F2504E0-4F89-11D3-9A0C-0305E82C3301";
+
+        // Absent is NULL — an app build that predates the field registers exactly as before.
+        let (status, body) = put(&rig, &path, &registration(None)).await;
+        assert_eq!(status, 204, "{body}");
+        assert_eq!(
+            DeviceStore::devices(&rig.store).await.unwrap()[0].install_id,
+            None
+        );
+
+        // Present and well-formed reaches the store verbatim.
+        let mut with_install = registration(None);
+        with_install["install_id"] = json!(INSTALL);
+        let (status, body) = put(&rig, &path, &with_install).await;
+        assert_eq!(status, 204, "{body}");
+        let stored = DeviceStore::devices(&rig.store).await.unwrap();
+        assert_eq!(stored.len(), 1, "still keyed on the token: {stored:?}");
+        assert_eq!(stored[0].install_id.as_deref(), Some(INSTALL));
+
+        // An explicit null clears it, and so does leaving it out.
+        let mut cleared = registration(None);
+        cleared["install_id"] = Value::Null;
+        let (status, body) = put(&rig, &path, &cleared).await;
+        assert_eq!(status, 204, "{body}");
+        assert_eq!(
+            DeviceStore::devices(&rig.store).await.unwrap()[0].install_id,
+            None
+        );
+
+        // Malformed is a 400 naming the field — unlike the header, which is silently ignored. A
+        // device stored under a wrong install id would simply go quiet, weeks later, unlogged.
+        for bad in [
+            json!(""),
+            json!("short7"),
+            json!("a".repeat(65)),
+            json!("has spaces"),
+            json!(7),
+        ] {
+            let mut body = registration(None);
+            body["install_id"] = bad.clone();
+            let (status, response) = put(&rig, &path, &body).await;
+            assert_eq!(status, 400, "{bad}: {response}");
+            assert_eq!(response["error"]["code"], "validation_failed", "{bad}");
+            assert_eq!(response["error"]["field"], "install_id", "{bad}");
+        }
+        assert_eq!(
+            DeviceStore::devices(&rig.store).await.unwrap()[0].install_id,
+            None,
+            "a rejected registration wrote nothing"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_bundle_id_outside_apns_topic_is_refused() {
     // `bundle_id` becomes the `apns-topic` of every push to this device, so a free-form value

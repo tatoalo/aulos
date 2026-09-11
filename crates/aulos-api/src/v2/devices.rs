@@ -21,6 +21,8 @@
 //! `environment` outside the two gateways, a `bundle_id` that is not a reverse-DNS identifier — is
 //! a `400 validation_failed` naming the field, because a device registered under a wrong value
 //! would fail silently much later, inside APNs, as a `DeviceTokenNotForTopic` nobody is watching.
+//! `install_id` joins that list for the same reason with a quieter failure: a device stored under
+//! the wrong install id simply stops being alerted, weeks later, with nothing in any log.
 //!
 //! `bundle_id` is checked against **`APNS_TOPIC`** as well as against its shape. It becomes the
 //! `apns-topic` of every push to that device, so leaving it free-form lets any holder of
@@ -52,12 +54,13 @@ const APP_VERSION_MAX: usize = 64;
 const BUNDLE_ID_MAX: usize = 200;
 
 /// The keys `PUT api/v2/devices/{token}` knows.
-const DEVICE_FIELDS: [&str; 6] = [
+const DEVICE_FIELDS: [&str; 7] = [
     "platform",
     "bundle_id",
     "environment",
     "alerts",
     "live_activity_start_token",
+    "install_id",
     "app_version",
 ];
 
@@ -91,6 +94,7 @@ pub async fn register(
             parse_str("live_activity_start_token", value)?,
         )?),
     };
+    let install_id = parse_install_id(&root)?;
     let app_version = match root.get("app_version") {
         None | Some(Value::Null) => None,
         Some(value) => {
@@ -118,6 +122,7 @@ pub async fn register(
             environment,
             alerts,
             live_activity_start_token: start_token,
+            install_id,
             app_version,
             // On a repeat `PUT` the store keeps the `registered_at` it already has, so both
             // columns being "now" here is correct for the first registration and harmless after.
@@ -232,6 +237,35 @@ fn parse_token(field: &str, raw: &str) -> Result<Box<str>, ApiError> {
         ));
     }
     Ok(trimmed.to_ascii_lowercase().into_boxed_str())
+}
+
+/// The install this device belongs to: the same value the app sends as `X-Aulos-Install`
+/// (PROTOCOL §1.3, §4.8). Absent or `null` is `None`.
+///
+/// The shape is exactly [`crate::v2::downloads::install_id`]'s — one function, so the id a device
+/// registers under can never disagree with the id its adds carry. What differs is the verdict on a
+/// malformed value: the *header* is silently ignored (a proxy must not be able to break an add),
+/// while this **field** is a `400 validation_failed` like every other field on this route. The
+/// asymmetry is deliberate and is the module docs' rule — a device stored under a wrong install id
+/// would not fail here, it would go quiet weeks later with nobody watching.
+///
+/// # Errors
+/// `400 validation_failed` naming `install_id`.
+fn parse_install_id(root: &Map<String, Value>) -> Result<Option<Box<str>>, ApiError> {
+    match root.get("install_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = parse_str("install_id", value)?;
+            crate::v2::downloads::install_id(Some(raw))
+                .map(|id| Some(id.into()))
+                .ok_or_else(|| {
+                    ApiError::invalid(
+                        "install_id",
+                        "install_id must be 8-64 characters of [A-Za-z0-9._-]",
+                    )
+                })
+        }
+    }
 }
 
 /// The item id, as a ULID. It need not name an item that exists.
@@ -477,6 +511,47 @@ mod tests {
                 .expect("an extension of the topic"),
             "com.tatoalo.aulos.clip"
         );
+    }
+
+    /// `install_id` shares its shape with the `X-Aulos-Install` header (PROTOCOL §1.3) and its
+    /// *verdict* with every other field on this route: absent is `None`, malformed is a `400`.
+    #[test]
+    fn an_install_id_is_optional_but_never_silently_wrong() {
+        assert_eq!(parse_install_id(&object("{}")).expect("absent"), None);
+        assert_eq!(
+            parse_install_id(&object(r#"{"install_id":null}"#)).expect("null"),
+            None
+        );
+        assert_eq!(
+            parse_install_id(&object(r#"{"install_id":"  iphone.0001  "}"#))
+                .expect("trimmed")
+                .as_deref(),
+            Some("iphone.0001")
+        );
+        assert_eq!(
+            parse_install_id(&object(
+                r#"{"install_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301"}"#
+            ))
+            .expect("a UUID")
+            .as_deref(),
+            Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301")
+        );
+
+        for bad in [
+            json!({ "install_id": "" }),
+            json!({ "install_id": "short7" }),
+            json!({ "install_id": "a".repeat(65) }),
+            json!({ "install_id": "has spaces here" }),
+            json!({ "install_id": 42 }),
+        ] {
+            let map = match bad {
+                Value::Object(map) => map,
+                other => panic!("not an object: {other}"),
+            };
+            let err = parse_install_id(&map).expect_err("must be rejected");
+            assert_eq!(err.code, ErrorCode::ValidationFailed);
+            assert_eq!(err.field.as_deref(), Some("install_id"));
+        }
     }
 
     #[test]
