@@ -37,6 +37,14 @@ pub const DISMISSAL_AFTER_SECS: i64 = 900;
 /// How long an alert stays worth delivering, in seconds.
 pub const ALERT_TTL_SECS: i64 = 3600;
 
+/// How long after an update the widget should start calling its numbers stale, in seconds.
+///
+/// The server pushes a progress update every [`crate::notifier::PROGRESS_INTERVAL`] while an item
+/// is moving, so 45 s is nine missed pushes: long enough that a throttled or reordered delivery
+/// does not flicker, short enough that a VPN blip or a killed download stops the island from
+/// showing a confident number nobody is maintaining any more (DESIGN §25.4).
+pub const STALE_AFTER_SECS: i64 = 45;
+
 /// The seven-key `content-state` (DESIGN §25.4).
 ///
 /// `totalBytes` prefers the exact total and falls back to the estimate — `ItemView::total_bytes`
@@ -127,6 +135,14 @@ pub fn live_activity_start(view: &ItemView, now_secs: i64) -> Value {
 }
 
 /// The Live Activity **update** payload (`event: "update"`).
+///
+/// Two keys beyond the state, both Apple's own and both only on an update:
+///
+/// - `stale-date` ([`STALE_AFTER_SECS`] from now, unix seconds) is what makes the widget's
+///   `isStale` true on the device, so a stream that stopped renders as "waiting for the server"
+///   rather than as a percentage that has silently frozen;
+/// - `relevance-score` is the percent as a `0.0..=1.0` fraction, which is how iOS orders several
+///   live activities on the lock screen — the download closest to finishing sorts first.
 #[must_use]
 pub fn live_activity_update(view: &ItemView, now_secs: i64) -> Value {
     json!({
@@ -134,8 +150,16 @@ pub fn live_activity_update(view: &ItemView, now_secs: i64) -> Value {
             "timestamp": now_secs,
             "event": "update",
             "content-state": content_state(view),
+            "stale-date": now_secs + STALE_AFTER_SECS,
+            "relevance-score": relevance_score(view),
         }
     })
+}
+
+/// The `0.0..=1.0` fraction iOS sorts concurrent live activities by.
+#[must_use]
+pub fn relevance_score(view: &ItemView) -> f64 {
+    view.percent.clamp(0.0, 100.0) / 100.0
 }
 
 /// The Live Activity **end** payload (`event: "end"`), dismissed

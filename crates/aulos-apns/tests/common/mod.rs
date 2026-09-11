@@ -7,14 +7,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(dead_code)] // each test binary uses a different slice of the harness
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aulos_core::clock::FakeClock;
 use aulos_core::id::{ItemId, UnixMs};
 use aulos_core::item::{Item, ItemView, Kind, ViewExtras};
 use aulos_core::ports::{
-    ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord, PortError,
+    ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord, PortError, ProgressReader,
 };
 use aulos_core::progress::ProgressCell;
 use aulos_core::request::DownloadRequest;
@@ -215,6 +215,52 @@ impl ItemBuilder {
             Some(&self.cell),
             &self.extras,
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The progress reader port
+// ---------------------------------------------------------------------------
+
+/// A `HashMap` standing in for the aggregator's published snapshot.
+///
+/// The point is the same as [`FakeDeviceStore`]'s: `aulos-apns` reads live progress through
+/// `aulos_core::ports::ProgressReader`, so this whole directory needs neither `aulos-queue` nor an
+/// aggregator to prove the Live Activity numbers move.
+#[derive(Debug, Default)]
+pub struct FakeProgress {
+    views: Mutex<std::collections::HashMap<ItemId, Arc<ItemView>>>,
+    reads: AtomicUsize,
+}
+
+impl FakeProgress {
+    /// An empty snapshot.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Publishes (or replaces) one item's view.
+    pub fn publish(&self, view: Arc<ItemView>) {
+        self.views.lock().unwrap().insert(view.id, view);
+    }
+
+    /// Forgets one item, so the reader answers `None` for it.
+    pub fn forget(&self, id: ItemId) {
+        self.views.lock().unwrap().remove(&id);
+    }
+
+    /// How many times the notifier has pulled.
+    #[must_use]
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+impl ProgressReader for FakeProgress {
+    fn view(&self, id: ItemId) -> Option<Arc<ItemView>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.views.lock().unwrap().get(&id).map(Arc::clone)
     }
 }
 

@@ -65,11 +65,13 @@ pub use client::{
 pub use error::ApnsError;
 pub use health::{ApnsHealth, ApnsHealthHandle, COMPONENT, Counters};
 pub use jwt::{ProviderToken, REMINT_AFTER};
-pub use notifier::{ApnsNotifier, ID, PUSH_CONCURRENCY, UPDATE_INTERVAL, live_activity_topic};
+pub use notifier::{
+    ApnsNotifier, ID, PROGRESS_INTERVAL, PUSH_CONCURRENCY, UPDATE_INTERVAL, live_activity_topic,
+};
 
 // Re-exported so the wiring and a test harness have one `use` line for the port vocabulary this
 // crate shares with `aulos-store` and `aulos-api` (DESIGN §25.1).
 pub use aulos_core::event::Notifier;
 pub use aulos_core::ports::{
-    ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord, PortError,
+    ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord, PortError, ProgressReader,
 };

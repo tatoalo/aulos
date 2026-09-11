@@ -81,7 +81,9 @@ use aulos_core::config::Config;
 use aulos_core::event::{DomainEvent, Notifier};
 use aulos_core::id::ItemId;
 use aulos_core::item::ItemView;
-use aulos_core::ports::{ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord};
+use aulos_core::ports::{
+    ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord, ProgressReader,
+};
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::Status;
 use tokio::sync::{Semaphore, watch};
@@ -103,6 +105,16 @@ pub const ID: &str = "apns";
 /// could not change any decision, so one constant serves both. Overridable with
 /// [`ApnsNotifier::with_update_interval`], which exists so the tests are not two seconds long.
 pub const UPDATE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often a *progressing* item's Live Activity is refreshed from the progress reader, even
+/// though no event arrived (DESIGN §25.4).
+///
+/// A backgrounded app receives nothing but pushes, so without this the island freezes at whatever
+/// the last status change carried. Five seconds is twelve pushes a minute per activity, which is
+/// inside what Apple budgets for a `liveactivity` push type at priority 5, and slow enough that a
+/// download that is not moving costs no push at all: the timer re-reads, sees an identical view
+/// and sends nothing. Overridable with [`ApnsNotifier::with_progress_interval`] for the tests.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long the device-token → bundle-id map is reused.
 pub const DEVICE_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -190,8 +202,44 @@ impl ApnsNotifier {
                 tasks: Arc::new(watch::Sender::new(0)),
                 cancel: CancellationToken::new(),
                 update_interval: UPDATE_INTERVAL,
+                progress: None,
+                progress_interval: PROGRESS_INTERVAL,
             }),
         }
+    }
+
+    /// Injects the progress reader the Live Activity update path pulls its numbers from
+    /// (DESIGN §15.1, §25.4).
+    ///
+    /// Without it the notifier is exactly what it was: every `content-state` is built from the
+    /// event's own view, whose progress cell the engine leaves `None`, and the island only moves
+    /// when the status word does. With it, an update carries the published percent/speed/eta and
+    /// a progressing item keeps being refreshed on the [`PROGRESS_INTERVAL`] cadence while the app
+    /// is in the background.
+    ///
+    /// # Panics
+    /// If the notifier has already been shared — call it immediately after construction.
+    #[must_use]
+    pub fn with_progress(mut self, reader: Arc<dyn ProgressReader>) -> Self {
+        let shared = Arc::get_mut(&mut self.shared).unwrap_or_else(|| {
+            panic!("with_progress must be called before the notifier is shared")
+        });
+        shared.progress = Some(reader);
+        self
+    }
+
+    /// Replaces the progress cadence. Only the tests call this, for the same reason
+    /// [`Self::with_update_interval`] exists.
+    ///
+    /// # Panics
+    /// If the notifier has already been shared — call it immediately after construction.
+    #[must_use]
+    pub fn with_progress_interval(mut self, interval: Duration) -> Self {
+        let shared = Arc::get_mut(&mut self.shared).unwrap_or_else(|| {
+            panic!("with_progress_interval must be called before the notifier is shared")
+        });
+        shared.progress_interval = interval;
+        self
     }
 
     /// Replaces the Live Activity throttle window (and with it the registration cache lifetime).
@@ -329,6 +377,36 @@ pub fn live_activity_topic(bundle_id: &str) -> Arc<str> {
     Arc::from(format!("{bundle_id}{LIVE_ACTIVITY_TOPIC_SUFFIX}"))
 }
 
+/// The two statuses whose numbers move on their own, and which therefore deserve a pulled refresh.
+///
+/// `preparing` is deliberately out: nothing has a percent yet, so re-reading it every five seconds
+/// would push an identical `0 %` frame. `queued` is a paused or waiting item — the island should
+/// say so and then stop costing pushes.
+#[must_use]
+pub const fn is_progressing(status: Status) -> bool {
+    matches!(status, Status::Downloading | Status::Postprocessing)
+}
+
+/// Copies the transient progress fields of `from` onto `onto`, leaving every durable field alone.
+///
+/// The list is `ItemView`'s own transient set — exactly what the aggregator's `apply_progress`
+/// merges out of a `ProgressCell` — so a field added there and forgotten here shows up as a number
+/// that never moves on the island rather than as a compile error. That is the reason it is written
+/// out field by field instead of cloning the published view: `status`, `msg`, `error` and the
+/// group roll-up must stay the caller's.
+fn copy_progress(from: &ItemView, onto: &mut ItemView) {
+    onto.percent = from.percent;
+    onto.speed = from.speed;
+    onto.eta = from.eta;
+    onto.downloaded_bytes = from.downloaded_bytes;
+    onto.total_bytes = from.total_bytes;
+    onto.total_bytes_estimate = from.total_bytes_estimate;
+    onto.fragment_index = from.fragment_index;
+    onto.fragment_count = from.fragment_count;
+    onto.phase = from.phase;
+    onto.phase_percent = from.phase_percent;
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -352,6 +430,11 @@ struct Shared {
     cancel: CancellationToken,
     /// The Live Activity throttle window; also the registration cache lifetime.
     update_interval: Duration,
+    /// Where the live percent/speed/eta come from (DESIGN §15.1). `None` leaves the notifier on
+    /// the event's own view, which is what it was before this port existed.
+    progress: Option<Arc<dyn ProgressReader>>,
+    /// How often a progressing item is re-read from [`Shared::progress`].
+    progress_interval: Duration,
 }
 
 impl std::fmt::Debug for Shared {
@@ -611,6 +694,54 @@ impl Shared {
         self.counters.set_live_activities(total);
     }
 
+    // -- the progress reader -------------------------------------------------
+
+    /// The event's view with the freshest published progress merged over it (DESIGN §15.1).
+    ///
+    /// Only the transient numbers are taken. `status` stays the event's, because the event *is*
+    /// the authority on the transition it announces and the aggregator may not have applied it
+    /// yet — taking the snapshot's status wholesale here would push `downloading` over an item
+    /// that has just entered `postprocessing`.
+    ///
+    /// A group is left alone in practice as well as in principle: the engine already writes real
+    /// roll-up numbers onto a group view, and the snapshot computes them the same way, so the
+    /// merge is a no-op rather than a regression.
+    fn freshen(&self, view: &Arc<ItemView>) -> Arc<ItemView> {
+        let Some(reader) = &self.progress else {
+            return Arc::clone(view);
+        };
+        if !is_progressing(view.status) {
+            return Arc::clone(view);
+        }
+        // A terminal snapshot row belongs to a download that is already over; its numbers are the
+        // final ones and merging them under a `downloading` status would read as a finished bar.
+        let Some(live) = reader.view(view.id).filter(|v| !v.status.is_terminal()) else {
+            return Arc::clone(view);
+        };
+        let mut merged = (**view).clone();
+        copy_progress(&live, &mut merged);
+        Arc::new(merged)
+    }
+
+    /// The trailing-edge timer's own source of a new view, when nothing was pushed to it.
+    ///
+    /// `None` when there is no reader, when the item is not progressing any more (which is what
+    /// lets the cadence terminate) or when the published view is byte-for-byte what the item
+    /// already has pending — a stalled download must not cost a push every five seconds.
+    fn refreshed(&self, id: ItemId, track: &Track) -> Option<Arc<ItemView>> {
+        let reader = self.progress.as_ref()?;
+        if !track
+            .pending
+            .as_ref()
+            .is_some_and(|p| is_progressing(p.status))
+        {
+            return None;
+        }
+        reader
+            .view(id)
+            .filter(|live| track.pending.as_ref().is_none_or(|p| **p != **live))
+    }
+
     /// One pass over an item's throttle state, under one lock.
     ///
     /// `from_timer` says the caller is the trailing-edge task, which already owns
@@ -620,6 +751,11 @@ impl Shared {
         let st = &mut *guard;
         let Some(track) = st.items.get_mut(&id) else {
             return Step::default();
+        };
+        let incoming = match incoming {
+            Some(v) => Some(self.freshen(&v)),
+            None if from_timer => self.refreshed(id, track),
+            None => None,
         };
         if let Some(v) = incoming {
             track.pending = Some(v);
@@ -673,6 +809,12 @@ impl Shared {
             );
         }
 
+        // A progressing item with a live activity on it is never "done": the numbers keep moving
+        // and the app is not there to ask for them, so the timer comes back on the progress
+        // cadence to pull the next frame (DESIGN §25.4). It terminates the moment the item leaves
+        // the progressing statuses, or when `Completed`/`Removed` forgets the track entirely.
+        let keep_pulling =
+            self.progress.is_some() && !track.records.is_empty() && is_progressing(view.status);
         let arm = match next {
             // Someone still owes this view an update.
             Some(due) => {
@@ -684,6 +826,15 @@ impl Shared {
                 }
             }
             // Everybody is up to date: the trailing edge has been delivered.
+            None if keep_pulling => {
+                let due = now + self.progress_interval;
+                if from_timer || !track.timer_armed {
+                    track.timer_armed = true;
+                    Some(due)
+                } else {
+                    None
+                }
+            }
             None => {
                 track.pending = None;
                 if from_timer {

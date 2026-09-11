@@ -138,7 +138,7 @@ fn the_start_payload_carries_the_attributes_the_app_registers() {
 }
 
 #[test]
-fn the_update_payload_is_a_timestamp_an_event_and_the_state() {
+fn the_update_payload_carries_the_state_a_stale_date_and_a_relevance_score() {
     let view = ItemBuilder::new("x")
         .progress(50.0, Some(1.0), Some(2), Some(3), Some(4))
         .view();
@@ -152,11 +152,46 @@ fn the_update_payload_is_a_timestamp_an_event_and_the_state() {
                 "timestamp": now,
                 "event": "update",
                 "content-state": payload::content_state(&view),
+                // Unix seconds, as Apple documents `stale-date` — not milliseconds, and not a
+                // duration: the widget compares it against `Date.now`.
+                "stale-date": now + 45,
+                "relevance-score": 0.5,
             }
         })
     );
     let keys: Vec<&String> = update["aps"].as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 3, "nothing else may ride along: {keys:?}");
+    assert_eq!(keys.len(), 5, "nothing else may ride along: {keys:?}");
+}
+
+#[test]
+fn the_relevance_score_is_the_percent_as_a_fraction_and_never_leaves_the_unit_range() {
+    let at = |percent: f64| {
+        payload::relevance_score(
+            &ItemBuilder::new("x")
+                .progress(percent, None, None, None, None)
+                .view(),
+        )
+    };
+    assert!((at(0.0) - 0.0).abs() < f64::EPSILON);
+    assert!((at(37.5) - 0.375).abs() < f64::EPSILON);
+    assert!((at(100.0) - 1.0).abs() < f64::EPSILON);
+    // A provider that over-reports must not hand iOS a score it rejects.
+    assert!((at(140.0) - 1.0).abs() < f64::EPSILON);
+    assert!((at(-5.0) - 0.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn neither_the_start_nor_the_end_carries_a_stale_date() {
+    // A start is immediately followed by updates, and an end is the last word on the activity:
+    // marking either stale would put "waiting for the server" under a ring that is done.
+    let view = ItemBuilder::new("x").view();
+    for payload in [
+        payload::live_activity_start(&view, epoch_secs()),
+        payload::live_activity_end(&view, epoch_secs()),
+    ] {
+        assert_eq!(payload["aps"]["stale-date"], json!(null));
+        assert_eq!(payload["aps"]["relevance-score"], json!(null));
+    }
 }
 
 #[test]

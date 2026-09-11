@@ -10,7 +10,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aulos_apns::{ApnsClient, ApnsEnvironment, ApnsNotifier, DeviceStore, Notifier};
+use aulos_apns::{
+    ApnsClient, ApnsEnvironment, ApnsNotifier, DeviceStore, Notifier, ProgressReader,
+};
 use aulos_core::clock::Clock;
 use aulos_core::config::{RawEnv, load};
 use aulos_core::event::{DomainEvent, RemoveReason};
@@ -19,8 +21,8 @@ use aulos_core::id::ItemId;
 use aulos_core::source::SourceKind;
 use aulos_core::status::Status;
 use common::{
-    Call, FakeDeviceStore, ItemBuilder, TEST_BUNDLE_ID, TEST_KEY_ID, TEST_KEY_P8, TEST_TEAM_ID,
-    activity, clock, device, device_of_install,
+    Call, FakeDeviceStore, FakeProgress, ItemBuilder, TEST_BUNDLE_ID, TEST_KEY_ID, TEST_KEY_P8,
+    TEST_TEAM_ID, activity, clock, device, device_of_install,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::method;
@@ -35,9 +37,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// machine.
 const WINDOW: Duration = Duration::from_millis(300);
 
+/// The progress cadence the rig runs with — the same ratio to [`WINDOW`] that the shipped
+/// `PROGRESS_INTERVAL` has to `UPDATE_INTERVAL`, so a cadence assertion is not also a throttle
+/// assertion.
+const CADENCE: Duration = Duration::from_millis(750);
+
 struct Rig {
     server: MockServer,
     store: Arc<FakeDeviceStore>,
+    /// The published snapshot the notifier pulls live numbers from. Only wired into the notifier
+    /// by [`Rig::pulling_progress`]; the other rigs leave the notifier on the event's own view.
+    progress: Arc<FakeProgress>,
     notifier: ApnsNotifier,
 }
 
@@ -55,7 +65,16 @@ impl Rig {
         Self::build(200, json!({}), true).await
     }
 
+    /// A rig whose notifier reads live progress through the port (DESIGN §15.1, §25.4).
+    async fn pulling_progress() -> Self {
+        Self::assemble(200, json!({}), false, true).await
+    }
+
     async fn build(status: u16, body: Value, push_all: bool) -> Self {
+        Self::assemble(status, body, push_all, false).await
+    }
+
+    async fn assemble(status: u16, body: Value, push_all: bool, pull: bool) -> Self {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))
@@ -73,17 +92,23 @@ impl Rig {
         .with_base_url(&server.uri())
         .expect("base url")
         .with_backoff(vec![Duration::from_millis(1)]);
-        let notifier = ApnsNotifier::with_client(
+        let progress = FakeProgress::new();
+        let mut notifier = ApnsNotifier::with_client(
             client,
             TEST_BUNDLE_ID,
             Arc::clone(&store) as Arc<dyn DeviceStore>,
             clock_dyn,
             push_all,
         )
-        .with_update_interval(WINDOW);
+        .with_update_interval(WINDOW)
+        .with_progress_interval(CADENCE);
+        if pull {
+            notifier = notifier.with_progress(Arc::clone(&progress) as Arc<dyn ProgressReader>);
+        }
         Self {
             server,
             store,
+            progress,
             notifier,
         }
     }
@@ -1434,4 +1459,275 @@ async fn a_store_hiccup_at_completion_still_ends_a_non_ios_activity() {
             .contains(&Call::RemoveLiveActivitiesFor(id)),
         "and the rows are still swept"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Live progress, pulled from the published snapshot (DESIGN §15.1, §25.4)
+// ---------------------------------------------------------------------------
+
+/// The `content-state` of the update the gateway saw last.
+fn last_state(bodies: &[Value]) -> &Value {
+    &bodies.last().expect("at least one update")["aps"]["content-state"]
+}
+
+/// Long enough for one spawned push to reach the local gateway.
+///
+/// `quiesce` is not available to these tests: a progressing item with a live activity on it keeps
+/// a trailing-edge timer armed on purpose, so the task set is never empty and waiting for it to be
+/// would hang for ever — which is exactly the property the cadence tests assert.
+async fn settle() {
+    tokio::time::sleep(WINDOW / 2).await;
+}
+
+#[tokio::test]
+async fn an_update_carries_the_published_percent_not_the_events_zero() {
+    // The bug this pins: `Engine::view` builds every `StatusChanged` view with a `None` progress
+    // cell, so `ItemView::percent` is 0.0 for every non-group item until it finishes. The island
+    // read that view and sat at 0 % for the whole download.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress.publish(
+        base.clone()
+            .progress(42.5, Some(2_100_000.0), Some(68), Some(123), Some(456))
+            .view(),
+    );
+
+    // The event carries the engine's view: percent 0, every byte counter null.
+    assert_eq!(base.view().percent, 0.0, "the event view really is empty");
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    settle().await;
+
+    let bodies = rig.bodies().await;
+    let state = last_state(&bodies);
+    assert_eq!(state["percent"], json!(42.5));
+    assert_eq!(state["speed"], json!(2_100_000.0));
+    assert_eq!(state["eta"], json!(68));
+    assert_eq!(state["downloadedBytes"], json!(123));
+    assert_eq!(state["totalBytes"], json!(456));
+    assert_eq!(
+        bodies.last().expect("a body")["aps"]["relevance-score"],
+        json!(0.425),
+        "the score follows the pulled percent, not the event's"
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_status_word_is_the_events_even_when_the_snapshot_lags_behind() {
+    // The aggregator applies the same event asynchronously, so the snapshot can still say
+    // `downloading` when the item has just entered `postprocessing`. Taking the snapshot's status
+    // wholesale would push the stale word; only the numbers are pulled.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress
+        .publish(base.clone().progress(90.0, None, None, None, None).view());
+
+    let pp = base.clone().status(Status::Postprocessing);
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Postprocessing, &pp))
+        .await;
+    settle().await;
+
+    let bodies = rig.bodies().await;
+    let state = last_state(&bodies);
+    assert_eq!(state["status"], json!("postprocessing"), "the event's word");
+    assert_eq!(state["percent"], json!(90.0), "the snapshot's numbers");
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_downloading_item_keeps_moving_with_no_events_at_all() {
+    // The whole point of the cadence: a backgrounded app receives nothing but pushes, and the
+    // engine publishes no event per progress frame. Without the pull the island freezes at the
+    // number the last status change carried.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    let frame = |percent: f64| {
+        base.clone()
+            .progress(percent, None, None, None, None)
+            .view()
+    };
+
+    rig.progress.publish(frame(10.0));
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    settle().await;
+    assert_eq!(last_state(&rig.bodies().await)["percent"], json!(10.0));
+
+    // Not one further event — only the snapshot moves.
+    for percent in [25.0, 50.0] {
+        rig.progress.publish(frame(percent));
+        tokio::time::sleep(CADENCE + CADENCE / 3).await;
+        assert_eq!(
+            last_state(&rig.bodies().await)["percent"],
+            json!(percent),
+            "the trailing-edge timer re-read the snapshot"
+        );
+    }
+
+    for body in rig.bodies().await {
+        assert_eq!(body["aps"]["event"], json!("update"));
+        assert!(
+            body["aps"]["stale-date"].is_i64(),
+            "every update tells the widget when to stop trusting it"
+        );
+    }
+    assert_eq!(
+        aulos_apns::PROGRESS_INTERVAL,
+        Duration::from_secs(5),
+        "the shipped cadence; the rig shortens it only for the test"
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stalled_download_costs_no_push_while_the_timer_keeps_watching() {
+    // A download whose numbers stop moving must not cost a push every cadence: the pulled view is
+    // compared against what the item already has pending, and an identical one is not a frame.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress
+        .publish(base.clone().progress(30.0, None, None, None, None).view());
+
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    settle().await;
+    let after_first = rig.requests().await.len();
+    assert_eq!(after_first, 1);
+
+    tokio::time::sleep(CADENCE * 3).await;
+    assert_eq!(
+        rig.requests().await.len(),
+        after_first,
+        "nothing changed, so nothing was sent"
+    );
+    let reads = rig.progress.reads();
+    assert!(reads >= 3, "but it kept looking: {reads} reads");
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn leaving_the_progressing_statuses_ends_the_cadence() {
+    // The cadence has to terminate on its own, not only when `Completed` forgets the item: a
+    // paused download that kept a timer alive for ever would be one leaked task per pause.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress
+        .publish(base.clone().progress(60.0, None, None, None, None).view());
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    tokio::time::sleep(CADENCE / 3).await;
+    assert_eq!(rig.notifier.in_flight(), 1, "the timer owns the item");
+
+    // The user paused it: the snapshot says `queued`, which is not a progressing status.
+    rig.progress.publish(
+        base.clone()
+            .status(Status::Queued)
+            .progress(60.0, None, None, None, None)
+            .view(),
+    );
+    tokio::time::sleep(CADENCE * 3).await;
+    assert_eq!(
+        rig.notifier.in_flight(),
+        0,
+        "the trailing-edge timer finished rather than spinning"
+    );
+    let settled = rig.requests().await.len();
+    tokio::time::sleep(CADENCE * 2).await;
+    assert_eq!(rig.requests().await.len(), settled, "and it stays stopped");
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn completing_an_item_stops_its_cadence_and_still_ends_the_activity() {
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress
+        .publish(base.clone().progress(80.0, None, None, None, None).view());
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+
+    let done = base.clone().status(Status::Finished);
+    rig.progress.forget(id);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    tokio::time::sleep(CADENCE * 3).await;
+
+    assert_eq!(rig.notifier.in_flight(), 0);
+    let events: Vec<Value> = rig
+        .bodies()
+        .await
+        .into_iter()
+        .map(|b| b["aps"]["event"].clone())
+        .collect();
+    assert!(events.contains(&json!("end")), "{events:?}");
+    assert!(
+        rig.store
+            .calls()
+            .contains(&Call::RemoveLiveActivitiesFor(id))
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_group_keeps_the_engines_roll_up_when_the_snapshot_has_nothing() {
+    // Groups already carry real numbers on the event (`Engine::view` overwrites them from the
+    // `GroupAcc`), and the pull must never replace them with zeroes.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let group = ItemBuilder::new("Season 1")
+        .status(Status::Downloading)
+        .group(3, 12)
+        .progress(25.0, Some(1_000.0), Some(300), Some(10), None);
+    let id = group.item_id();
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &group))
+        .await;
+    settle().await;
+
+    let bodies = rig.bodies().await;
+    assert_eq!(last_state(&bodies)["percent"], json!(25.0));
+    assert_eq!(last_state(&bodies)["speed"], json!(1_000.0));
+    rig.notifier.shutdown().await;
 }
