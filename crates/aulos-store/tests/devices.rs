@@ -20,6 +20,7 @@ fn device(seed: char, environment: ApnsEnvironment) -> DeviceRecord {
         environment,
         alerts: true,
         live_activity_start_token: None,
+        install_id: None,
         app_version: Some("1.0.0 (3)".into()),
         registered_at: 1_757_000_000_000,
         last_seen_at: 1_757_000_000_000,
@@ -60,6 +61,7 @@ async fn a_repeat_registration_refreshes_every_field_but_registered_at() {
         environment: ApnsEnvironment::Production,
         alerts: false,
         live_activity_start_token: Some(token('b')),
+        install_id: Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301".into()),
         app_version: Some("1.1.0 (9)".into()),
         registered_at: 1_999_999_999_999,
         last_seen_at: 1_757_000_600_000,
@@ -76,6 +78,48 @@ async fn a_repeat_registration_refreshes_every_field_but_registered_at() {
             ..again
         },
         "everything but registered_at, which keeps saying when the token was first seen"
+    );
+}
+
+/// Migration `0004`: `devices.install_id` round-trips, and `NULL` is a first-class value.
+///
+/// It is the routing key the APNs notifier matches against `Item.source.ref` (DESIGN §25.2), so
+/// "the column exists" is not the assertion — "what went in comes back out, and clearing it
+/// clears it" is. `None` is an app build that predates `X-Aulos-Install` and must stay
+/// distinguishable from an empty string.
+#[tokio::test]
+async fn an_install_id_round_trips_and_can_be_cleared() {
+    let h = support::harness();
+    let phone = DeviceRecord {
+        install_id: Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301".into()),
+        ..device('a', ApnsEnvironment::Sandbox)
+    };
+    let legacy = device('b', ApnsEnvironment::Production);
+    h.store.upsert_device(phone.clone()).await.unwrap();
+    h.store.upsert_device(legacy.clone()).await.unwrap();
+
+    let stored = DeviceStore::devices(&h.store).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|d| d.install_id.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301"), None],
+        "a registration that named its install, and one from a build that could not: {stored:?}"
+    );
+
+    // The app signing out of push and back in re-registers with no install id; the column follows.
+    h.store
+        .upsert_device(DeviceRecord {
+            install_id: None,
+            ..phone.clone()
+        })
+        .await
+        .unwrap();
+    let stored = DeviceStore::devices(&h.store).await.unwrap();
+    assert_eq!(
+        stored[0].install_id, None,
+        "a repeat PUT clears it: {stored:?}"
     );
 }
 

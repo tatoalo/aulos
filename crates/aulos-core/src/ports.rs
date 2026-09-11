@@ -214,6 +214,13 @@ pub struct DeviceRecord {
     pub alerts: bool,
     /// The Live Activity push-to-start token, when offered.
     pub live_activity_start_token: Option<Box<str>>,
+    /// Which installation of the app this device is, when it reported one (`X-Aulos-Install`,
+    /// PROTOCOL §1.3, §4.8).
+    ///
+    /// It is matched against `Item.source.ref` to route an alert or a Live Activity start to the
+    /// install a download was added from rather than to every device in the household
+    /// (DESIGN §25.2). `None` is an app build that predates the field, and matches every item.
+    pub install_id: Option<Box<str>>,
     /// Free-form app version string, for logs.
     pub app_version: Option<Box<str>>,
     /// When the token was first registered.

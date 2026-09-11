@@ -8,7 +8,7 @@ CREATE TABLE devices (
   app_version               TEXT,
   registered_at             INTEGER NOT NULL,
   last_seen_at              INTEGER NOT NULL
-) STRICT;
+, install_id TEXT) STRICT;
 CREATE TABLE items (
   id                  TEXT    PRIMARY KEY,
   kind                TEXT    NOT NULL CHECK (kind IN ('item','group')),

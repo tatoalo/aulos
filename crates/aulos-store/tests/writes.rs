@@ -390,6 +390,7 @@ async fn every_write_op_round_trips_through_a_typed_read() {
         environment: ApnsEnvironment::Sandbox,
         alerts: true,
         live_activity_start_token: Some("c3d4".repeat(8).into()),
+        install_id: Some("3F2504E0-4F89-11D3-9A0C-0305E82C3301".into()),
         app_version: Some("1.0.0 (3)".into()),
         registered_at: 1_757_000_000_000,
         last_seen_at: 1_757_000_000_000,

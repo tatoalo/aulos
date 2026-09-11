@@ -1,0 +1,17 @@
+-- 0004 — `devices.install_id`: which installation of the app a registration belongs to
+-- (PROTOCOL §1.3, §4.8; DESIGN §25.2, decision 42).
+--
+-- `devices.token` says *which device*; this says *which install*, and the two are not the same
+-- question. A household runs one app on a phone and on an iPad, both registered, both wanting
+-- alerts — and an item added from the phone carries that install's id in `items.source_json`'s
+-- `ref`. Matching the two is what keeps the iPad silent for a download nobody started on it.
+--
+-- Nullable, and null is not "no install" but "an app build that predates the field". The notifier
+-- reads a null here, or a null `source.ref`, as "every alerting device", which is exactly the
+-- fan-out that shipped before this column existed — so an upgrade that only touches the server
+-- changes nothing until the app starts sending `X-Aulos-Install`.
+--
+-- No index: nothing queries by it. The notifier's one read is the whole table (a household's
+-- phones and tablets, single digits) and the match happens in Rust, next to the `APNS_PUSH_ALL`
+-- and `alerts` tests it shares a filter with.
+ALTER TABLE devices ADD COLUMN install_id TEXT;

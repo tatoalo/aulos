@@ -249,13 +249,70 @@ async fn the_backfill_leaves_a_failed_row_its_message() {
     );
 }
 
+/// Migration `0004` is additive: a database a pre-`install_id` build wrote keeps its registrations
+/// across the upgrade, and every one of them reads `NULL` (DESIGN §25.2, PROTOCOL §4.8).
+///
+/// That `NULL` is load-bearing rather than incidental — the notifier reads it as "this device
+/// predates `X-Aulos-Install`", which is what keeps a server upgraded ahead of the app pushing
+/// exactly as it did before. A migration that dropped and recreated the table would have silently
+/// deregistered every device in the household instead.
+#[tokio::test]
+async fn the_install_id_column_is_added_to_a_database_that_already_has_devices() {
+    use aulos_core::{ApnsEnvironment, DeviceRecord, DeviceStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(support::options(dir.path())).unwrap();
+    let token: Box<str> = "a1b2".repeat(16).into();
+    store
+        .upsert_device(DeviceRecord {
+            token: token.clone(),
+            platform: "ios".into(),
+            bundle_id: "com.tatoalo.aulos".into(),
+            environment: ApnsEnvironment::Sandbox,
+            alerts: true,
+            live_activity_start_token: None,
+            install_id: None,
+            app_version: Some("1.0.0 (3)".into()),
+            registered_at: 1_757_000_000_000,
+            last_seen_at: 1_757_000_000_000,
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+
+    // Rewind to the schema `0003` left: the row stays, the column goes.
+    let conn = Connection::open(support::db_path(dir.path())).unwrap();
+    conn.execute_batch("ALTER TABLE devices DROP COLUMN install_id")
+        .unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
+    drop(conn);
+
+    let upgraded = Store::open(support::options(dir.path())).unwrap();
+    let stored = DeviceStore::devices(&upgraded).await.unwrap();
+    assert_eq!(stored.len(), 1, "the registration survived: {stored:?}");
+    assert_eq!(stored[0].token, token);
+    assert_eq!(
+        stored[0].install_id, None,
+        "an app build that never sent one reads NULL, not an empty string"
+    );
+    assert_eq!(
+        upgraded
+            .meta()
+            .await
+            .unwrap()
+            .get("schema_version")
+            .map(std::convert::AsRef::as_ref),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+}
+
 /// Rewinds an already-migrated file to the state migration `0001` left it in.
 ///
 /// `user_version` alone is not enough and has not been since `0003`: rolling the counter back on a
 /// file that still carries the later migrations' tables makes the next `to_latest` re-run their
 /// DDL and fail with "table devices already exists". A test that wants a pre-`0002` database has
-/// to undo what came after it, so this drops `0003`'s objects too. **Every migration that creates
-/// DDL adds its undo here.**
+/// to undo what came after it, so this drops `0003`'s objects too — and with them `0004`'s column,
+/// which lives on `0003`'s table. **Every migration that creates DDL adds its undo here.**
 fn rewind_to_0001(conn: &Connection) {
     conn.execute_batch(
         "DROP INDEX IF EXISTS devices_start_token; \

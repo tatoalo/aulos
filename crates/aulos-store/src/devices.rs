@@ -27,7 +27,7 @@ use crate::ops::{Durability, WriteOp};
 
 /// The column list every `devices` read shares, in the order [`row_to_device`] expects.
 const DEVICE_COLUMNS: &str = "token, platform, bundle_id, environment, alerts, \
-     live_activity_start_token, app_version, registered_at, last_seen_at";
+     live_activity_start_token, install_id, app_version, registered_at, last_seen_at";
 
 /// The column list every `live_activities` read shares.
 const ACTIVITY_COLUMNS: &str = "device_token, item_id, update_token, environment, registered_at";
@@ -57,9 +57,10 @@ fn row_to_device(row: &Row<'_>) -> Result<DeviceRecord, StoreError> {
         environment: environment_from_str(&environment, "devices.environment")?,
         alerts: row.get::<_, i64>(4)? != 0,
         live_activity_start_token: row.get::<_, Option<String>>(5)?.map(String::into_boxed_str),
-        app_version: row.get::<_, Option<String>>(6)?.map(String::into_boxed_str),
-        registered_at: row.get(7)?,
-        last_seen_at: row.get(8)?,
+        install_id: row.get::<_, Option<String>>(6)?.map(String::into_boxed_str),
+        app_version: row.get::<_, Option<String>>(7)?.map(String::into_boxed_str),
+        registered_at: row.get(8)?,
+        last_seen_at: row.get(9)?,
     })
 }
 
@@ -100,18 +101,20 @@ pub(crate) fn apply(conn: &Connection, op: &WriteOp, _now: UnixMs) -> Result<boo
             // Every column but `registered_at` is refreshed: a repeat `PUT` is the app telling the
             // server "this token is still mine, and here is what has changed about it" — a new
             // Live Activity start token after an iOS restart, a new build's `app_version`, the
-            // alerts switch flipped in Settings. `registered_at` keeps saying when the token was
-            // first seen, which is the only thing a repeat cannot know.
+            // alerts switch flipped in Settings, the install id once the app learns to send one.
+            // `registered_at` keeps saying when the token was first seen, which is the only thing
+            // a repeat cannot know.
             conn.prepare_cached(
                 "INSERT INTO devices (token, platform, bundle_id, environment, alerts, \
-                 live_activity_start_token, app_version, registered_at, last_seen_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 live_activity_start_token, install_id, app_version, registered_at, last_seen_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
                  ON CONFLICT(token) DO UPDATE SET \
                    platform                  = excluded.platform, \
                    bundle_id                 = excluded.bundle_id, \
                    environment               = excluded.environment, \
                    alerts                    = excluded.alerts, \
                    live_activity_start_token = excluded.live_activity_start_token, \
+                   install_id                = excluded.install_id, \
                    app_version               = excluded.app_version, \
                    last_seen_at              = excluded.last_seen_at",
             )?
@@ -122,6 +125,7 @@ pub(crate) fn apply(conn: &Connection, op: &WriteOp, _now: UnixMs) -> Result<boo
                 device.environment.as_str(),
                 i64::from(device.alerts),
                 device.live_activity_start_token.as_deref(),
+                device.install_id.as_deref(),
                 device.app_version.as_deref(),
                 device.registered_at,
                 device.last_seen_at,
