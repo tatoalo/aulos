@@ -2678,3 +2678,42 @@ left open.
   time so the suite needs no `openssl` binary. `crates/aulos-server/tests/server.rs` references that
   same fixture rather than checking in a second one. **If CI ever grows a secret scanner, that path
   needs an allowlist entry.**
+
+## Web — subscriptions panel and delete safety (2026-09-11)
+
+The web half of design D3 and D6 (`docs/superpowers/specs/2026-09-11-origin-routing-progress-subscriptions-design.md`).
+Page only — `crates/aulos-api/web/`, `tools/web/` and the CI budget line. No Rust changed.
+
+- **`delete` and `Clear` now pin `"delete_file": false`** (D3). The row delete and the overflow
+  menu's delete add the key in `post()`, so it rides on every `POST api/v2/items/actions` whose
+  action is `delete` and on no other action. `Clear` **changed route**: it was `delete` with a
+  client-built id list, and is now `POST api/v2/items/clear {"where":"done","delete_file":false}` —
+  §4.7's one-call counterpart, which is what the D3 wording names. The server needs nothing:
+  `DELETE_FILE_ON_TRASHCAN` and the `delete_file` parameter stay for curl/API users, the page just
+  stops inheriting them. **PROTOCOL still lacks the one-line note D3 asks for** that the shipped
+  clients never send `true`; that edit belongs with whoever owns the doc in this round.
+- **The Subscriptions panel is the last section of `main`**, below the queue and its empty state,
+  and it is hidden unless `capabilities.features` lists `subscriptions` — an older server gets no
+  panel rather than four routes that 404.
+- **Its picker is the generic capabilities ladder, not the per-URL catalog.** The add bar refines
+  its ladder from `GET api/v2/catalog?url=` as you type; a subscription is a standing order whose
+  future items have no URL yet, so the form is built from `pickerFromCapabilities` and keeps its own
+  selection (`subAdd`). `currentType`/`currentFormat` were generalised to `typeIn`/`formatIn`/
+  `clampSel` over a (picker, selection) pair so both share one clamp.
+- **Relative times re-render on a 30 s `setInterval(markDirty)`.** "checked 3 min ago" and "due in
+  57 min" are the only strings on the page that go wrong with no frame to correct them. The render
+  is diffed, so a tick with nothing to say writes no DOM — and the queue's own `finished_at` line
+  gets the same correction for free.
+- **REST answers are applied, not just awaited.** `POST`/`PATCH` return the whole `Subscription`
+  (§9), so the row moves before the `subscription` frame arrives; the toggle is optimistic and
+  reverts itself if the PATCH fails. The inline editor's inputs are written only when it opens, so
+  a frame landing mid-edit cannot overwrite what is being typed.
+- **The budget in `ci.yml` went 71680 → 98304 (96 KB)**, as D6 asked. `app.js` + `app.css` is
+  **89 207 bytes**, ~9 KB under. The page is still dependency-free, unbundled and embedded.
+- **The mock gained the five subscription routes, `items/clear`, and a scripted `subscription`
+  life cycle** (created → checking → checked → removed) on the existing 250 ms ticker. Three
+  subscriptions seed the snapshot, covering healthy / disabled / failing.
+- **Known flake, pre-existing:** `50 active rows and 20 deltas stay inside the frame budget`
+  asserts no `longtask` over 50 ms, and fails intermittently on a loaded machine. It was verified to
+  fail the same way on unmodified `main` (1 in 4 runs there, 2 in 6 with the panel), so the panel is
+  not the cause — but the assertion is a wall-clock gate on shared hardware and will keep doing this.

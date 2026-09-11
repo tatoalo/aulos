@@ -72,6 +72,23 @@ And the geometry, which is as much of the identity as the colour is:
 | Phone: 44 px minimum target, everywhere | segmented control, chips, selects, the row chevron (44 px with a `-12px` margin so it does not grow the row), the text buttons, and the 51×31 switch drawn as a `::before` inside a 44 px button |
 | Phone: sheet with a grab handle, grouped rows, a full-width action button | `.sheet` / `.grab` / `.grp` / `.rowset` / `.btn-block` |
 
+### The Subscriptions panel has no artboard
+
+It was added after the boards were drawn (design D6), so it is the one surface with no still frame
+to check against. It introduces **no new token**: it is the same `.card` list, the same 32 px
+`.disc` (spinning while `checking`, `--err`-tinted on a failure), the same `.st`/`.rest` secondary
+line, the same `.sw` switch the add sheet uses, and the same 4/8/12/16 spacing. What is new is
+markup, and only four names:
+
+| Class | What it is |
+|---|---|
+| `.sec-acts` | the two header links of a section that has more than one (`Check all`, `Add`) |
+| `.subform` / `.subgrid` | the add form's card and its wrapping field grid — `.subgrid` rather than `.add-extra` because the phone layout hides that one |
+| `.subedit` / `.edit-acts` | the inline name/interval editor that unfolds under a row |
+| `.btn-sm` | a 36 px flat-accent button (44 px on a phone), for `Save` inside that editor |
+
+If the panel ever earns a redesign, draw the board first — the rule above still holds.
+
 ## Keeping them honest
 
 Nothing mechanically diffs the artboards against the page — a pixel gate on a hand-drawn board is a
