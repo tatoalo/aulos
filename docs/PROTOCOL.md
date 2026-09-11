@@ -1290,6 +1290,21 @@ The push envelopes themselves are APNs concerns rather than protocol ones (`even
 `update` or `end`; the `end` push carries a `dismissal-date`), and the attributes a `start` push
 declares are `AulosDownloadAttributes` with `itemId`, `url` and `title`.
 
+Two Apple-side keys ride on an **`update`** envelope and nowhere else. They are not this protocol's
+wire fields — iOS consumes them before your code sees the payload — but an app's widget is written
+against them, so they are named here:
+
+- **`stale-date`**, unix seconds, `now + 45`. iOS flips `ActivityViewContext.isStale` at that
+  instant; a widget should then render a muted "waiting for the server" state instead of a number
+  it can no longer vouch for. The server refreshes a moving download about every five seconds, so
+  a stale activity means nine frames in a row did not land.
+- **`relevance-score`**, `0.0`–`1.0`, the item's `percent / 100`. iOS orders concurrent live
+  activities by it, so the download closest to finishing sorts first.
+
+An `update` carries the freshest progress the server has published for the item, not the numbers
+that happened to accompany a status change — a download whose status has not moved for a minute
+still reports a moving `percent`.
+
 ---
 
 ## 5. WebSocket

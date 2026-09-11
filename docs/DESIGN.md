@@ -3286,6 +3286,15 @@ Rules, each one load-bearing:
   queue (`removed` frame) does leave the board.
 - Only the *body* is compared against `last_rendered`; the `updated HH:MM:SS` footer moves every
   tick and would otherwise make every tick a change.
+- **The numbers on a live row are pulled, not pushed.** Progress never arrives as a `DomainEvent` —
+  the engine builds every `StatusChanged` view with a `None` progress cell (§15.2.1) — so a board
+  driven by events alone showed `0%` from the first tick to the last. Each 1 Hz pass refreshes the
+  `percent`, `speed`, `eta` and group roll-up of every row that is `downloading` or
+  `postprocessing` from the `ProgressReader` port, and raises the dirty flag **only when the
+  rendered body changed**. The 3 s per-chat limiter and the byte-identical skip are therefore still
+  what decide what leaves the process: a progressing board redraws about every 3 s with a real bar,
+  a stalled one costs no API call at all. A terminal row is the user's receipt and is never
+  rewritten, whatever the snapshot still holds for it.
 - **Retirement.** 60 s after the last job ends the board takes one final edit — the same rows,
   header `✅ All done — {n} finished` plus `, {n} failed` / `, {n} canceled` when non-zero, and
   **no `updated` footer**, because the message has stopped being live — and the actor forgets it,
@@ -4087,6 +4096,37 @@ aggregator.
 Serving 500 items to a connecting client is therefore ~30 µs and **zero** database round trips.
 This is the graft that keeps connect-to-list latency flat as history grows.
 
+#### 15.2.1 The snapshot is also what the *subscribers* read progress from
+
+`Engine::view` projects a row with a **`None` progress cell**, on purpose: progress lives in the
+aggregator, which merges its own cells over the engine's view before diffing. So every
+`DomainEvent::StatusChanged` carries a view whose `percent` is `0.0` (§4.6: `Finished` is exactly
+`100.0`, `Error`/`Canceled` keep the last value, everything else takes the cell's value or `0.0`
+when there is no cell), and a group is the only kind whose numbers the engine itself overwrites
+from its `GroupAcc`.
+
+A `Notifier` therefore cannot learn a plain item's percent from the events it receives. The two
+that draw a live surface — the Telegram board (§12.4) and the APNs Live Activity (§25.4) — **pull**
+it instead, through one port declared in `aulos-core`:
+
+```rust
+pub trait ProgressReader: Send + Sync + std::fmt::Debug {
+    fn view(&self, id: ItemId) -> Option<Arc<ItemView>>;
+}
+impl ProgressReader for aulos_queue::StateView { /* self.load().get(id).cloned() */ }
+```
+
+- **A port, not a type.** `aulos-apns` may depend on `aulos-core` and nothing else in the workspace
+  (§3, and `aulos-workspace-tests` enforces it), so `StateView` cannot appear in its signatures.
+- **A pull, not a push.** Publishing a `DomainEvent` per progress frame was rejected: the
+  `EventRouter`'s per-subscriber queues are `DropNewest` (§2.2.1), so a progress flood can evict a
+  `Completed` — losing the one event that ends a Live Activity and posts the board's ✅. A read is
+  one `ArcSwap` load and cannot evict anything.
+- **`None` is a real answer**: the snapshot does not carry the item (never published, or aged out
+  of the `done` window), and the caller keeps whatever view it already has.
+- Wiring injects it after step 12, which is the first moment a snapshot exists; before that the
+  two subscribers hold `None` and behave exactly as they did before the port existed.
+
 ### 15.3 EventHub, `seq`, and the replay ring
 
 ```rust
@@ -4310,7 +4350,7 @@ the one condition that makes the service useless. The Docker `HEALTHCHECK` uses 
                       "phase":"pre_terminal" },
     "events":       { "status":"ok", "dropped":{"hooks":0,"telegram":0,"apns":0} },
     "apns":         { "status":"disabled", "devices":0, "live_activities":0, "sent_total":0,
-                      "failed_total":0, "pruned_tokens_total":0,
+                      "failed_total":0, "pruned_tokens_total":0, "retried_total":0,
                       "last_error":null, "last_sent_at":null },
     "subscriptions":{ "status":"ok", "total":7, "failing":1, "next_due_in_s":412 },
     "importer":     { "status":"ok", "imported_at":1757000000000, "warnings":2 }
@@ -6038,6 +6078,34 @@ so "omit when null" is not available here even though it is the house style ever
 client: HLS and fragmented downloads have no exact total, and a progress ring with no denominator
 is the case the fallback exists for.
 
+**Where the numbers come from.** Not from the event. The `StatusChanged` view the notifier receives
+carries a `None` progress cell (§15.2.1), so building the state straight off it pinned every
+non-group item at `0 %` until `Finished` — the island was a ring that never moved. The update path
+merges the transient fields of the freshest **published** view (`percent`, `speed`, `eta`, the byte
+and fragment counters, `phase`, `phase_percent`) over the event's view, through the
+`ProgressReader` port.
+
+Only the numbers, and only when the event's status is `downloading`/`postprocessing`. `status`
+stays the event's, because the event is the authority on the transition it announces and the
+aggregator may not have applied it yet — taking the snapshot's status wholesale would push
+`downloading` over an item that has just entered `postprocessing`. A published row that is already
+terminal is ignored for the same reason. A group is unaffected either way: the engine writes its
+roll-up onto the event view and the snapshot computes it identically.
+
+**The progress cadence: `PROGRESS_INTERVAL` = 5 s.** A backgrounded app receives nothing but
+pushes, and the engine publishes no event per progress frame, so a status-driven update path leaves
+the island frozen between transitions. While an item is `downloading` or `postprocessing` and has
+at least one registration, the trailing-edge timer keeps re-arming at `now + 5 s` per (item,
+device), re-reads the snapshot and pushes the next frame. Three properties make that safe:
+
+- **An identical view is not a frame.** The pulled view is compared against what the item already
+  has pending; a stalled download costs zero pushes and only a snapshot read.
+- **It terminates.** The moment the item leaves the progressing statuses — paused, finished,
+  errored — no further timer is armed; `Completed`/`Removed` forget the track outright, which ends
+  any timer already sleeping on the next pass.
+- **Status changes keep the immediate path.** The 2 s `UPDATE_INTERVAL` throttle is unchanged, and
+  a changed status word still defeats it.
+
 **Alert** (`apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: now+3600`,
 `apns-collapse-id: <item id>`, `apns-topic: <device bundle_id>`):
 
@@ -6062,7 +6130,8 @@ or `"<title> — N of M done"` for a group.
            "alert": { "title": "Downloading", "body": "Big Buck Bunny" } } }
 
 // update  apns-priority 5
-{ "aps": { "timestamp": 1772582402, "event": "update", "content-state": { … } } }
+{ "aps": { "timestamp": 1772582402, "event": "update", "content-state": { … },
+           "stale-date": 1772582447, "relevance-score": 0.425 } }
 
 // end     apns-priority 10
 { "aps": { "timestamp": 1772582500, "event": "end", "content-state": { … },
@@ -6072,6 +6141,19 @@ or `"<title> — N of M done"` for a group.
 `timestamp` is unix **seconds**; `dismissal-date` is `now + 900`. `apns-expiration` is `now+3600`
 on a start and an end, and **`0` on an update** — a progress frame that could not be delivered
 immediately is worthless by the time a queue drains, and Apple asks providers to say so.
+
+Two keys ride on the **update** alone, both Apple's own, both unix seconds / unit fractions as
+Apple defines them:
+
+- **`stale-date` = `now + 45`.** It is what makes the widget's `isStale` true on the device, so a
+  stream that stopped renders as "waiting for the server" instead of a confident number nobody is
+  maintaining. 45 s is nine missed frames at the 5 s cadence: long enough that a throttled or
+  reordered delivery does not flicker, short enough that a VPN blip or a killed download shows.
+- **`relevance-score` = `percent / 100`**, clamped to `0.0..=1.0`, which is how iOS orders several
+  live activities on the lock screen — the download closest to finishing sorts first.
+
+Neither appears on a start (updates follow immediately) or an end (the last word on the activity;
+marking it stale would put "waiting for the server" under a ring that is done).
 
 ### 25.5 Talking to Apple
 
@@ -6086,8 +6168,31 @@ URL and exists **only for the tests** (§25.9).
 | `200` | delivered; `sent_total++`, the degraded flag clears |
 | `400 BadDeviceToken` / `400 DeviceTokenNotForTopic`, `410 Unregistered` | the token is dead: `remove_device` for a device or push-to-start token, `remove_live_activity` for an update token; `pruned_tokens_total++` |
 | `403 InvalidProviderToken` / `403 ExpiredProviderToken` | remint the JWT and retry **once**; a second `403` logs an ERROR naming `APNS_KEY_ID`/`APNS_TEAM_ID`/`APNS_KEY_FILE` and turns `healthz` `apns` to `degraded` |
-| `429`, `5xx`, transport failure or timeout | retry on the `1 s → 4 s → 16 s` ladder — three retries, four requests — then give up for that push |
+| `429`, `5xx`, transport failure or timeout | retry on the ladder the push's `apns-priority` selects (below), counting `retried_total++` per re-sent request, then give up for that push |
 | any other `4xx` | WARN with Apple's `reason`, and drop |
+
+**Two ladders, chosen by `apns-priority`.**
+
+| Push | `apns-priority` | Ladder | Total |
+|---|---|---|---|
+| Live Activity **update** | 5 | `1 s → 4 s → 16 s` | 4 requests, 21 s |
+| **alert**, Live Activity **start**, Live Activity **end** | 10 | `1 s → 4 s → 16 s → 60 s → 120 s → 300 s` | 7 requests, ~8 min |
+
+The split is about what a lost push costs. An update is superseded five seconds later by the next
+progress frame, so spending eight minutes on it would only land a stale percentage on the lock
+screen. The other three are not superseded by anything: an alert nobody sent is a download the user
+never hears about, and an `end` nobody sent is a progress ring spinning on the lock screen for
+ever. The failure this exists for is not a busy gateway but a dead egress — the VPS runs inside a
+VPN namespace, and during a blip that lasted a few minutes **both** APNs attempts since boot ended
+`GaveUp` after the twenty-one seconds the short ladder covers.
+
+The wait is bounded twice: by the ladder, and by the push's own `apns-expiration` — a retry whose
+delay would land past it is not taken, because Apple is contractually required to drop the message
+by then. `apns-expiration: 0` ("deliver now or discard") carries no deadline to check, which is the
+update, whose ladder is short for the other reason anyway.
+
+Ordering across retries is not guaranteed per device. That is acceptable: alerts carry
+`apns-collapse-id`, and a start or an end is idempotent on the device.
 
 An APNs answer is never an `Err`: three of the five rows are *instructions*, so they are
 `Outcome` values and `ApnsError` is reserved for a misconfigured server (§25.6).
@@ -6125,7 +6230,7 @@ cannot sign a JWT is not a reason to take the download server down, and the oper
 
 ```json
 "apns": { "status": "ok", "devices": 2, "live_activities": 1,
-          "sent_total": 41, "failed_total": 0, "pruned_tokens_total": 1,
+          "sent_total": 41, "failed_total": 0, "pruned_tokens_total": 1, "retried_total": 3,
           "last_error": null, "last_sent_at": 1772582400000 }
 ```
 
@@ -6136,6 +6241,10 @@ never `down`: a push service that cannot reach Apple does not make this server u
 `last_error` is redacted on the way in: any run of 32 or more hexadecimal characters keeps its
 first eight and loses the rest, because this component is served by the unauthenticated `healthz`
 and an APNs device token is the one secret in this crate that lives in a URL (§25.5).
+
+`retried_total` counts re-sent **requests**, not pushes: a `503` that took four goes before it
+landed reads as `sent_total 1, retried_total 3`. It is what distinguishes a healthy gateway from
+one being reached across a tunnel that keeps dropping — the case §25.5's long ladder exists for.
 
 `devices` is read from the store on every poll. `live_activities` is the number of registrations
 the **notifier currently has cached** rather than a `SELECT COUNT(*)`, because the `DeviceStore`
@@ -6187,19 +6296,27 @@ deleted.
 `crates/aulos-apns/tests`, all of it against a `HashMap` `DeviceStore` and a `wiremock` gateway:
 
 - `payloads.rs` — every payload case compared as a whole `Value`, including the seven-key content
-  state, the null-everywhere case, the estimate fallback, and the group body.
+  state, the null-everywhere case, the estimate fallback, the group body, the update's five `aps`
+  keys (`stale-date` and `relevance-score` included), the score's clamping, and the fact that
+  neither key appears on a start or an end.
 - `provider_token.rs` — header, claims, the absent `exp`, the 50-minute cache, the forced remint
   and its compare-and-swap, eight barrier-released threads past the TTL minting exactly one token,
   and that `Debug` never prints the key. The token is verified with the public key.
 - `gateway.rs` — the whole §25.5 table: headers, `200`, `410`, the three `400`s, the `403`
   remint-and-retry, the `403` that survives it, `429` backoff, `5xx` giving up after three retries,
   a non-JSON body, and an unreachable gateway — whose reason must carry neither the device token
-  nor the URL.
+  nor the URL. Plus the two ladders: a priority-10 push walking six delays, an update keeping three,
+  a retry that would land past `apns-expiration` not being taken, and `retried_total` counting
+  re-sent requests on both the HTTP and the transport branch.
 - `notifier.rs` — the §25.2 rules, pruning the right row for each token kind, the throttle's
   trailing edge (including the two-registration case that used to push for ever), the start latch
   surviving an unreadable device table and a start token registered late, the `end` sent from the
   cache when the store cannot be read, the store-read budget, `APNS_ENABLED=false`, and an
-  unreadable key file.
+  unreadable key file. Plus the §15.2.1 pull, over a `HashMap` `ProgressReader`: the published
+  percent reaching the `content-state` where the event's was `0`, the event's status word winning
+  over a lagging snapshot, a download that keeps moving with no event at all, a stalled one costing
+  no push while the timer keeps watching, the cadence ending when the item leaves the progressing
+  statuses and when it completes, and a group keeping its engine roll-up.
 
 The **wiring** is covered where it lives, in `crates/aulos-server/tests/server.rs`, through the
 production boot (`run_with`) rather than a test-only assembly: `healthz` names an `apns` component

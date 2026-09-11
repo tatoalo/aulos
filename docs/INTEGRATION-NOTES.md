@@ -2757,3 +2757,69 @@ the item's `ref`; update, end and `Removed` are untouched. PROTOCOL §1.3, §4.1
 The server half is complete and inert until the app sends the header: the iOS work (minting the id
 into the App Group defaults, sending it from both targets, repeating it as `install_id` on every
 registration) is decision 42's other half and is not in this repo.
+
+## Live progress for the subscribers, and the APNs retry ladder (2026-09-11)
+
+Decisions D1 and D5 of `docs/superpowers/specs/2026-09-11-origin-routing-progress-subscriptions-design.md`.
+
+The bug both surfaces shared: `Engine::view` builds every `StatusChanged` view with a `None`
+progress cell (`crates/aulos-queue/src/engine.rs`), so `ItemView::percent` is `0.0` for every
+non-group item until `Finished`. The Telegram board and the APNs Live Activity both read that view,
+so the bar sat at `0 %` and the island never moved.
+
+### Decisions this pass made
+
+- **The fix is a pull, not a push.** `aulos_core::ports::ProgressReader`
+  (`fn view(&self, id) -> Option<Arc<ItemView>>`) is implemented by `aulos_queue::StateView` and
+  injected by the wiring into the Telegram actor and the APNs notifier. Publishing a progress
+  `DomainEvent` per frame was rejected: the `EventRouter`'s per-subscriber queues are `DropNewest`,
+  so a flood can evict a `Completed` — the one event that ends a Live Activity and posts the ✅.
+  It is a port rather than a type because `aulos-apns` may depend on `aulos-core` alone, which
+  `aulos-workspace-tests` enforces. (DESIGN §15.2.1.)
+- **It is injected at wiring step 14, not at construction.** `build_apns` and `TelegramActor::new`
+  both run before the aggregator exists, so the reader is applied with `with_progress(..)` just
+  before the notifier loop and the actor are spawned. Both default to `None`, which is byte-for-byte
+  the old behaviour — that is what keeps every existing test honest.
+- **APNs merges only the transient numbers, and keeps the event's `status`.** The aggregator applies
+  the same event asynchronously, so the snapshot can still say `downloading` when the item has just
+  entered `postprocessing`; taking the published status wholesale would push the stale word. A
+  published row that is already terminal is ignored for the same reason. Groups are untouched either
+  way — the engine writes their roll-up onto the event view and the snapshot computes it the same.
+- **`PROGRESS_INTERVAL` is 5 s, and the timer is what re-reads.** While an item is progressing and
+  has a registration, the trailing-edge timer re-arms at `now + 5 s` and pulls the next frame. An
+  identical view is not a frame, so a stalled download costs zero pushes. It terminates when the
+  item leaves the progressing statuses or when `Completed`/`Removed` forgets the track.
+  **Consequence for tests:** `ApnsNotifier::quiesce()` never returns while a progressing item has a
+  live activity, because the timer is deliberately still armed. The cadence tests use explicit
+  sleeps and `shutdown()`; `wiring::run_apns` already gives `quiesce` a 1 s timeout before
+  cancelling, so the shutdown path was unaffected.
+- **Telegram raises `dirty` only when the rendered body changed.** `refresh_progress` renders the
+  body before and after the refresh and compares; the 3 s per-chat limiter and the byte-identical
+  `last_rendered` skip are still what decide what leaves the process. A terminal row is never
+  rewritten from the snapshot — it is the user's receipt.
+- **The APNs ladder is chosen off `apns-priority`, not off a new flag.** `client::IMMEDIATE_PRIORITY`
+  is asserted equal to `notifier::PRIORITY_IMMEDIATE` by a unit test; the priority already *is* the
+  statement that a push cannot be superseded. `with_backoff` deliberately replaces **both** ladders
+  so the existing suite stays fast; `with_backoff_ladders` is the only way to tell them apart.
+- **`retried_total` is counted by the client, into the notifier's `Counters`.** `ApnsClient` owns an
+  `Arc<Counters>` — its own by default, the notifier's after `with_counters` — rather than returning
+  a retry count through `Outcome`, which would have changed a signature the gateway suite is written
+  against.
+
+### Left undone, on purpose
+
+- **`JobLine` still has no `downloaded`/`total`.** The spec lists them among the fields to refresh,
+  but the board row renders `{bar} {pct}% · {speed}/s · ETA {eta}` and never a byte pair, so there
+  is nothing for them to feed. Adding them is a `JobLine` field plus a `render::progress_detail`
+  change, and it is a rendering decision rather than a plumbing one.
+- **No paused-clock test for the 5 s cadence or the 300 s ladder.** Both suites drive a real
+  `wiremock` gateway over TCP, and tokio's auto-advance fires whenever the runtime is idle — which
+  it is, repeatedly, while a request is in flight. The rigs shorten the intervals instead
+  (`with_progress_interval`, `with_backoff_ladders`), the same seam `with_update_interval` already
+  used, and each test asserts the shipped constant separately so the real values stay pinned.
+- **`cargo clippy --workspace --all-targets -- -D warnings` does not pass on this toolchain**, and
+  did not before this branch either. rustc/clippy 1.98.1 flags three things in files nothing here
+  touches: `clippy::chunks_exact_to_as_chunks` (3 hits in
+  `crates/aulos-provider/src/command/sha256.rs`), `clippy::useless_format`
+  (`crates/aulos-provider/tests/plugin_command.rs`) and a large `Err` variant
+  (`crates/aulos-api/tests/support/mod.rs`). With those three allowed the workspace is clean.
