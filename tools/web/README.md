@@ -27,6 +27,17 @@ every path in the UI.
 | `--big-group` | off | adds a 480-child group with `children_inline: false`, so the page must fetch its children |
 | `--flap` | off | accepts every upgrade and closes it at once with `1013`, to exercise §5.1's back-off |
 
+The mock also serves the five subscription routes of §4.7 (`GET`/`POST api/v2/subscriptions`,
+`PATCH`/`DELETE api/v2/subscriptions/{id}`, `POST api/v2/subscriptions/check` and
+`POST api/v2/subscriptions/{id}/check`) and `POST api/v2/items/clear`. Three subscriptions are in
+the snapshot — one healthy, one disabled, one failing with an `error` — and a fourth is **scripted
+over the ticker**: created at tick 4, `checking: true` at 8, `checking: false` with `last_checked`
+and `seen_count` moved at 16, and `subscription_removed` at 28, so the smoke can watch the panel
+stay live without touching a route. `--freeze` stops the ticker, so the screenshots never catch it.
+`POST api/v2/subscriptions` reproduces §9's two named rejections: a single-video URL is
+`400 validation_failed` and an already-watched one is `409 conflict`, both with the contract's
+sentence.
+
 The socket implements §6.2/§6.3 resume: an upgrade carrying `?since=&boot=` inside the 512-frame
 replay ring is answered with a `resume` frame plus the folded `added`/`completed`/`removed`/`delta`,
 and anything else — a stale `boot`, a cursor above the head — falls back to a `snapshot`. The

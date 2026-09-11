@@ -5,7 +5,8 @@
  * It serves the real assets with the real substitutions and headers the server contract
  * specifies, and implements enough of PROTOCOL §4 and §5 to drive every code path in the UI:
  * a snapshot with one of each interesting row, deltas every 250 ms, adds, actions, paging,
- * the per-URL catalog, custom dirs, and a token mode that answers 401 until the bearer is sent.
+ * the per-URL catalog, custom dirs, the five subscription routes with a scripted `subscription`
+ * life cycle, and a token mode that answers 401 until the bearer is sent.
  *
  *   node tools/web/mock-server.mjs [--port N] [--prefix /metube/] [--theme auto|light|dark]
  *                                  [--token SECRET] [--freeze] [--big-group] [--flap]
@@ -166,6 +167,44 @@ function seed() {
   }
 }
 seed();
+
+/* ---------------------------------------------------------- subscriptions */
+
+const SUB_IDS = { a: ULID('SUBA'), b: ULID('SUBB'), c: ULID('SUBC'), scripted: ULID('SUBS') };
+
+function sub(over) {
+  return Object.assign({
+    id: ULID('SUB'), name: '', url: 'https://www.youtube.com/@example', enabled: true,
+    check_interval_minutes: 60, download_type: 'video', codec: 'auto', format: 'mp4',
+    quality: 'best', folder: '', last_checked: null, seen_count: 0, error: null,
+    next_due: null, consecutive_failures: 0, checking: false,
+  }, over);
+}
+
+/** id → Subscription. Seeds the snapshot; the routes and the scripted sequence mutate it. */
+const subs = new Map();
+
+function seedSubs() {
+  subs.clear();
+  const put = (s) => subs.set(s.id, s);
+  put(sub({
+    id: SUB_IDS.a, name: 'Veritasium', url: 'https://www.youtube.com/@veritasium',
+    last_checked: now - 3 * 60000, next_due: now + 57 * 60000, seen_count: 317,
+  }));
+  put(sub({
+    id: SUB_IDS.b, name: 'Weekly mixes', url: 'https://soundcloud.com/example/sets/weekly',
+    enabled: false, check_interval_minutes: 360, download_type: 'audio', format: 'm4a',
+    seen_count: 12,
+  }));
+  put(sub({
+    id: SUB_IDS.c, name: 'Moved channel', url: 'https://www.youtube.com/@gone',
+    check_interval_minutes: 30, last_checked: now - 26 * 60000, next_due: now + 4 * 60000,
+    consecutive_failures: 3, error: 'HTTP Error 404: Not Found', seen_count: 4,
+  }));
+}
+seedSubs();
+
+const hostOf = (u) => String(u).replace(/^https?:\/\/(www\.)?/i, '').split('/')[0];
 
 /** Terminal rows outside the snapshot window, for `Show older`. */
 const OLDER = Array.from({ length: 12 }, (_, i) => item({
@@ -347,7 +386,7 @@ function snapshot() {
     protocol: { batch_ms: 250, urgent_ms: 25, replay_frames: 512, delta_semantics: 'absent-key-means-unchanged' },
     counts, done_total: done.length + OLDER.length,
     truncated: { done: true, groups: all.filter((i) => i.children_inline === false).map((i) => i.id) },
-    items: live, done, subscriptions: [],
+    items: live, done, subscriptions: [...subs.values()],
     ytdl_options: { ok: true, msg: '', update_time: now / 1000 },
     health: { status: 'ok', components: { pot: 'ok', store: 'ok', ytdl_options: 'ok' } },
   };
@@ -392,6 +431,31 @@ function advance() {
   // …and a beat after that it resolves into a group: §5.5's in-place promotion. One `added` with
   // `reason: "expanded"`, the same id and the same `ord`, `kind` flipped, and NO `removed`.
   if (r && tick === 8 && r.status === 'resolving') expand(r);
+
+  scriptSubscription();
+}
+
+/* One subscription's whole life over §5.9's two frames, so the smoke can watch the panel stay
+   live without touching a route: created → checking → checked (with `last_checked` bumped and
+   `seen_count` moved) → removed. `--freeze` stops the ticker, so screenshots never catch it. */
+function scriptSubscription() {
+  const id = SUB_IDS.scripted;
+  if (tick === 4) {
+    subs.set(id, sub({
+      id, name: 'Scripted feed', url: 'https://www.youtube.com/@scripted',
+      check_interval_minutes: 15, next_due: Date.now() + 900000,
+    }));
+    send({ t: 'subscription', subscription: subs.get(id) });
+    return;
+  }
+  const s = subs.get(id);
+  if (!s) return;
+  if (tick === 8) { s.checking = true; send({ t: 'subscription', subscription: s }); }
+  if (tick === 16) {
+    Object.assign(s, { checking: false, last_checked: Date.now(), seen_count: 2, next_due: Date.now() + 900000 });
+    send({ t: 'subscription', subscription: s });
+  }
+  if (tick === 28) { subs.delete(id); send({ t: 'subscription_removed', ids: [id] }); }
 }
 
 /** §5.5: promote `g` to a group and deliver it with its first children in one `added` frame. */
@@ -505,7 +569,7 @@ const server = createServer(async (req, res) => {
   }
 
   if (path === '__test/log') { json(res, 200, log); return; }
-  if (path === '__test/reset') { log.length = 0; seed(); json(res, 200, { ok: true }); return; }
+  if (path === '__test/reset') { log.length = 0; seed(); seedSubs(); json(res, 200, { ok: true }); return; }
 
   if (!authed(req)) { fail(res, 401, { code: 'unauthorized', message: 'authentication required' }); return; }
 
@@ -605,6 +669,109 @@ const server = createServer(async (req, res) => {
     if (patches.length) send({ t: 'delta', ts: Date.now(), items: patches });
     json(res, 200, { applied, skipped, seq });
     return;
+  }
+
+  /* §4.7: clearing history in one call. `where` is `"done"` or absent, and `delete_file`
+     overrides `DELETE_FILE_ON_TRASHCAN` — the page always pins it to `false`. */
+  if (req.method === 'POST' && path === 'api/v2/items/clear') {
+    const body = await readBody(req);
+    log.push({ method: 'POST', path, body });
+    if (body.where !== undefined && body.where !== null && body.where !== 'done') {
+      fail(res, 400, { code: 'validation_failed', message: '`where` must be "done"', field: 'where' });
+      return;
+    }
+    const removed = [...items.values()]
+      .filter((i) => !i.group_id && ['finished', 'error', 'canceled'].includes(i.status))
+      .map((i) => i.id);
+    for (const id of removed) items.delete(id);
+    if (removed.length) send({ t: 'removed', ids: removed, reason: 'cleared' });
+    json(res, 200, { removed, seq, warnings: [] });
+    return;
+  }
+
+  /* ------------------------------------------------ subscriptions (§4.7) */
+
+  if (path === 'api/v2/subscriptions' && req.method === 'GET') {
+    json(res, 200, { subscriptions: [...subs.values()] });
+    return;
+  }
+  if (path === 'api/v2/subscriptions' && req.method === 'POST') {
+    const body = await readBody(req);
+    log.push({ method: 'POST', path, body });
+    const u = String(body.url || '');
+    if (!/^https?:\/\//i.test(u)) {
+      fail(res, 400, { code: 'validation_failed', message: 'url must be an absolute http(s) URL', field: 'url' });
+      return;
+    }
+    // §9's two named rejections, with the sentences the contract pins.
+    if (/[?&]v=|\/watch\b|\/video\//i.test(u)) {
+      fail(res, 400, {
+        code: 'validation_failed', field: 'url',
+        message: 'This URL points to a single video, not a channel or playlist. Use Download instead.',
+      });
+      return;
+    }
+    if ([...subs.values()].some((s) => s.url === u)) {
+      fail(res, 409, { code: 'conflict', message: 'This URL is already subscribed', field: 'url' });
+      return;
+    }
+    const s = sub({
+      id: ULID(`NSUB${String(subs.size).padStart(2, '0')}Z`), url: u, name: body.name || hostOf(u),
+      check_interval_minutes: Math.max(1, Number(body.check_interval_minutes) || 60),
+      download_type: body.download_type || 'video', codec: body.codec || 'auto',
+      format: body.format || 'mp4', quality: body.quality || 'best', folder: body.folder || '',
+      next_due: Date.now() + 60000,
+    });
+    subs.set(s.id, s);
+    send({ t: 'subscription', subscription: s });
+    json(res, 201, s);
+    return;
+  }
+  // Before the `{id}` pattern: `check` is a route, not an id.
+  if (req.method === 'POST' && path === 'api/v2/subscriptions/check') {
+    const body = await readBody(req);
+    log.push({ method: 'POST', path, body });
+    const ids = Array.isArray(body.ids) && body.ids.length ? body.ids : [...subs.keys()];
+    for (const id of ids) {
+      const s = subs.get(id);
+      if (s) { s.checking = true; send({ t: 'subscription', subscription: s }); }
+    }
+    json(res, 202, { job_id: ULID('JOB'), count: ids.length });
+    return;
+  }
+  const one = /^api\/v2\/subscriptions\/([^/]+)(\/check)?$/.exec(path);
+  if (one) {
+    const id = decodeURIComponent(one[1]);
+    const s = subs.get(id);
+    if (!s) { fail(res, 404, { code: 'not_found', message: 'no such subscription' }); return; }
+    if (one[2] && req.method === 'POST') {
+      log.push({ method: 'POST', path, body: await readBody(req) });
+      s.checking = true;
+      send({ t: 'subscription', subscription: s });
+      json(res, 202, { job_id: ULID('JOB'), count: 1 });
+      return;
+    }
+    if (!one[2] && req.method === 'PATCH') {
+      const body = await readBody(req);
+      log.push({ method: 'PATCH', path, body });
+      if (body.name !== undefined && body.name !== null) s.name = String(body.name);
+      if (body.enabled !== undefined && body.enabled !== null) s.enabled = !!body.enabled;
+      if (body.check_interval_minutes !== undefined && body.check_interval_minutes !== null) {
+        s.check_interval_minutes = Math.max(1, Number(body.check_interval_minutes) || 1);
+        s.next_due = Date.now() + s.check_interval_minutes * 60000;
+      }
+      send({ t: 'subscription', subscription: s });
+      json(res, 200, s);
+      return;
+    }
+    if (!one[2] && req.method === 'DELETE') {
+      log.push({ method: 'DELETE', path, body: {} });
+      subs.delete(id);
+      send({ t: 'subscription_removed', ids: [id] });
+      res.writeHead(204, { 'X-Request-Id': ULID('REQ'), 'X-Aulos-Seq': String(seq) });
+      res.end();
+      return;
+    }
   }
 
   fail(res, 404, { code: 'not_found', message: `no route for ${req.method} ${url.pathname}` });
