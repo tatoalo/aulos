@@ -28,8 +28,29 @@ fn the_content_state_is_the_seven_camel_case_keys() {
             "eta": 68,
             "downloadedBytes": 123,
             "totalBytes": 456,
-            "message": "Merging formats",
+            "message": null,
         })
+    );
+}
+
+/// A running item's `msg` is yt-dlp's postprocessor line; it never reaches the island. A failure's
+/// `error.message` is the one line that does.
+#[test]
+fn the_message_is_a_failure_reason_and_never_the_postprocessor_line() {
+    let running = ItemBuilder::new("x")
+        .status(Status::Postprocessing)
+        .msg("MoveFiles…");
+    assert_eq!(
+        payload::content_state(&running.view())["message"],
+        json!(null)
+    );
+
+    let failed = ItemBuilder::new("x")
+        .failed("Connection reset")
+        .msg("MoveFiles…");
+    assert_eq!(
+        payload::content_state(&failed.view())["message"],
+        json!("Connection reset")
     );
 }
 

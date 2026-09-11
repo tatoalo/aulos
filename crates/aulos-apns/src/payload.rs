@@ -60,8 +60,24 @@ pub fn content_state(view: &ItemView) -> Value {
         "eta": view.eta,
         "downloadedBytes": view.downloaded_bytes,
         "totalBytes": view.total_bytes.or(view.total_bytes_estimate),
-        "message": view.msg.as_deref(),
+        "message": failure_reason(view),
     })
+}
+
+/// The one line the island shows under the title, when there is one: a failed or cancelled
+/// item's `error.message`. A running item's `msg` — yt-dlp's postprocessor line, "MoveFiles…",
+/// "[Merger]…" — never goes out: the user does not need it, and a line the server stops
+/// maintaining the moment the item finishes is exactly what froze islands on "MoveFiles" whenever
+/// a push did not land. The app applies the same rule to the activities it updates locally.
+fn failure_reason(view: &ItemView) -> Option<&str> {
+    match view.status {
+        Status::Error | Status::Canceled => view
+            .error
+            .as_ref()
+            .map(|e| e.message.trim())
+            .filter(|m| !m.is_empty()),
+        _ => None,
+    }
 }
 
 /// The alert title for a terminal item: [`TITLE_FINISHED`] for `finished`, [`TITLE_FAILED`]

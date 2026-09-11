@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aulos_core::clock::FakeClock;
+use aulos_core::error::{ErrorCode, WireError};
 use aulos_core::id::{ItemId, UnixMs};
 use aulos_core::item::{Item, ItemView, Kind, ViewExtras};
 use aulos_core::ports::{
@@ -197,6 +198,14 @@ impl ItemBuilder {
     #[must_use]
     pub fn msg(mut self, msg: &str) -> Self {
         self.item.msg = Some(msg.into());
+        self
+    }
+
+    /// A failed item with the given reason.
+    #[must_use]
+    pub fn failed(mut self, reason: &str) -> Self {
+        self.item.status = Status::Error;
+        self.item.error = Some(WireError::new(ErrorCode::Network, reason));
         self
     }
 
