@@ -33,6 +33,15 @@
 //! For the same reason the completion **alert** fires for an item that had a registration even
 //! when its `source` is not `ios`: the phone was showing that download.
 //!
+//! # Which device, not just whether (DESIGN §25.2, decision 42)
+//!
+//! The gate above says the phone hears about the item; `source.ref` says *which* phone. An iOS add
+//! carries the adding install there (`X-Aulos-Install`, PROTOCOL §1.3) and a registration carries
+//! its own in `install_id` (§4.8), so the alert and the push-to-start go to the install the
+//! download was started from. A `source.ref` of `null` — an app build that predates the header —
+//! is every alerting device, which is the fan-out that shipped before the key existed. The update
+//! and the end are unfiltered here too: they address a registration for that one item.
+//!
 //! # Three rules that are easy to get wrong
 //!
 //! - **A group gets one alert; its children get none.** `Completed` for an item with a
@@ -73,7 +82,7 @@ use aulos_core::event::{DomainEvent, Notifier};
 use aulos_core::id::ItemId;
 use aulos_core::item::ItemView;
 use aulos_core::ports::{ApnsEnvironment, DeviceRecord, DeviceStore, LiveActivityRecord};
-use aulos_core::source::SourceKind;
+use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::status::Status;
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
@@ -454,6 +463,35 @@ impl Shared {
         self.push_all || view.source.kind == SourceKind::Ios
     }
 
+    /// Whether *this device* is one of the ones [`Self::pushes_for`] meant (DESIGN §25.2).
+    ///
+    /// `pushes_for` answers "does the phone hear about this item at all"; this answers "which
+    /// phone". An iOS add carries the adding install in `source.ref` (`X-Aulos-Install`, PROTOCOL
+    /// §1.3) and a registration carries its own in `install_id` (§4.8), so the household's iPad
+    /// stays quiet for a download started on the iPhone.
+    ///
+    /// Three things are deliberately *not* a match failure, and each of them is the fan-out that
+    /// shipped before this key existed:
+    ///
+    /// - `APNS_PUSH_ALL=true` — the escape hatch means every device, full stop;
+    /// - a non-`ios` origin — `ref` is then a chat id or a subscription id, which no device has,
+    ///   and the item only reached here through the alert-if-tracked rule or the knob;
+    /// - `source.ref == None` — an app build that predates the header. Its adds are indistinct, so
+    ///   every alerting device hears about them, exactly as before.
+    ///
+    /// A device with no `install_id` therefore hears about every *legacy* item and about none of
+    /// the items a newer build added — which is right: the moment one install identifies itself,
+    /// an unidentified registration is some other install.
+    fn install_matches(&self, source: &SourceRef, device: &DeviceRecord) -> bool {
+        if self.push_all || source.kind != SourceKind::Ios {
+            return true;
+        }
+        match source.reference.as_deref() {
+            None => true,
+            Some(install) => device.install_id.as_deref() == Some(install),
+        }
+    }
+
     // -- state helpers ------------------------------------------------------
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -736,10 +774,15 @@ impl Shared {
             }
         };
         self.cache_bundle_ids(&devices);
-        if !devices
+        // The same install match the alert uses: a start is a fan-out to devices, so it goes to
+        // the install that added the item and not to the iPad in the next room (§25.2).
+        let targets: Vec<&DeviceRecord> = devices
             .iter()
-            .any(|d| d.live_activity_start_token.is_some())
-        {
+            .filter(|d| {
+                d.live_activity_start_token.is_some() && self.install_matches(&view.source, d)
+            })
+            .collect();
+        if targets.is_empty() {
             // Nobody can receive a start yet. Leave the latch open so a device that registers its
             // push-to-start token later still gets an activity on the next start edge.
             return;
@@ -749,7 +792,7 @@ impl Shared {
         }
         let now = self.now_secs();
         let payload = payload::live_activity_start(&view, now);
-        for d in &devices {
+        for d in targets {
             let Some(start_token) = d.live_activity_start_token.as_ref() else {
                 continue;
             };
@@ -807,7 +850,12 @@ impl Shared {
         let now = self.now_secs();
         let payload = payload::alert(&view);
         let collapse: Arc<str> = Arc::from(view.id.to_string());
-        for d in devices.iter().filter(|d| d.alerts) {
+        // `alerts` is the device's own switch; `install_matches` is the routing key — the phone
+        // that added this download, not every phone in the house (§25.2).
+        for d in devices
+            .iter()
+            .filter(|d| d.alerts && self.install_matches(&view.source, d))
+        {
             let push = Push {
                 kind: PushKind::Alert,
                 topic: Arc::from(&*d.bundle_id),

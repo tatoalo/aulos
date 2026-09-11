@@ -123,6 +123,14 @@ impl ItemBuilder {
         self
     }
 
+    /// Sets the origin to the iOS app **and** names the install it came from: what
+    /// `X-Aulos-Install` puts in `source.ref` (PROTOCOL §1.3).
+    #[must_use]
+    pub fn added_by_install(mut self, install: &str) -> Self {
+        self.item.source = SourceRef::with_ref(SourceKind::Ios, install);
+        self
+    }
+
     /// Fixes the id, so a test can talk about the same item twice.
     #[must_use]
     pub fn id(mut self, id: ItemId) -> Self {
@@ -389,7 +397,8 @@ impl DeviceStore for FakeDeviceStore {
     }
 }
 
-/// A device with alerts on and no Live Activity start token.
+/// A device with alerts on, no Live Activity start token and no install id — the legacy app build
+/// every pre-`X-Aulos-Install` test in this directory is standing in for.
 #[must_use]
 pub fn device(token: &str, env: ApnsEnvironment) -> DeviceRecord {
     DeviceRecord {
@@ -399,9 +408,19 @@ pub fn device(token: &str, env: ApnsEnvironment) -> DeviceRecord {
         environment: env,
         alerts: true,
         live_activity_start_token: None,
+        install_id: None,
         app_version: Some("1.0.0 (3)".into()),
         registered_at: 0,
         last_seen_at: 0,
+    }
+}
+
+/// The same device, registered under one install (PROTOCOL §4.8's `install_id`).
+#[must_use]
+pub fn device_of_install(token: &str, install: &str, env: ApnsEnvironment) -> DeviceRecord {
+    DeviceRecord {
+        install_id: Some(install.into()),
+        ..device(token, env)
     }
 }
 

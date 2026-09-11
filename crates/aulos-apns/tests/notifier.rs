@@ -20,7 +20,7 @@ use aulos_core::source::SourceKind;
 use aulos_core::status::Status;
 use common::{
     Call, FakeDeviceStore, ItemBuilder, TEST_BUNDLE_ID, TEST_KEY_ID, TEST_KEY_P8, TEST_TEAM_ID,
-    activity, clock, device,
+    activity, clock, device, device_of_install,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::method;
@@ -1121,6 +1121,272 @@ async fn an_untracked_non_ios_item_still_alerts_nobody() {
     assert!(
         rig.requests().await.is_empty(),
         "Telegram reported this one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Which device, not just whether (DESIGN §25.2, decision 42)
+// ---------------------------------------------------------------------------
+
+/// The operator's rule one turn finer: a download started on the phone alerts the phone, and the
+/// iPad in the next room stays quiet.
+///
+/// `X-Aulos-Install` puts the adding install in `source.ref` (PROTOCOL §1.3) and the same value is
+/// registered as the device's `install_id` (§4.8); the alert goes where the two agree.
+#[tokio::test]
+async fn an_alert_goes_only_to_the_install_that_added_the_item() {
+    let rig = Rig::new().await;
+    rig.store.add_device(device_of_install(
+        "aa11",
+        "install-phone",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.store.add_device(device_of_install(
+        "bb22",
+        "install-ipad",
+        ApnsEnvironment::Sandbox,
+    ));
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .added_by_install("install-phone")
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(item.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    assert_eq!(rig.tokens().await, ["aa11"], "the iPad added nothing");
+}
+
+/// An iOS item with no install — an app build that predates `X-Aulos-Install` — is every alerting
+/// device, which is exactly the fan-out that shipped before the key existed.
+#[tokio::test]
+async fn an_ios_item_without_an_install_alerts_every_device() {
+    let rig = Rig::new().await;
+    rig.store.add_device(device_of_install(
+        "aa11",
+        "install-phone",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.store.add_device(device_of_install(
+        "bb22",
+        "install-ipad",
+        ApnsEnvironment::Sandbox,
+    ));
+    // And a registration from a build that reports no install at all.
+    rig.store
+        .add_device(device("cc33", ApnsEnvironment::Sandbox));
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .source(SourceKind::Ios)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(item.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let mut tokens = rig.tokens().await;
+    tokens.sort();
+    assert_eq!(tokens, ["aa11", "bb22", "cc33"]);
+}
+
+/// The mirror: once an item names its install, a registration that names *none* is some other
+/// install and hears nothing. Sending the header without the field is the one way to go silent.
+#[tokio::test]
+async fn a_device_with_no_install_is_not_the_install_that_added_the_item() {
+    let rig = Rig::new().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .added_by_install("install-phone")
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(item.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    assert!(rig.requests().await.is_empty(), "a different install");
+}
+
+/// `APNS_PUSH_ALL=true` is "every device", and that has to outrank the install key too — it is the
+/// operator's escape hatch, not a second filter.
+#[tokio::test]
+async fn push_all_ignores_the_install_key() {
+    let rig = Rig::pushing_everything().await;
+    rig.store.add_device(device_of_install(
+        "aa11",
+        "install-phone",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.store.add_device(device_of_install(
+        "bb22",
+        "install-ipad",
+        ApnsEnvironment::Sandbox,
+    ));
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .added_by_install("install-phone")
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(item.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let mut tokens = rig.tokens().await;
+    tokens.sort();
+    assert_eq!(tokens, ["aa11", "bb22"]);
+}
+
+/// A Telegram item alerts nobody whatever any install says — and when the phone *was* tracking it,
+/// the alert-if-tracked rule still fires for every alerting device, because `ref` is then a chat
+/// id no registration can match. That rule is unchanged by the install key.
+#[tokio::test]
+async fn a_telegram_item_is_unaffected_by_the_install_key() {
+    let rig = Rig::new().await;
+    rig.store.add_device(device_of_install(
+        "aa11",
+        "install-phone",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.store.add_device(device_of_install(
+        "bb22",
+        "install-ipad",
+        ApnsEnvironment::Sandbox,
+    ));
+
+    // Untracked: nobody.
+    let untracked = ItemBuilder::new("From the bot")
+        .source(SourceKind::Telegram)
+        .status(Status::Finished);
+    rig.notifier
+        .on_event(&DomainEvent::Completed(untracked.view()))
+        .await;
+    rig.notifier.quiesce().await;
+    assert!(rig.requests().await.is_empty(), "Telegram reported it");
+
+    // Tracked by the phone: the end push, plus the alert to every alerting device.
+    let tracked = ItemBuilder::new("From the bot").source(SourceKind::Telegram);
+    rig.store.add_activity(activity(
+        "aa11",
+        tracked.item_id(),
+        "act-1",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.notifier
+        .on_event(&DomainEvent::Completed(
+            tracked.clone().status(Status::Finished).view(),
+        ))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let mut tokens = rig.tokens().await;
+    tokens.sort();
+    assert_eq!(tokens, ["aa11", "act-1", "bb22"]);
+}
+
+/// The push-to-start follows the same key: only the install that added the download gets a Live
+/// Activity.
+#[tokio::test]
+async fn a_live_activity_starts_only_on_the_install_that_added_the_item() {
+    let rig = Rig::new().await;
+    let mut phone = device_of_install("aa11", "install-phone", ApnsEnvironment::Sandbox);
+    phone.live_activity_start_token = Some("start-phone".into());
+    rig.store.add_device(phone);
+    let mut ipad = device_of_install("bb22", "install-ipad", ApnsEnvironment::Sandbox);
+    ipad.live_activity_start_token = Some("start-ipad".into());
+    rig.store.add_device(ipad);
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .added_by_install("install-phone")
+        .status(Status::Downloading);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1, "one start, on one install: {reqs:?}");
+    assert_eq!(reqs[0].0, "/3/device/start-phone");
+    assert_eq!(reqs[0].2["aps"]["event"], json!("start"));
+}
+
+/// And when the *only* device holding a start token is another install, nothing is sent **and the
+/// latch stays open** — the item's one start must not be spent on nobody, so the phone registering
+/// its push-to-start token thirty seconds into the download still gets an activity.
+#[tokio::test]
+async fn a_start_for_another_install_does_not_burn_the_items_one_start() {
+    let rig = Rig::new().await;
+    let mut ipad = device_of_install("bb22", "install-ipad", ApnsEnvironment::Sandbox);
+    ipad.live_activity_start_token = Some("start-ipad".into());
+    rig.store.add_device(ipad);
+
+    let item = ItemBuilder::new("Big Buck Bunny")
+        .added_by_install("install-phone")
+        .status(Status::Downloading);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    assert!(rig.requests().await.is_empty(), "the iPad added nothing");
+
+    // The phone registers late, and the next start edge finds it.
+    let mut phone = device_of_install("aa11", "install-phone", ApnsEnvironment::Sandbox);
+    phone.live_activity_start_token = Some("start-phone".into());
+    rig.store.add_device(phone);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert_eq!(reqs[0].0, "/3/device/start-phone");
+}
+
+/// The update and the end never look at the install: they address a registration the app made for
+/// that one item, and a ring the server refuses to close is a ring nothing else will (DESIGN
+/// §25.2). This is the case the install key could most easily have broken — another install
+/// adopting an activity for a download this phone started.
+#[tokio::test]
+async fn updates_and_ends_ignore_the_install_key() {
+    let rig = Rig::new().await;
+    let mut ipad = device_of_install("bb22", "install-ipad", ApnsEnvironment::Sandbox);
+    ipad.alerts = false; // so this test is about the activity alone
+    rig.store.add_device(ipad);
+
+    let item = ItemBuilder::new("Big Buck Bunny").added_by_install("install-phone");
+    let id = item.item_id();
+    rig.store
+        .add_activity(activity("bb22", id, "act-ipad", ApnsEnvironment::Sandbox));
+
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Downloading, &item))
+        .await;
+    rig.notifier.quiesce().await;
+    let reqs = rig.requests().await;
+    assert_eq!(
+        reqs.len(),
+        1,
+        "the update reached the other install: {reqs:?}"
+    );
+    assert_eq!(reqs[0].0, "/3/device/act-ipad");
+    assert_eq!(reqs[0].2["aps"]["event"], json!("update"));
+
+    rig.notifier
+        .on_event(&DomainEvent::Completed(
+            item.clone().status(Status::Finished).view(),
+        ))
+        .await;
+    rig.notifier.quiesce().await;
+    let reqs = rig.requests().await;
+    assert_eq!(reqs.len(), 2, "and so did the end: {reqs:?}");
+    assert_eq!(reqs[1].0, "/3/device/act-ipad");
+    assert_eq!(reqs[1].2["aps"]["event"], json!("end"));
+    assert!(
+        rig.store
+            .calls()
+            .contains(&Call::RemoveLiveActivitiesFor(id))
     );
 }
 
