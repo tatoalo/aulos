@@ -803,7 +803,7 @@ test('the snapshot seeds the subscriptions panel', withMock({ freeze: true }, as
   await expect(a.locator('.row-title')).toHaveText('Veritasium');
   await expect(a.locator('.st')).toHaveText('Active');
   await expect(a.locator('.rest')).toContainText('youtube.com');
-  await expect(a.locator('.rest')).toContainText('every 60 min');
+  await expect(a.locator('.rest')).toContainText('every hour');
   await expect(a.locator('.rest')).toContainText('checked 3 min ago');
   await expect(a.locator('.rest')).toContainText(/due in 5[5-7] min/);
   await expect(a.locator('.rest')).toContainText('317 seen');

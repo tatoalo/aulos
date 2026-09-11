@@ -2709,7 +2709,7 @@ Page only — `crates/aulos-api/web/`, `tools/web/` and the CI budget line. No R
   reverts itself if the PATCH fails. The inline editor's inputs are written only when it opens, so
   a frame landing mid-edit cannot overwrite what is being typed.
 - **The budget in `ci.yml` went 71680 → 98304 (96 KB)**, as D6 asked. `app.js` + `app.css` is
-  **89 207 bytes**, ~9 KB under. The page is still dependency-free, unbundled and embedded.
+  **89 828 bytes**, ~8 KB under. The page is still dependency-free, unbundled and embedded.
 - **The mock gained the five subscription routes, `items/clear`, and a scripted `subscription`
   life cycle** (created → checking → checked → removed) on the existing 250 ms ticker. Three
   subscriptions seed the snapshot, covering healthy / disabled / failing.

@@ -1021,8 +1021,15 @@ function subHost(u) {
   try { return new URL(u).host.replace(/^www\./, ''); } catch { return u || ''; }
 }
 
+/** `check_interval_minutes` in the largest unit it divides cleanly: 360 reads as 6 hours. */
+function every(m) {
+  if (m % 1440 === 0) { const d = m / 1440; return `every ${d === 1 ? 'day' : `${d} days`}`; }
+  if (m % 60 === 0) { const h = m / 60; return `every ${h === 1 ? 'hour' : `${h} hours`}`; }
+  return `every ${m} min`;
+}
+
 function subMeta(s) {
-  const parts = [subHost(s.url), `every ${s.check_interval_minutes} min`];
+  const parts = [subHost(s.url), every(s.check_interval_minutes)];
   parts.push(s.last_checked ? `checked ${rel(s.last_checked)}` : 'never checked');
   if (s.enabled && !s.checking) parts.push(until(s.next_due));
   parts.push(`${s.seen_count || 0} seen`);
@@ -1057,11 +1064,7 @@ function subRowFor(id) {
   el.innerHTML =
     '<div class="row-main">' +
       '<div class="disc"></div>' +
-      '<div class="row-body">' +
-        '<div class="row-title"></div>' +
-        '<div class="row-sub"><span class="st"></span><span class="rest"></span></div>' +
-        '<div class="sub-err" hidden></div>' +
-      '</div>' +
+      '<div class="row-body"><div class="row-title"></div></div>' +
       '<div class="row-acts">' +
         '<button class="sw sw-sm" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button>' +
         `<button class="iconbtn" type="button" data-sact="check" aria-label="Check now" title="Check now">${icon('retry', 16, 2.2)}</button>` +
@@ -1069,6 +1072,10 @@ function subRowFor(id) {
         `<button class="iconbtn danger" type="button" data-sact="delete" aria-label="Delete" title="Delete">${icon('trash', 16, 2)}</button>` +
       '</div>' +
     '</div>' +
+    // Outside `.row-main`, so the meta gets the whole row width instead of what four 44 px
+    // controls leave of it on a phone. `.sub-line` indents it back under the title.
+    '<div class="row-sub sub-line"><span class="st"></span><span class="rest"></span></div>' +
+    '<div class="sub-err" hidden></div>' +
     '<div class="subedit" hidden>' +
       '<label class="xfield"><span class="label">Name</span><span class="field"><input class="e-name" type="text" autocomplete="off" aria-label="Name"></span></label>' +
       '<label class="xfield"><span class="label">Check every</span><span class="field"><input class="e-every" type="number" min="1" step="1" inputmode="numeric" aria-label="Check interval in minutes"><span class="unit">min</span></span></label>' +

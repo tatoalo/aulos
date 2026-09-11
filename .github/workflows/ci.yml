@@ -112,7 +112,7 @@ jobs:
         run: |
           set -eu
           # Raised from 70 KB when the Subscriptions panel landed (design D6); the page is still
-          # dependency-free, unbundled and served straight from the binary.
+          # dependency-free, unbundled and served straight from the binary (~90 KB of the 96).
           n=$(cat crates/aulos-api/web/app.js crates/aulos-api/web/app.css | wc -c)
           echo "app.js + app.css = $n bytes"
           test "$n" -lt 98304 || { echo "::error::the shipped page is over the 96 KB budget"; exit 1; }

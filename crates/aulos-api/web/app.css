@@ -408,8 +408,10 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 .field .unit { color: var(--text2); font-size: 13px; line-height: 18px; flex-shrink: 0; }
 .field input[type="number"] { width: 100%; -moz-appearance: textfield; }
 
-.row.sub .row-body { gap: 2px; }
+/* 44 px is the disc plus the gap the title sits behind, so the two lines below line up under it. */
+.list > .row.sub { gap: 4px; }
 .row.sub .row-acts { gap: 2px; }
+.sub-line, .sub-err { padding-left: 44px; }
 .sub-err { font-size: 13px; line-height: 18px; color: var(--err); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subs-empty { padding: 4px 8px; font-size: 13px; line-height: 18px; color: var(--text2); }
 

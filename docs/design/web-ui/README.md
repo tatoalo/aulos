@@ -84,6 +84,7 @@ markup, and only four names:
 |---|---|
 | `.sec-acts` | the two header links of a section that has more than one (`Check all`, `Add`) |
 | `.subform` / `.subgrid` | the add form's card and its wrapping field grid — `.subgrid` rather than `.add-extra` because the phone layout hides that one |
+| `.sub-line` | the row's secondary line, indented 44 px so it lines up under the title — it sits outside `.row-main` so a phone gives it the whole row rather than what four 44 px controls leave |
 | `.subedit` / `.edit-acts` | the inline name/interval editor that unfolds under a row |
 | `.btn-sm` | a 36 px flat-accent button (44 px on a phone), for `Save` inside that editor |
 
