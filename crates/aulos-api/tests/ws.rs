@@ -477,6 +477,63 @@ async fn since_is_answered_with_a_resume_and_the_folded_frames() {
 }
 
 #[tokio::test]
+async fn a_boot_that_is_not_the_servers_discards_however_it_is_malformed() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let mut socket = connect(&rig, "ws").await;
+        let snapshot = next_frame(&mut socket).await;
+        let boot = snapshot["boot_id"].as_str().unwrap().to_owned();
+        let cursor = snapshot["seq"].as_u64().unwrap();
+        drop(socket);
+
+        // PROTOCOL §6.2: the server decides, and a cursor whose boot it cannot confirm is one it
+        // must not fold against. A boot that is not a ULID at all was previously parsed to `None`
+        // and silently treated as "no boot sent", which resumed.
+        for query in [
+            format!("ws?since={cursor}&boot=NOT-A-ULID"),
+            format!("ws?since={cursor}&boot="),
+            format!("ws?since={cursor}"),
+        ] {
+            let mut socket = connect(&rig, &query).await;
+            let frame = next_frame(&mut socket).await;
+            assert_eq!(frame["t"], "snapshot", "{query} answered {frame}");
+        }
+
+        // The matching boot still resumes, so the discard is the mismatch and not the cursor.
+        let mut socket = connect(&rig, &format!("ws?since={cursor}&boot={boot}")).await;
+        assert_eq!(next_frame(&mut socket).await["t"], "resume");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_resume_frame_with_an_unusable_boot_answers_a_snapshot() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let mut socket = connect(&rig, "ws").await;
+        let snapshot = next_frame(&mut socket).await;
+        let cursor = snapshot["seq"].as_u64().unwrap();
+
+        send_frame(
+            &mut socket,
+            &json!({ "t": "resume", "since": cursor, "boot": "NOT-A-ULID" }),
+        )
+        .await;
+        assert_eq!(
+            next_frame_of(&mut socket, "snapshot").await["t"],
+            "snapshot"
+        );
+
+        send_frame(&mut socket, &json!({ "t": "resume", "since": cursor })).await;
+        assert_eq!(
+            next_frame_of(&mut socket, "snapshot").await["t"],
+            "snapshot"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn an_up_to_date_cursor_is_a_resume_with_nothing_in_it() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::start(prefix).await;

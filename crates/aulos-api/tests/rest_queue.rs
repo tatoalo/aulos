@@ -1030,6 +1030,41 @@ async fn since_answers_up_to_date_a_delta_or_a_snapshot() {
 }
 
 #[tokio::test]
+async fn state_discards_a_cursor_whose_boot_it_cannot_confirm() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let first = rig.add("https://fake.test/one").await;
+        rig.until_status(&first, "finished").await;
+        rig.settle().await;
+        let (_, snapshot) = rig.get("api/v2/state").await;
+        let boot = snapshot["boot_id"].as_str().unwrap().to_owned();
+        let seq = snapshot["seq"].as_u64().unwrap();
+        let second = rig.add("https://fake.test/two").await;
+        rig.until_status(&second, "finished").await;
+        rig.settle().await;
+
+        // PROTOCOL §6.2: a boot the server cannot confirm forces a snapshot. A `boot` that is not
+        // a ULID used to parse to `None` and be treated as "not sent", which answered a delta.
+        for query in [
+            format!("api/v2/state?since={seq}&boot=NOT-A-ULID"),
+            format!("api/v2/state?since={seq}&boot="),
+            format!("api/v2/state?since={seq}"),
+        ] {
+            let (status, body) = rig.get(&query).await;
+            assert_eq!(status, 200, "{query}: {body}");
+            assert_eq!(body["mode"], "snapshot", "{query} answered {body}");
+        }
+
+        // The matching boot still folds a delta, so it is the boot that decides.
+        let (_, body) = rig
+            .get(&format!("api/v2/state?since={seq}&boot={boot}"))
+            .await;
+        assert_eq!(body["mode"], "delta", "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_cursor_older_than_the_replay_window_is_a_snapshot() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::builder(prefix)

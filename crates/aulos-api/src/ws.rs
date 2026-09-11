@@ -9,7 +9,9 @@
 //! 2. **The snapshot carries `ytdl_options` and `health`.** Both frames are transition-only, so a
 //!    client connecting into a degraded server would otherwise learn nothing (PROTOCOL §5.3).
 //! 3. **`?since=` is answered by the hub**, which either folds the window into one `resume` plus
-//!    at most one frame of each kind, or says "take a snapshot" (PROTOCOL §6.2).
+//!    at most one frame of each kind, or says "take a snapshot" (PROTOCOL §6.2). A `since` whose
+//!    `boot` is missing, empty or not a ULID never reaches the hub: it is a snapshot, because the
+//!    server cannot confirm which boot the cursor came from.
 //! 4. **A slow reader is disconnected, never buffered.** `Lagged` costs one resync; more than
 //!    eight lags in a minute, or a send that blocks for `AULOS_WS_SEND_TIMEOUT_MS`, closes the
 //!    socket with `1013`.
@@ -163,13 +165,19 @@ async fn session(state: ApiState, query: WsQuery, mut socket: WebSocket) {
             Ok(seq) => seq,
             Err(()) => return,
         },
-        Some(since) => {
-            let boot = query.boot.as_deref().and_then(|raw| raw.parse().ok());
-            match resume(&state, &mut socket, Seq(since), boot, done).await {
+        // A `since` whose `boot` is absent, empty or not a ULID is discarded rather than folded
+        // (PROTOCOL §6.2); `resume_boot` is the one place that decides, shared with `GET
+        // api/v2/state`.
+        Some(since) => match crate::v2::query::resume_boot(query.boot.as_deref()) {
+            Some(boot) => match resume(&state, &mut socket, Seq(since), boot, done).await {
                 Ok(seq) => seq,
                 Err(()) => return,
-            }
-        }
+            },
+            None => match send_snapshot(&state, &mut socket, done).await {
+                Ok(seq) => seq,
+                Err(()) => return,
+            },
+        },
     };
 
     let mut ping = interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
@@ -267,7 +275,11 @@ async fn session(state: ApiState, query: WsQuery, mut socket: WebSocket) {
                 }
             }
             Some(ClientFrame::Resume { since, boot }) => {
-                match resume(&state, &mut socket, Seq(since), boot, done).await {
+                let answered = match boot {
+                    Some(boot) => resume(&state, &mut socket, Seq(since), boot, done).await,
+                    None => send_snapshot(&state, &mut socket, done).await,
+                };
+                match answered {
                     Ok(seq) => cursor = seq,
                     Err(()) => return,
                 }
@@ -370,10 +382,10 @@ async fn resume(
     state: &ApiState,
     socket: &mut WebSocket,
     since: Seq,
-    boot: Option<BootId>,
+    boot: BootId,
     done: bool,
 ) -> Result<Option<Seq>, ()> {
-    match state.hub.resume(since, boot) {
+    match state.hub.resume(since, Some(boot)) {
         Resume::Snapshot => send_snapshot(state, socket, done).await,
         Resume::UpToDate => {
             let body = json!({
@@ -482,7 +494,8 @@ enum ClientFrame {
     Resume {
         /// The cursor.
         since: u64,
-        /// The boot it came from.
+        /// The boot it came from, or `None` when it was absent or unusable — which is a
+        /// snapshot, not a fold (PROTOCOL §6.2).
         boot: Option<BootId>,
     },
     /// `{"t":"ack","seq":…}` — advisory, and CUT.
@@ -517,10 +530,7 @@ fn parse_client_frame(message: &Message) -> Option<ClientFrame> {
         }),
         "resume" => Some(ClientFrame::Resume {
             since: value.get("since").and_then(Value::as_u64)?,
-            boot: value
-                .get("boot")
-                .and_then(Value::as_str)
-                .and_then(|raw| raw.parse().ok()),
+            boot: crate::v2::query::resume_boot(value.get("boot").and_then(Value::as_str)),
         }),
         "ack" => Some(ClientFrame::Ack),
         "watch" | "unwatch" => Some(ClientFrame::Watch),

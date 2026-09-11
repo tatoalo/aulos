@@ -103,8 +103,10 @@ impl Plan {
         let Some(since) = query.since else {
             return Self::Snapshot(state.state.snapshot());
         };
-        let boot = query.boot.as_deref().and_then(|raw| raw.parse().ok());
-        match state.hub.resume(Seq(since), boot) {
+        let Some(boot) = resume_boot(query.boot.as_deref()) else {
+            return Self::Snapshot(state.state.snapshot());
+        };
+        match state.hub.resume(Seq(since), Some(boot)) {
             Resume::Snapshot => Self::Snapshot(state.state.snapshot()),
             // `resume` returned `UpToDate` because `since == head` at that moment, so the cursor
             // the body reports is `since` itself — re-reading `head()` here could name a frame
@@ -137,6 +139,29 @@ impl Plan {
             Self::Merged { from, to, frames } => delta_body(state, from, to, &frames),
         }
     }
+}
+
+/// The `boot` that goes with a `since` cursor, or `None` when the cursor must be discarded
+/// (PROTOCOL §5.1, §6.2).
+///
+/// §5.1 says `boot` is sent with **every** `since`, and §6.2 makes the server the one that
+/// decides: a cursor whose origin the server cannot confirm is one it must not fold against.
+/// Three inputs therefore mean the same thing — "take a snapshot":
+///
+/// | `boot` | Why |
+/// |---|---|
+/// | absent | the client did not say which boot the cursor came from |
+/// | empty | same, spelled with a `&boot=` that carried nothing |
+/// | unparseable | it is not a ULID, so it is certainly not *this* server's `boot_id` |
+///
+/// The old `and_then(|raw| raw.parse().ok())` collapsed the third case into the first and then
+/// handed `None` to [`aulos_queue::EventHub::resume`], whose `None` means "no boot to check" — so
+/// `?since=1197&boot=NOT-A-ULID` resumed exactly as if the boot had matched.
+///
+/// Shared with the WebSocket so `<p>ws` and `GET api/v2/state` cannot drift (PROTOCOL §0 rule 1).
+#[must_use]
+pub fn resume_boot(raw: Option<&str>) -> Option<aulos_core::BootId> {
+    raw?.parse().ok()
 }
 
 /// `W/"<boot_id>-<seq>"`, where `seq` is the cursor the body carries (PROTOCOL §4.3).
