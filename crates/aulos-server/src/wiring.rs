@@ -992,6 +992,10 @@ async fn run_apns(notifier: ApnsNotifier, mut inbox: EventInbox) {
 /// A missing token must never stop the server: the bot is an optional integration, and a container
 /// that refuses to start because `TELEGRAM_BOT_TOKEN` is empty is strictly worse than one that
 /// serves HTTP and says so in the log.
+// Eight: the six collaborators the actor is built from, the inbox, and the progress reader. They
+// are the wiring's own locals handed straight through, so bundling them into a struct would only
+// move the same list one line up.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_telegram(
     cfg: &Arc<Config>,
     store: &Store,
