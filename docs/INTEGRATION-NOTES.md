@@ -2878,3 +2878,68 @@ changed.
   100 ms wall-clock assertion that misses under parallel load, and
   `aulos-provider-ytdlp`'s `a_real_file_url_extract_yields_one_video_entry` wants a `formats` array
   the locally installed yt-dlp 2026.08.19 does not emit for a `file://` URL.
+
+
+## API stress-test findings — the envelope, the boot check, and three doc truths (2026-09-11)
+
+A protocol stress run against a live server found five conformance gaps. Two were fixed in
+`aulos-api`; three were the documentation being narrower than the server, and the documentation
+moved. No queue, core, provider or server code was touched.
+
+- **A 2 MB body answered axum's plain-text `413`, not the envelope.** The body-limit layer rejects
+  from `Content-Length` before any extractor of ours runs, so no handler could intercept it.
+  `trace::headers` now rewrites a `413` that is **not** already a stamped envelope into
+  `payload_too_large` with the limit in the message, and the request id is filled in on the same
+  pass it always was. The two documented `413`s — the cookie cap and the batch cap — are stamped
+  envelopes and are left exactly alone. PROTOCOL §1.6 now names the ceiling (`1 065 536` bytes:
+  the 1 000 000-byte cookie cap plus room for multipart part headers).
+  (`a_body_over_the_size_limit_answers_the_envelope_not_axums_plain_text`.)
+- **A `boot` the server could not parse was treated as a `boot` that was not sent.** Both surfaces
+  did `and_then(|raw| raw.parse().ok())` and handed the resulting `None` to `EventHub::resume`,
+  whose `None` means "nothing to check" — so `?since=1197&boot=NOT-A-ULID` resumed as if the boot
+  had matched. `v2::query::resume_boot` is now the single decision (absent, empty or unparseable ⇒
+  snapshot), and `<p>ws` at connect, the `resume` client frame, and `GET api/v2/state` all call it.
+  `ws::resume` takes a `BootId` rather than an `Option<BootId>`, so the ambiguity cannot come back.
+  PROTOCOL §5.1, §6.2 and §4.3 now say `boot` is required alongside `since`.
+  (`a_boot_that_is_not_the_servers_discards_however_it_is_malformed`,
+  `a_resume_frame_with_an_unusable_boot_answers_a_snapshot`,
+  `state_discards_a_cursor_whose_boot_it_cannot_confirm`.)
+- **`seq` is documented, not changed.** The run saw `resume{to:1203}` followed by `added 1203` and
+  `delta 1203`, and `completed 1240` / `pong 1240` / `error 1240`, against §5.2's "strictly
+  increasing across all frame types". Allocating fresh sequences was considered and rejected: the
+  four per-connection kinds (`snapshot`, `resume`, `pong`, `error` — exactly `!is_replayable()`)
+  are written to one socket and are not in the replay ring, so a fresh `seq` would consume a global
+  number every time any client pinged, and the fold's frames would end at a cursor that disagreed
+  with the `to` §6.3 tells the client to store. §5.2 now splits the ten broadcast kinds (strictly
+  increasing, one `seq` each, in the ring) from the four per-connection ones (they restate a
+  cursor), tabulates which cursor each restates, and gives the client rule:
+  `cursor = max(cursor, frame.seq)`, and an equal `seq` is never a duplicate.
+  (`the_four_per_connection_frames_restate_the_cursor_instead_of_allocating_one`.)
+- **`counts` is windowed, and now says so.** `state.counts` and `healthz.items` are a histogram
+  over the published generation's `items` + `done`, and `done` is the most recent
+  `AULOS_MEM_DONE_ITEMS` terminal rows across *all* terminal statuses — so 500 newer `canceled`
+  rows take `counts.finished` to `0` while `GET api/v2/items?status=finished` still answers 30.
+  Making it store-backed was considered and **not** done: `DomainEvent::Removed` carries
+  `{ids, reason}` and no status, and the aggregator's `forget` cannot attribute a row that was
+  removed while outside the window, so an incrementally-maintained store count would drift
+  (`done_total` survives this only because it is one bucket). Fixing that means changing the event
+  shape in `aulos-core` and the clear/sweep paths in `aulos-queue`, which is a bigger change than
+  the finding. PROTOCOL §4.3, §5.3 and §4.7 now name the window, and point at `done_total` and at
+  `GET api/v2/items?status=…`'s `total` for exact numbers.
+  (`counts_are_the_done_window_and_the_docs_say_so`.)
+- **Three smaller documentation truths.** `health.components.*.status` can be `"disabled"` —
+  `jellyfin`, `nfo` and `telegram` report it when the integration is not configured, and it never
+  drags the roll-up below `ok` (§4.3, §5.3, §5.9, §4.7). The `snapshot` frame carries
+  `"mode":"snapshot"` so one decoder serves both surfaces (§5.3). And `percent` is **not
+  monotonic**: a merged video+audio download restarts it per `phase` (§2.3).
+
+### Two things found on the way
+
+- **`web::tests::the_page_stays_inside_its_size_budget` was failing on `main`.** The subscriptions
+  panel raised `ci.yml`'s budget 71 680 → 98 304 but not the assertion in `web.rs`, which still
+  read `70 * 1024` against an 89 828-byte page. Raised to `96 * 1024`, the same number `ci.yml`
+  checks — that consistency is the only reason to keep both.
+- **`cargo clippy --workspace --all-targets -- -D warnings` was failing on `main`** on cargo
+  1.98.1: `chunks_exact_to_as_chunks` ×3 in the vendored SHA-256, `useless_format` in
+  `plugin_command.rs` and in `trace.rs`'s redaction test, and `result_large_err` on the ws test
+  helper (`#[allow]`ed — the `Err` is tungstenite's own enum). Fixed in one commit, no behaviour.

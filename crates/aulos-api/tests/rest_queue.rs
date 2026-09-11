@@ -1030,6 +1030,37 @@ async fn since_answers_up_to_date_a_delta_or_a_snapshot() {
 }
 
 #[tokio::test]
+async fn counts_are_the_done_window_and_the_docs_say_so() {
+    // PROTOCOL §4.3/§5.3: `counts` is a histogram over the snapshot's own `items` + `done`, and
+    // `done` is the most recent `AULOS_MEM_DONE_ITEMS` terminal records. So the terminal counters
+    // are bounded by that window while `done_total` and `GET api/v2/items` are not. This pins the
+    // documented shape, because the number is cheap and the honest total lives next to it.
+    let rig = Rig::builder("/")
+        .env("AULOS_MEM_DONE_ITEMS", "2")
+        .start()
+        .await;
+    for n in 0..4 {
+        let id = rig.add(&format!("https://fake.test/done{n}")).await;
+        rig.until_status(&id, "finished").await;
+    }
+    rig.settle().await;
+
+    let (_, state) = rig.get("api/v2/state").await;
+    assert_eq!(state["done"].as_array().unwrap().len(), 2, "{state}");
+    assert_eq!(state["counts"]["finished"], 2, "the window, not the store");
+    assert_eq!(state["done_total"], 4, "the honest total sits next to it");
+    assert_eq!(state["truncated"]["done"], true);
+
+    // The exact per-status number is a store query, and it disagrees with `counts` on purpose.
+    let (_, page) = rig.get("api/v2/items?status=finished").await;
+    assert_eq!(page["total"], 4, "{page}");
+
+    // `healthz.items` is the same object, so it is windowed the same way (§4.7).
+    let (_, health) = rig.get("healthz").await;
+    assert_eq!(health["items"]["finished"], 2, "{health}");
+}
+
+#[tokio::test]
 async fn state_discards_a_cursor_whose_boot_it_cannot_confirm() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::start(prefix).await;

@@ -477,6 +477,73 @@ async fn since_is_answered_with_a_resume_and_the_folded_frames() {
 }
 
 #[tokio::test]
+async fn the_four_per_connection_frames_restate_the_cursor_instead_of_allocating_one() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let mut socket = connect(&rig, "ws").await;
+        let snapshot = next_frame(&mut socket).await;
+        let boot = snapshot["boot_id"].as_str().unwrap().to_owned();
+        let cursor = snapshot["seq"].as_u64().unwrap();
+
+        // PROTOCOL §5.2: `pong` and `error` are answers to *this* socket and are not in the replay
+        // ring, so they carry the head rather than a number of their own. Two probes with nothing
+        // happening in between therefore report the same `seq` — and it is the head, not a fresh
+        // frame, which is what `X-Aulos-Seq` on any REST call says.
+        send_frame(&mut socket, &json!({ "t": "ping", "c": 1 })).await;
+        let first = next_frame_of(&mut socket, "pong").await;
+        send_frame(&mut socket, &json!({ "t": "ping", "c": 2 })).await;
+        let second = next_frame_of(&mut socket, "pong").await;
+        assert_eq!(first["seq"], second["seq"], "a pong must not consume a seq");
+        send_frame(&mut socket, &json!({ "t": "subscribe" })).await;
+        let error = next_frame_of(&mut socket, "error").await;
+        assert_eq!(
+            error["seq"], first["seq"],
+            "an error must not consume one either"
+        );
+        let head = rig
+            .get_raw("api/v2/state")
+            .await
+            .headers()
+            .get("x-aulos-seq")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(
+            first["seq"].as_u64().unwrap(),
+            head,
+            "the pong carries the head"
+        );
+        drop(socket);
+
+        // And the frames folded inside a `resume` all carry the fold's `to` — they replay a window
+        // rather than being issued, and §6.3 already tells the client its cursor is `to` once it
+        // has applied them.
+        let id = rig.add("https://fake.test/folded").await;
+        rig.until_status(&id, "finished").await;
+        rig.settle().await;
+        let mut socket = connect(&rig, &format!("ws?since={cursor}&boot={boot}")).await;
+        let resume = next_frame(&mut socket).await;
+        assert_eq!(resume["t"], "resume", "{resume}");
+        let to = resume["to"].as_u64().unwrap();
+        assert_eq!(resume["seq"], to);
+        let mut folded = 0;
+        while let Some(frame) = try_next_frame(&mut socket, Duration::from_millis(400)).await {
+            assert_eq!(
+                frame["seq"].as_u64().unwrap(),
+                to,
+                "a folded {} carries the fold's `to`",
+                frame["t"]
+            );
+            folded += 1;
+        }
+        assert!(folded > 0, "the fold produced no frames");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_boot_that_is_not_the_servers_discards_however_it_is_malformed() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::start(prefix).await;

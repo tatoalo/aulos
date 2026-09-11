@@ -190,7 +190,7 @@ HTTP errors:
 | `not_found` | 404 | unknown item / group / subscription id, or no route matched the path |
 | `method_not_allowed` | 405 | the path exists but not under this method; the response also carries `Allow` |
 | `conflict` | 409 | duplicate subscription URL, or a strict-mode duplicate add |
-| `payload_too_large` | 413 | cookie upload over **1 000 000 bytes** (decimal, not 1 MiB — the legacy cap, preserved byte-for-byte along with its message `Cookie file too large (max 1MB)`), or a batch add over the server's cap |
+| `payload_too_large` | 413 | cookie upload over **1 000 000 bytes** (decimal, not 1 MiB — the legacy cap, preserved byte-for-byte along with its message `Cookie file too large (max 1MB)`), a batch add over the server's cap, or **any** request body over the server's `1 065 536`-byte ceiling (that cookie cap plus room for the multipart part headers). The last one is refused before the handler runs — from `Content-Length` where there is one — and its `message` names the limit in bytes. |
 | `internal` | 500 | a bug. `message` is a request id; details are in the server logs. |
 | `socketio_removed` | 501 | you hit `<p>socket.io/*`. Socket.IO is not provided; use `<p>ws` or `GET api/v2/state`. This is the only 501 the server emits. |
 | `state_unavailable` | 503 | the database is busy; retry after `Retry-After` seconds |
@@ -402,7 +402,7 @@ present and may be `null`. **No key is ever absent.**
 | `status` | `Status` | the closed 8-value enum, §3. A group's `status` is a roll-up over the same 8 values — never a different vocabulary, and never `resolving`, `preparing` or `postprocessing`. The exact rule is §3.3. |
 | `auto_start` | `boolean` | with `status == "queued"`: `true` = waiting for a slot, `false` = waiting for the user (the legacy *pending* bucket) |
 | `provider` | `string \| null` | e.g. `"ytdlp"`, `"streamingcommunity"`, `"command:bandcamp"`. `null` until resolution picks one. |
-| `percent` | `number` | **never null.** `0.0` before any progress; `0.0…99.9` while active; exactly `100.0` when `finished`. `error`/`canceled` keep the last value. |
+| `percent` | `number` | **never null.** `0.0` before any progress; `0.0…99.9` while active; exactly `100.0` when `finished`. `error`/`canceled` keep the last value. **It is not monotonic.** A merged download (a separate video stream and audio stream, joined afterwards) is two downloads behind one row, and `percent` is the *current* stream's progress: it climbs to ~100 while `phase == "video"`, restarts near `0` when `phase` flips to `"audio"`, and climbs again. Render it, do not assert on it — a bar that only ever grows will look stuck, and an animation keyed on "percent decreased" will fire. `phase` is the field that says which pass you are watching. |
 | `speed` | `number \| null` | bytes per second |
 | `eta` | `integer \| null` | whole seconds remaining |
 | `downloaded_bytes` | `integer \| null` | |
@@ -791,12 +791,20 @@ before the socket connects.
   "health": { "status": "ok", "components": { "pot": "ok", "store": "ok", "ytdl_options": "ok" } } }
 ```
 
+`counts` is a histogram over **this response's own `items` + `done` arrays**, not over the
+database — see §5.3, which describes the one window both surfaces share. The terminal counters
+(`finished`, `error`, `canceled`) are therefore bounded by the in-memory done window
+(`AULOS_MEM_DONE_ITEMS`, 500 by default) and can read `0` while history holds thousands: 500 newer
+`canceled` rows push every `finished` row out of the window and take `counts.finished` with them.
+`done_total` is the honest total of terminal records; for an exact number **per** status, read
+`total` from `GET api/v2/items?status=finished` (§4.4), which is a store query.
+
 `ytdl_options` and `health` are the **current** state of the two things that are otherwise only
 announced on change (§5.9), so a client that connects while the options file is broken or the POT
 sidecar is down learns it here instead of having to also call `healthz` and `api/v2/ytdl-options`.
 `ytdl_options` is exactly the `ytdl_options` frame's payload minus `t`/`seq`; `health.components`
-is a flat `component → "ok" | "degraded" | "down"` map — the abridged form. Call `GET healthz` when
-you want the detail behind a non-`ok` value.
+is a flat `component → "ok" | "degraded" | "down" | "disabled"` map — the abridged form. Call
+`GET healthz` when you want the detail behind a non-`ok` value.
 
 `GET api/v2/state?since=10240&boot=01JBQ8YQ…` returns a delta when it can:
 
@@ -833,16 +841,19 @@ Two things depend on it:
 step never creates a record from a `delta`.
 
 `mode` ∈ `"snapshot" | "delta" | "up_to_date"`. You get `"snapshot"` when `since` is absent, when
-`boot` does not match `boot_id`, when `since` is older than the server's replay window, or when
-`since` is **greater** than the server's current `seq` (which happens after a restore). You get
-`"up_to_date"` — with no arrays at all — when `since == seq`.
+`boot` is absent, empty or not a ULID, when `boot` does not match `boot_id`, when `since` is older
+than the server's replay window, or when `since` is **greater** than the server's current `seq`
+(which happens after a restore). You get `"up_to_date"` — with no arrays at all — when
+`since == seq`. The three `boot` cases are one rule: a cursor whose origin the server cannot
+confirm is one it will not fold against (§6.2).
 
 `ETag` is `W/"<boot_id>-<seq>"`, where `seq` is **this response's own** `seq` — the one in the
 body, never a newer one the body does not reflect. Send it back as `If-None-Match` and an
 unchanged server answers `304` with an empty body, which makes pull-to-refresh nearly free.
 
-Query parameters: `since` (integer), `boot` (string), `done` (boolean, default `true` — set
-`false` to omit the completed window entirely and get a very small snapshot).
+Query parameters: `since` (integer), `boot` (string — **required whenever you send `since`**;
+without it, or with a value that is not a ULID, you get a snapshot), `done` (boolean, default
+`true` — set `false` to omit the completed window entirely and get a very small snapshot).
 
 ### 4.4 `GET api/v2/items` — paged list
 
@@ -1113,7 +1124,7 @@ always correct because every option has a server-side default.
 
 | Method | Path | Body / query | Success | Errors |
 |---|---|---|---|---|
-| GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down` | `503` when the store is unusable |
+| GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down`, and each `components.<name>.status` additionally may be `disabled`; `items` is the §5.3 `counts` object and is windowed the same way | `503` when the store is unusable |
 | GET | `livez` | — | `200 {"ok":true}` | — |
 | GET | `version` | — | `200 {"version":…,"yt-dlp":…,"url_prefix":…,"protocol":"v2"}` | — |
 | GET | `api/v2/subscriptions` | — | `200 {"subscriptions":[Subscription]}` | — |
@@ -1333,7 +1344,7 @@ Query parameters, all optional:
 | Param | Type | Meaning |
 |---|---|---|
 | `since` | integer | resume from this `seq` instead of taking a fresh snapshot |
-| `boot` | string | the `boot_id` your `since` came from. A mismatch forces a snapshot. **Always send it with `since`.** |
+| `boot` | string | the `boot_id` your `since` came from. **Required whenever you send `since`**: absent, empty, not a ULID, or simply not this server's `boot_id` all force a snapshot (§6.2). |
 | `done` | boolean, default `true` | include the completed window in the snapshot |
 | `groups` | comma list of ids | pre-subscribe to these groups' children |
 | `token` | string | the bearer token, when the proxy cannot forward cookies |
@@ -1366,15 +1377,40 @@ Compression is not negotiated. Frames are 200–900 bytes; you do not need it.
 | `pong` | on demand | your RTT probe, echoed |
 | `error` | on demand | a protocol or auth error, usually followed by a close |
 
-`seq` is strictly increasing across **all** frame types within one server boot. A jump of more than
-1 does not mean you lost anything — `seq` counts frames and every frame is delivered in order on a
-single socket. Gaps only appear across a reconnect.
+`seq` **never decreases** on a socket, and a jump of more than 1 does not mean you lost anything —
+every broadcast frame is delivered in order, and gaps only appear across a reconnect.
+
+It is *strictly* increasing across the ten **broadcast** kinds only: `delta`, `added`, `completed`,
+`removed`, `subscription`, `subscription_removed`, `ytdl_options`, `providers`, `notice`, `health`.
+Those are the frames the server publishes once, to every socket, and each one consumes exactly one
+`seq` from the shared counter and goes into the replay ring that `?since=` reads.
+
+The other four kinds are **per-connection**: they are written to your socket only, they are not in
+the ring, and they therefore **restate a cursor rather than allocating one**. Two of them in a row
+with nothing happening in between carry the *same* number, and that is not a bug:
+
+| `t` | The `seq` it carries |
+|---|---|
+| `snapshot` | the cursor the snapshot's own generation is current as of — the `seq` in its body |
+| `resume` | `to`, the end of the folded window (or `since` itself when you were already current) |
+| the frames folded **inside** a `resume` (§6.3) | the same `to` as the `resume` that announced them — they replay a window, they are not new frames |
+| `pong`, `error` | the server's current head, the same number `X-Aulos-Seq` reports on a REST call at that instant |
+
+So `resume{to:1203}` followed by `added seq 1203` and `delta seq 1203`, or `completed 1240` then
+`pong 1240` then `error 1240`, is exactly the contract. Allocating fresh numbers for these would be
+worse, not better: a per-connection frame would consume a global `seq` every time any client
+pinged, and a resuming client's fold would end at a cursor that disagreed with the `to` §6.3 tells
+it to store.
+
+**The client rule is one line:** advance your stored cursor to `max(stored, frame.seq)` and never
+treat `frame.seq == stored` as a duplicate to drop.
 
 ### 5.3 `snapshot`
 
 ```json
 { "t": "snapshot",
   "seq": 10251,
+  "mode": "snapshot",
   "boot_id": "01JBQ8YQ2E0000000000000000",
   "server_time": 1757000000123,
   "server": { "version": "2026.09.04", "yt_dlp": "2026.8.30.232658.dev0",
@@ -1392,8 +1428,21 @@ single socket. Gaps only appear across a reconnect.
   "health": { "status": "ok", "components": { "pot": "ok", "store": "ok", "ytdl_options": "ok" } } }
 ```
 
+- `mode` is always `"snapshot"`, and is the same key `GET api/v2/state` answers with (§4.3). It is
+  on the frame too so that one decoder handles both surfaces: a REST caller branches on `mode`, a
+  socket caller branches on `t`, and the body is otherwise byte-for-byte the same object.
 - `items` and `done` are two arrays purely so the completed window can be omitted with
   `?done=false`. **They hold the same object type.** Concatenate them if you want one list.
+- `counts` is a histogram over `items` + `done` — **this snapshot's own arrays**, not the database.
+  `items` holds every non-terminal record, so `queued`, `resolving`, `preparing`, `downloading` and
+  `postprocessing` are exact. The three terminal counters are not: they only count what is inside
+  the in-memory done window, which holds the most recent `AULOS_MEM_DONE_ITEMS` terminal records
+  (500 by default) across *all* terminal statuses. Five hundred newer `canceled` rows evict every
+  `finished` row from the window, and `counts.finished` goes to `0` while
+  `GET api/v2/items?status=finished` still answers `"total": 30`. Use `done_total` for the total
+  number of terminal records and `GET api/v2/items?status=…`'s `total` when you need an exact
+  per-status number; `counts` is what the window says, cheaply, and it is what `healthz.items`
+  reports too.
 - `truncated.done: true` means `done` is a window, not the whole history: there are `done_total`
   completed records and you are seeing the most recent ones. Page the rest with
   `GET api/v2/items?status=finished,error,canceled&cursor=…` when the user scrolls.
@@ -1406,8 +1455,13 @@ single socket. Gaps only appear across a reconnect.
   would see nothing on the socket and would have to additionally call `GET healthz` and
   `GET api/v2/ytdl-options`. (The legacy server pushed `ytdl_options_changed` on connect for
   exactly this reason.) `ytdl_options` is the `ytdl_options` frame's payload minus `t`/`seq`;
-  `health` is the abridged form — `status` plus a flat `component → "ok" | "degraded" | "down"`
-  map. Call `GET healthz` for the detail behind a non-`ok` component. Both keys are always present.
+  `health` is the abridged form — `status` plus a flat
+  `component → "ok" | "degraded" | "down" | "disabled"` map. `"disabled"` means the component is
+  **not configured** rather than unwell — `jellyfin`, `nfo` and `telegram` report it when their
+  integration is switched off — and it never drags the roll-up `status` below `ok`, so treat it
+  exactly like `ok` unless you are drawing the component list itself. The roll-up `status` stays
+  `ok | degraded | down`. Call `GET healthz` for the detail behind a non-`ok` component. Both keys
+  are always present.
 - `protocol` is self-describing on purpose: read `batch_ms` if you want to size an animation, and
   read `delta_semantics` to assert you and the server agree.
 
@@ -1616,7 +1670,9 @@ Refetch `api/v2/capabilities` and/or `api/v2/catalog` when you see this.
                  "detail": "3 consecutive probe failures" } ] }
 ```
 
-Emitted **only** on a component transition, never periodically.
+Emitted **only** on a component transition, never periodically. `status` is the roll-up,
+`ok | degraded | down`; `from` and `to` are per-component and may additionally be `"disabled"`,
+which means the integration is not configured (§5.3) and never makes the roll-up worse.
 
 ### 5.10 `pong` and `error`
 
@@ -1668,13 +1724,18 @@ You get a `snapshot` — and must discard — when any of these is true, and the
 you:
 
 - you sent no `since`;
+- you sent a `since` with **no `boot`**, or with a `boot` that is empty or not a ULID — the server
+  cannot confirm which boot the cursor came from, so it will not fold against it;
 - your `boot` does not match the server's `boot_id` (the server restarted, or a backup was
   restored);
 - your `since` is older than the server's replay window;
 - your `since` is **greater** than the server's current `seq` (a restore rolled the server back).
 
-That last case is why `boot` matters. Without it a client could present a cursor above the head and
-be told "you are up to date" when it had in fact missed everything.
+The middle two are why `boot` matters, and why it is required rather than encouraged. Without it a
+client could present a cursor above the head and be told "you are up to date" when it had in fact
+missed everything — and a client that sent a *corrupted* boot would get the same wrong answer as
+one that sent none, which is the worst of both. Both rules hold on `<p>ws` (at connect, and on the
+`resume` client frame of §5.11) and on `GET api/v2/state`.
 
 ### 6.3 `resume`
 
