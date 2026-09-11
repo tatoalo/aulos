@@ -928,6 +928,9 @@ pub async fn send_frame(socket: &mut Socket, body: &Value) {
 
 /// Sends one client frame, tolerating a socket the server has already closed — which is the
 /// correct outcome for a frame over the size cap.
+// The `Err` variant is tungstenite's own error enum; boxing it here would only make every call
+// site unwrap one more layer to see what the socket actually said.
+#[allow(clippy::result_large_err)]
 pub async fn try_send_frame(
     socket: &mut Socket,
     body: &Value,

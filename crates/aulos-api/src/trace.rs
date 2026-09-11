@@ -180,7 +180,7 @@ mod tests {
         let token = "9f3c1a2b".repeat(8); // a 64-hex APNs device token
         let logged = redact_path(&format!("/api/v2/devices/{token}"));
         assert!(!logged.contains(&token), "{logged}");
-        assert_eq!(logged, format!("/api/v2/devices/9f3c1a2b\u{2026}"));
+        assert_eq!(logged, "/api/v2/devices/9f3c1a2b\u{2026}");
 
         let item = "01JBQ7Z5T9K3M2R8V4XW6Y0AAA";
         let logged = redact_path(&format!("/api/v2/devices/{token}/live-activities/{item}"));

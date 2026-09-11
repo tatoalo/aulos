@@ -34,7 +34,7 @@ fn dl_manifest(script: &str, extra: &[&str], tail: &str) -> String {
     let mut argv = vec![
         "\"/bin/sh\"".to_owned(),
         "\"-c\"".to_owned(),
-        format!("{}", toml_str(script)),
+        toml_str(script),
         "\"sh\"".to_owned(),
     ];
     argv.extend(extra.iter().map(|a| toml_str(a)));

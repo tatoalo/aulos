@@ -108,8 +108,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         .wrapping_mul(8);
     tail.extend_from_slice(&bits.to_be_bytes());
 
-    let whole = &data[..data.len() - rem];
-    for block in whole.chunks_exact(64).chain(tail.chunks_exact(64)) {
+    // Both slices are exact multiples of 64 by construction, so neither remainder is used.
+    let (whole, _) = data[..data.len() - rem].as_chunks::<64>();
+    let (tail_blocks, _) = tail.as_chunks::<64>();
+    for block in whole.iter().chain(tail_blocks) {
         compress(&mut h, block);
     }
 
@@ -145,8 +147,9 @@ const fn hex_digit(nibble: u8) -> char {
 /// One 64-byte block, FIPS 180-4 §6.2.2.
 fn compress(h: &mut [u32; 8], block: &[u8]) {
     let mut w = [0u32; 64];
-    for (slot, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *slot = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let (words, _) = block.as_chunks::<4>();
+    for (slot, bytes) in w.iter_mut().zip(words) {
+        *slot = u32::from_be_bytes(*bytes);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
