@@ -576,8 +576,10 @@ async fn actions_are_idempotent_and_answer_for_every_id() {
 async fn the_reachable_skip_reasons_are_all_produced() {
     for_each_prefix(|prefix| async move {
         // `not_pausable` needs an item parked in `resolving`, which is what the slow provider
-        // gives; `not_retryable` needs a non-terminal one; `already_terminal` and `not_startable`
-        // need a finished and a resolving item respectively.
+        // gives; `not_retryable` needs a non-terminal one; `already_terminal` needs a finished
+        // one. `start` on a resolving item is *applied* since the stress round (it flips
+        // `auto_start` so the row reaches the scheduler, PROTOCOL §4.2); `not_startable` now
+        // needs a running item and has its own test below.
         //
         // `not_cancelable` is deliberately absent: the engine's cancel is idempotent from every
         // state (DESIGN §8.7), so no request can produce it. It stays in the closed wire enum
@@ -591,15 +593,23 @@ async fn the_reachable_skip_reasons_are_all_produced() {
         let resolving = rig.add("https://fake.test/slow").await;
         rig.until_status(&resolving, "resolving").await;
 
-        for (action, reason) in [("pause", "not_pausable"), ("start", "not_startable")] {
-            let (_, body) = rig
-                .post(
-                    "api/v2/items/actions",
-                    &json!({ "action": action, "ids": [resolving] }),
-                )
-                .await;
-            assert_eq!(body["skipped"][0]["reason"], reason, "{action}: {body}");
-        }
+        let (_, body) = rig
+            .post(
+                "api/v2/items/actions",
+                &json!({ "action": "pause", "ids": [resolving] }),
+            )
+            .await;
+        assert_eq!(
+            body["skipped"][0]["reason"], "not_pausable",
+            "pause: {body}"
+        );
+        let (_, body) = rig
+            .post(
+                "api/v2/items/actions",
+                &json!({ "action": "start", "ids": [resolving] }),
+            )
+            .await;
+        assert_eq!(body["applied"][0], resolving, "start: {body}");
 
         let (_, body) = rig
             .post(
@@ -641,6 +651,30 @@ async fn the_reachable_skip_reasons_are_all_produced() {
             )
             .await;
         assert_eq!(body["skipped"][0]["reason"], "already_terminal", "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn start_on_a_running_item_is_not_startable() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::builder(prefix)
+            .without_default_providers()
+            .provider(Arc::new(ytdlp_like()))
+            .provider(Arc::new(hanging()))
+            .start()
+            .await;
+        let id = rig.add("https://fake.test/hang").await;
+        rig.until_status(&id, "downloading").await;
+
+        let (status, body) = rig
+            .post(
+                "api/v2/items/actions",
+                &json!({ "action": "start", "ids": [id] }),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["skipped"][0]["reason"], "not_startable", "{body}");
     })
     .await;
 }
