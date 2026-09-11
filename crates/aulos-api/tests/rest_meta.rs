@@ -922,6 +922,83 @@ async fn every_http_error_code_answers_with_the_same_envelope() {
     assert!(body["error"]["message"].as_str().unwrap().contains("ws"));
 }
 
+/// POSTs a body the server will refuse on sight.
+///
+/// The body-limit layer answers from `Content-Length` without draining the socket, so a write that
+/// is still in flight can be reset before the response is read. That is a transport race, not the
+/// behaviour under test, so the request is retried a couple of times.
+async fn post_oversized(rig: &Rig, route: &str, body: &str) -> reqwest::Response {
+    let mut last = None;
+    for _ in 0..5 {
+        match rig
+            .http
+            .post(rig.url(route))
+            .header("content-type", "application/json")
+            .body(body.to_owned())
+            .send()
+            .await
+        {
+            Ok(response) => return response,
+            Err(e) => last = Some(e),
+        }
+    }
+    panic!("{route} never answered: {last:?}");
+}
+
+#[tokio::test]
+async fn a_body_over_the_size_limit_answers_the_envelope_not_axums_plain_text() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        // Two megabytes, well over the v2 surface's own ceiling. Before the fix this reached the
+        // client as axum's `text/plain` "Failed to buffer the request body: length limit
+        // exceeded", which PROTOCOL §1.5 has no room for.
+        let huge = json!({ "url": YT, "custom_name_prefix": "A".repeat(2_000_000) }).to_string();
+        let limit = aulos_api::v2::cookies::BODY_LIMIT.to_string();
+        for route in [
+            "api/v2/downloads",
+            "api/v2/items/actions",
+            "api/v2/subscriptions",
+        ] {
+            let response = post_oversized(&rig, route, &huge).await;
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .map(|v| v.to_str().unwrap().to_owned());
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                "application/json; charset=utf-8",
+                "{route}"
+            );
+            let (status, answer) = support::status_and_body(response).await;
+            assert_eq!(status, 413, "{route}: {answer}");
+            assert_eq!(answer["error"]["code"], "payload_too_large", "{route}");
+            let message = answer["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains(&limit),
+                "{route}: the message must name the limit {limit}, got {message:?}"
+            );
+            // The envelope's six keys, and a `request_id` that matches the header.
+            let error = answer["error"].as_object().unwrap();
+            assert_eq!(error.len(), 6, "{route}: {error:?}");
+            assert!(request_id.is_some(), "{route} has no X-Request-Id");
+            assert_eq!(
+                answer["error"]["request_id"]
+                    .as_str()
+                    .map(ToOwned::to_owned),
+                request_id,
+                "{route}"
+            );
+        }
+
+        // The v1 shim shares the ceiling and must answer the same way.
+        let response = post_oversized(&rig, "add", &huge).await;
+        let (status, answer) = support::status_and_body(response).await;
+        assert_eq!(status, 413, "{answer}");
+        assert_eq!(answer["error"]["code"], "payload_too_large");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn the_error_envelope_is_stable() {
     let rig = Rig::start("/").await;

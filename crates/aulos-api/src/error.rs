@@ -119,6 +119,19 @@ impl ApiError {
         StatusCode::from_u16(raw).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
+    /// `413 payload_too_large` for a request body over the server's ceiling.
+    ///
+    /// Nothing calls this from a handler: the ceiling is enforced by the body-limit layer, which
+    /// rejects **before** any extractor of ours runs and answers in `text/plain`. [`crate::trace`]
+    /// turns that rejection into this, so PROTOCOL §1.5's "without exception" stays true.
+    #[must_use]
+    pub fn body_too_large(limit: usize) -> Self {
+        Self::of(
+            ErrorCode::PayloadTooLarge,
+            format!("the request body must not exceed {limit} bytes"),
+        )
+    }
+
     /// The envelope body, with `request_id` still `null`.
     #[must_use]
     pub fn body(&self) -> serde_json::Value {

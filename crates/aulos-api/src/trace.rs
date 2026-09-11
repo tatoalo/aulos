@@ -8,6 +8,7 @@
 //! | `X-Request-Id` | echoed from the request when it is a sane token, else a fresh ULID |
 //! | `X-Aulos-Seq` | [`EventHub::head`] at the moment the response was produced (PROTOCOL §6.4) |
 //! | error bodies | a response stamped [`EnvelopeStamp`] gets its `error.request_id` filled in |
+//! | the body cap | a bare `413` from the body-limit layer becomes a `payload_too_large` envelope |
 //! | the access log | one line per request at INFO when `ENABLE_ACCESSLOG`, else DEBUG |
 //!
 //! The logged path is [`redact_path`]-ed. `api/v2/devices/{token}` (DESIGN §25.8) is the only
@@ -23,10 +24,11 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::ApiState;
 use crate::error::EnvelopeStamp;
+use crate::v2::cookies::BODY_LIMIT;
 
 /// `X-Request-Id`, echoed or minted.
 pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -74,6 +76,17 @@ pub async fn headers(State(state): State<ApiState>, mut req: Request, next: Next
     req.extensions_mut().insert(RequestId(id.clone()));
 
     let mut response = next.run(req).await;
+
+    // PROTOCOL §1.5 says every non-2xx carries the envelope "without exception", and the one
+    // rejection no handler can intercept is the request-body ceiling: the body-limit layer answers
+    // a 2 MB body with axum's `text/plain` "Failed to buffer the request body: length limit
+    // exceeded" before any extractor of ours is reached. The documented 413s — the cookie cap and
+    // the batch cap — are already stamped envelopes, so they are left alone.
+    if response.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE
+        && response.extensions().get::<EnvelopeStamp>().is_none()
+    {
+        response = crate::error::ApiError::body_too_large(BODY_LIMIT).into_response();
+    }
 
     if response.extensions().get::<EnvelopeStamp>().is_some() {
         response = stamp_envelope(response, &id).await;
