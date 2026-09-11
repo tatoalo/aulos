@@ -651,6 +651,7 @@ async fn a_403_that_survives_the_remint_degrades_healthz() {
         "sent_total",
         "failed_total",
         "pruned_tokens_total",
+        "retried_total",
         "last_error",
         "last_sent_at",
     ] {

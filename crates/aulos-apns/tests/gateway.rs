@@ -352,3 +352,141 @@ async fn an_unreachable_gateway_gives_up_rather_than_erroring() {
     assert!(!reason.contains("127.0.0.1"), "{reason}");
     assert!(reason.ends_with("(gave up)"), "{reason}");
 }
+
+// ---------------------------------------------------------------------------
+// The retry ladder the pushes that matter get (DESIGN §25.5)
+// ---------------------------------------------------------------------------
+
+/// A client whose two ladders are distinguishable but both millisecond-fast: three delays for an
+/// update, six for a priority-10 push.
+fn laddered(server: &MockServer) -> ApnsClient {
+    let clock: Arc<dyn Clock> = clock();
+    ApnsClient::new(TEST_KEY_P8.as_bytes(), TEST_KEY_ID, TEST_TEAM_ID, clock)
+        .expect("client")
+        .with_base_url(&server.uri())
+        .expect("base url")
+        .with_backoff_ladders(
+            vec![Duration::from_millis(1); 3],
+            vec![Duration::from_millis(1); 6],
+        )
+}
+
+fn update_push(expiration: i64) -> Push {
+    Push {
+        kind: PushKind::LiveActivity,
+        topic: Arc::from(format!("{TEST_BUNDLE_ID}.push-type.liveactivity")),
+        priority: 5,
+        expiration,
+        collapse_id: None,
+        payload: json!({ "aps": { "event": "update" } }),
+    }
+}
+
+#[test]
+fn the_two_ladders_are_the_documented_ones() {
+    // Both APNs attempts on the VPS since boot ended `GaveUp` during a VPN blip that lasted a few
+    // minutes: [1s, 4s, 16s] covers 21 s, which is not a blip. The pushes that matter — alerts,
+    // and a Live Activity start or end — now cover just over eight minutes.
+    assert_eq!(aulos_apns::DEFAULT_BACKOFF.map(|d| d.as_secs()), [1, 4, 16]);
+    assert_eq!(
+        aulos_apns::IMMEDIATE_BACKOFF.map(|d| d.as_secs()),
+        [1, 4, 16, 60, 120, 300]
+    );
+}
+
+#[tokio::test]
+async fn a_priority_ten_push_walks_the_long_ladder() {
+    let server = MockServer::start().await;
+    mount(&server, 503, json!({ "reason": "ServiceUnavailable" })).await;
+
+    let client = laddered(&server);
+    let outcome = client
+        .send(&alert_push(), TOKEN, ApnsEnvironment::Sandbox)
+        .await
+        .expect("send");
+    assert!(matches!(
+        outcome,
+        Outcome::GaveUp {
+            status: Some(503),
+            ..
+        }
+    ));
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        7,
+        "six delays, so seven requests"
+    );
+    assert_eq!(client.counters().snapshot().retried_total, 6);
+}
+
+#[tokio::test]
+async fn an_update_keeps_the_short_ladder() {
+    // A progress frame that could not be delivered is superseded by the next one, so spending five
+    // minutes on it would only push a stale percentage onto the lock screen.
+    let server = MockServer::start().await;
+    mount(&server, 429, json!({ "reason": "TooManyRequests" })).await;
+
+    let client = laddered(&server);
+    client
+        .send(&update_push(0), TOKEN, ApnsEnvironment::Sandbox)
+        .await
+        .expect("send");
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        4,
+        "three delays, so four requests"
+    );
+    assert_eq!(client.counters().snapshot().retried_total, 3);
+}
+
+#[tokio::test]
+async fn a_retry_that_would_land_past_the_expiration_is_not_taken() {
+    // `apns-expiration` is what the push itself says it is worth: retrying past it hands Apple a
+    // message it is contractually required to drop.
+    let server = MockServer::start().await;
+    mount(&server, 500, json!({ "reason": "InternalServerError" })).await;
+
+    let expired = Push {
+        expiration: common::epoch_secs(),
+        ..alert_push()
+    };
+    let client = laddered(&server);
+    let outcome = client
+        .send(&expired, TOKEN, ApnsEnvironment::Sandbox)
+        .await
+        .expect("send");
+    assert!(matches!(
+        outcome,
+        Outcome::GaveUp {
+            status: Some(500),
+            ..
+        }
+    ));
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        1,
+        "the deadline had already passed, so no retry was worth taking"
+    );
+    assert_eq!(client.counters().snapshot().retried_total, 0);
+}
+
+#[tokio::test]
+async fn a_transport_failure_on_a_priority_ten_push_also_walks_the_long_ladder() {
+    // The VPS case: the gateway is not answering at all because the VPN tunnel is down.
+    let clock: Arc<dyn Clock> = clock();
+    let client = ApnsClient::new(TEST_KEY_P8.as_bytes(), TEST_KEY_ID, TEST_TEAM_ID, clock)
+        .expect("client")
+        .with_base_url("http://127.0.0.1:1")
+        .expect("base url")
+        .with_backoff_ladders(
+            vec![Duration::from_millis(1)],
+            vec![Duration::from_millis(1); 4],
+        );
+
+    let outcome = client
+        .send(&alert_push(), TOKEN, ApnsEnvironment::Sandbox)
+        .await
+        .expect("a transport failure is an Outcome, not an Err");
+    assert!(matches!(outcome, Outcome::GaveUp { status: None, .. }));
+    assert_eq!(client.counters().snapshot().retried_total, 4);
+}

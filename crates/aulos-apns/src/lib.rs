@@ -59,8 +59,8 @@ pub mod notifier;
 pub mod payload;
 
 pub use client::{
-    ApnsClient, DEFAULT_BACKOFF, Outcome, PRODUCTION_BASE, Push, PushKind, REQUEST_TIMEOUT,
-    SANDBOX_BASE,
+    ApnsClient, DEFAULT_BACKOFF, IMMEDIATE_BACKOFF, IMMEDIATE_PRIORITY, Outcome, PRODUCTION_BASE,
+    Push, PushKind, REQUEST_TIMEOUT, SANDBOX_BASE,
 };
 pub use error::ApnsError;
 pub use health::{ApnsHealth, ApnsHealthHandle, COMPONENT, Counters};

@@ -189,6 +189,10 @@ impl ApnsNotifier {
         clock: Arc<dyn Clock>,
         push_all: bool,
     ) -> Self {
+        // The client records `retried_total` into whichever counter set it is given; handing it
+        // the notifier's is what puts the retries on `healthz.apns`.
+        let counters = Counters::new();
+        let client = client.with_counters(Arc::clone(&counters));
         Self {
             shared: Arc::new(Shared {
                 client,
@@ -196,7 +200,7 @@ impl ApnsNotifier {
                 clock,
                 default_topic: Arc::from(default_topic),
                 push_all,
-                counters: Counters::new(),
+                counters,
                 state: Mutex::new(State::default()),
                 permits: Semaphore::new(PUSH_CONCURRENCY),
                 tasks: Arc::new(watch::Sender::new(0)),

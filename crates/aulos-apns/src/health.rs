@@ -8,7 +8,7 @@
 //! "apns": {
 //!   "status": "ok",
 //!   "devices": 2, "live_activities": 1,
-//!   "sent_total": 41, "failed_total": 0, "pruned_tokens_total": 1,
+//!   "sent_total": 41, "failed_total": 0, "pruned_tokens_total": 1, "retried_total": 3,
 //!   "last_error": null, "last_sent_at": 1772582400000
 //! }
 //! ```
@@ -80,6 +80,8 @@ pub struct Counters {
     sent: AtomicU64,
     failed: AtomicU64,
     pruned: AtomicU64,
+    /// Requests re-sent after a `429`, a `5xx` or a transport failure — not pushes, attempts.
+    retried: AtomicU64,
     /// `0` means "never".
     last_sent_at: AtomicI64,
     last_error: Mutex<Option<String>>,
@@ -117,6 +119,16 @@ impl Counters {
         self.pruned.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records one retried request.
+    ///
+    /// Counted per *attempt*, not per push: a `503` that took four goes before it landed shows as
+    /// `sent_total 1, retried_total 3`. That is what tells an operator the difference between a
+    /// healthy gateway and one being reached across a tunnel that keeps dropping — which is what
+    /// this counter was added for.
+    pub fn retried(&self) {
+        self.retried.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Publishes the cached Live Activity registration count.
     pub fn set_live_activities(&self, n: u64) {
         self.live_activities.store(n, Ordering::Relaxed);
@@ -148,6 +160,7 @@ impl Counters {
             sent_total: self.sent.load(Ordering::Relaxed),
             failed_total: self.failed.load(Ordering::Relaxed),
             pruned_tokens_total: self.pruned.load(Ordering::Relaxed),
+            retried_total: self.retried.load(Ordering::Relaxed),
             last_error: self
                 .last_error
                 .lock()
@@ -173,6 +186,8 @@ pub struct ApnsHealth {
     pub failed_total: u64,
     /// Device or activity tokens dropped because Apple said they were dead.
     pub pruned_tokens_total: u64,
+    /// Requests re-sent after a `429`, a `5xx` or a transport failure.
+    pub retried_total: u64,
     /// The most recent failure, or `None`.
     pub last_error: Option<String>,
     /// When the last push landed, unix ms, or `None`.
@@ -190,6 +205,7 @@ impl ApnsHealth {
             sent_total: 0,
             failed_total: 0,
             pruned_tokens_total: 0,
+            retried_total: 0,
             last_error: None,
             last_sent_at: None,
         }
@@ -216,6 +232,7 @@ impl ApnsHealth {
             .with("sent_total", self.sent_total)
             .with("failed_total", self.failed_total)
             .with("pruned_tokens_total", self.pruned_tokens_total)
+            .with("retried_total", self.retried_total)
             .with(
                 "last_error",
                 self.last_error

@@ -25,6 +25,7 @@ use aulos_core::ports::ApnsEnvironment;
 use serde_json::Value;
 
 use crate::error::ApnsError;
+use crate::health::Counters;
 use crate::jwt::ProviderToken;
 
 /// The production gateway.
@@ -36,12 +37,44 @@ pub const SANDBOX_BASE: &str = "https://api.sandbox.push.apple.com:443";
 /// The per-request ceiling. A push is fire-and-forget; nothing may hang on one.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The retry ladder for `429` and `5xx`: three retries, so four requests at worst.
+/// The retry ladder for a Live Activity **update**: three retries, so four requests at worst.
+///
+/// Updates stay short on purpose. A progress frame that could not be delivered is superseded by
+/// the next one five seconds later, so spending five minutes on it would only land a stale
+/// percentage on the lock screen — and the trailing-edge timer is already the retry that matters.
 pub const DEFAULT_BACKOFF: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(4),
     Duration::from_secs(16),
 ];
+
+/// The retry ladder for a priority-10 push — an alert, a Live Activity start, a Live Activity end
+/// (DESIGN §25.5).
+///
+/// Six retries covering just over eight minutes, because the failure this exists for is not a
+/// busy gateway but a dead egress: the VPS runs inside a VPN namespace, and during a blip that
+/// lasted a few minutes **both** APNs attempts since boot ended in `GaveUp` after
+/// [`DEFAULT_BACKOFF`]'s twenty-one seconds. These three pushes are not superseded by anything —
+/// an alert nobody sent is a download the user never hears about, and an `end` nobody sent is a
+/// progress ring spinning on the lock screen for ever — so they are worth waiting out a tunnel.
+///
+/// The wait is bounded twice over: by the ladder, and by the push's own `apns-expiration`, which
+/// [`ApnsClient::send`] stops at.
+pub const IMMEDIATE_BACKOFF: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+    Duration::from_secs(16),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+];
+
+/// The `apns-priority` at or above which a push gets [`IMMEDIATE_BACKOFF`].
+///
+/// The same number as `notifier::PRIORITY_IMMEDIATE`, asserted equal by a unit test below: the
+/// priority *is* the statement that this push cannot be superseded, so there is no second flag to
+/// keep in sync with it.
+pub const IMMEDIATE_PRIORITY: u8 = 10;
 
 /// Which `apns-push-type` a push declares.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -84,6 +117,15 @@ pub struct Push {
     pub collapse_id: Option<Arc<str>>,
     /// The body.
     pub payload: Value,
+}
+
+impl Push {
+    /// Whether this push is one of the three that nothing supersedes, and therefore walks
+    /// [`IMMEDIATE_BACKOFF`] rather than [`DEFAULT_BACKOFF`].
+    #[must_use]
+    pub const fn is_immediate(&self) -> bool {
+        self.priority >= IMMEDIATE_PRIORITY
+    }
 }
 
 /// What one `send` ended in.
@@ -169,9 +211,14 @@ const STALE_JWT_REASONS: [&str; 2] = ["InvalidProviderToken", "ExpiredProviderTo
 pub struct ApnsClient {
     http: reqwest::Client,
     token: ProviderToken,
+    clock: Arc<dyn Clock>,
     /// `Some` when `APNS_BASE_URL_OVERRIDE` is set: both environments then point at it.
     override_base: Option<Box<str>>,
     backoff: Vec<Duration>,
+    immediate_backoff: Vec<Duration>,
+    /// Where `retried_total` lands. A client built on its own owns a private set; the notifier
+    /// swaps in its own with [`Self::with_counters`] so `healthz` sees the retries.
+    counters: Arc<Counters>,
 }
 
 impl std::fmt::Debug for ApnsClient {
@@ -180,6 +227,7 @@ impl std::fmt::Debug for ApnsClient {
             .field("token", &self.token)
             .field("override_base", &self.override_base)
             .field("backoff", &self.backoff)
+            .field("immediate_backoff", &self.immediate_backoff)
             .finish()
     }
 }
@@ -197,7 +245,7 @@ impl ApnsClient {
         team_id: &str,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, ApnsError> {
-        let token = ProviderToken::new(key_pem, key_id, team_id, clock)?;
+        let token = ProviderToken::new(key_pem, key_id, team_id, Arc::clone(&clock))?;
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -205,8 +253,11 @@ impl ApnsClient {
         Ok(Self {
             http,
             token,
+            clock,
             override_base: None,
             backoff: DEFAULT_BACKOFF.to_vec(),
+            immediate_backoff: IMMEDIATE_BACKOFF.to_vec(),
+            counters: Counters::new(),
         })
     }
 
@@ -247,11 +298,63 @@ impl ApnsClient {
         Ok(self)
     }
 
-    /// Replaces the retry ladder. Tests use millisecond delays; nothing else calls this.
+    /// Replaces **both** retry ladders with the same delays. Tests use millisecond values;
+    /// nothing else calls this.
+    ///
+    /// Both, deliberately: a suite that shortened only the update ladder would spend
+    /// [`IMMEDIATE_BACKOFF`]'s eight minutes on the first alert that met a `503`.
     #[must_use]
-    pub fn with_backoff(mut self, backoff: Vec<Duration>) -> Self {
-        self.backoff = backoff;
+    pub fn with_backoff(self, backoff: Vec<Duration>) -> Self {
+        self.with_backoff_ladders(backoff.clone(), backoff)
+    }
+
+    /// Replaces the two ladders separately — the only way to tell them apart in a test.
+    #[must_use]
+    pub fn with_backoff_ladders(
+        mut self,
+        updates: Vec<Duration>,
+        immediate: Vec<Duration>,
+    ) -> Self {
+        self.backoff = updates;
+        self.immediate_backoff = immediate;
         self
+    }
+
+    /// Points the client's `retried_total` at the notifier's counter set.
+    #[must_use]
+    pub fn with_counters(mut self, counters: Arc<Counters>) -> Self {
+        self.counters = counters;
+        self
+    }
+
+    /// The counter set this client records retries into. For `healthz` and for the tests.
+    #[must_use]
+    pub fn counters(&self) -> &Arc<Counters> {
+        &self.counters
+    }
+
+    /// The ladder one push walks, and how long it may still wait.
+    ///
+    /// `None` ends the retry loop: either the ladder is spent, or the next delay would land past
+    /// the push's own `apns-expiration`, at which point Apple is contractually required to drop
+    /// the message anyway. `expiration == 0` means "deliver now or discard" and carries no
+    /// deadline to check — that is the Live Activity update, whose ladder is short for other
+    /// reasons.
+    fn next_delay(&self, push: &Push, retries: usize) -> Option<Duration> {
+        let ladder = if push.is_immediate() {
+            &self.immediate_backoff
+        } else {
+            &self.backoff
+        };
+        let delay = *ladder.get(retries)?;
+        if push.expiration != 0 {
+            let now = self.clock.now_ms().div_euclid(1_000);
+            let secs = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
+            if now.saturating_add(secs) >= push.expiration {
+                return None;
+            }
+        }
+        Some(delay)
     }
 
     /// The gateway for one device environment, honouring the override.
@@ -276,7 +379,9 @@ impl ApnsClient {
     ///
     /// The ladder is: `200` stops; a dead-token reason stops; a stale-JWT `403` reminds **once**
     /// and retries without consuming a backoff slot; `429`/`5xx`/transport walk
-    /// [`DEFAULT_BACKOFF`] and then give up; anything else is rejected.
+    /// [`DEFAULT_BACKOFF`] — or [`IMMEDIATE_BACKOFF`] for a priority-10 push — and then give up;
+    /// anything else is rejected. A retry that would land past the push's own `apns-expiration` is
+    /// not taken.
     ///
     /// # Errors
     /// [`ApnsError::Mint`] if the provider token cannot be signed at all — the one condition under
@@ -295,8 +400,9 @@ impl ApnsClient {
             let bearer = self.token.bearer()?;
             match self.attempt(&url, &bearer, push).await {
                 Err(transport) => {
-                    if let Some(delay) = self.backoff.get(retries).copied() {
+                    if let Some(delay) = self.next_delay(push, retries) {
                         retries += 1;
+                        self.counters.retried();
                         tokio::time::sleep(delay).await;
                         continue;
                     }
@@ -322,8 +428,9 @@ impl ApnsClient {
                         continue;
                     }
                     429 | 500..=599 => {
-                        if let Some(delay) = self.backoff.get(retries).copied() {
+                        if let Some(delay) = self.next_delay(push, retries) {
                             retries += 1;
+                            self.counters.retried();
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -491,5 +598,27 @@ mod tests {
     fn the_push_type_headers_are_apples_spelling() {
         assert_eq!(PushKind::Alert.header(), "alert");
         assert_eq!(PushKind::LiveActivity.header(), "liveactivity");
+    }
+
+    #[test]
+    fn the_immediate_priority_is_the_one_the_notifier_stamps() {
+        // The ladder is chosen off `apns-priority` alone, so the two constants have to agree or
+        // every alert would quietly fall back to the three-delay ladder.
+        assert_eq!(IMMEDIATE_PRIORITY, crate::notifier::PRIORITY_IMMEDIATE);
+        assert_ne!(crate::notifier::PRIORITY_THROTTLED, IMMEDIATE_PRIORITY);
+    }
+
+    #[test]
+    fn the_long_ladder_is_taken_only_by_a_priority_ten_push() {
+        let push = |priority: u8| Push {
+            kind: PushKind::Alert,
+            topic: Arc::from("com.tatoalo.aulos"),
+            priority,
+            expiration: 0,
+            collapse_id: None,
+            payload: Value::Null,
+        };
+        assert!(push(10).is_immediate());
+        assert!(!push(5).is_immediate());
     }
 }
