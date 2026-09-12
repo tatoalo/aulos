@@ -6099,12 +6099,17 @@ roll-up onto the event view and the snapshot computes it identically.
 
 **The progress cadence: `PROGRESS_INTERVAL` = 5 s.** A backgrounded app receives nothing but
 pushes, and the engine publishes no event per progress frame, so a status-driven update path leaves
-the island frozen between transitions. While an item is `downloading` or `postprocessing` and has
-at least one registration, the trailing-edge timer keeps re-arming at `now + 5 s` per (item,
-device), re-reads the snapshot and pushes the next frame. Three properties make that safe:
+the island frozen between transitions. While an item is `downloading` or `postprocessing`, the
+trailing-edge timer keeps re-arming at `now + 5 s` per (item, device), re-reads the snapshot and the
+item's registrations, and pushes the next frame. Four properties make that safe:
 
+- **A registration that arrives late is picked up.** The timer is armed for a progressing item
+  whether or not it has a registration *yet* — the app starts its activity and `PUT`s the update
+  token seconds after the download begins — and each tick re-reads the registrations when the cache
+  is older than `UPDATE_INTERVAL`, so the first frame follows the registration by at most 5 s.
 - **An identical view is not a frame.** The pulled view is compared against what the item already
-  has pending; a stalled download costs zero pushes and only a snapshot read.
+  has pending; a stalled download costs zero pushes and only a snapshot read. An item nobody
+  registered costs no push at all.
 - **It terminates.** The moment the item leaves the progressing statuses — paused, finished,
   errored — no further timer is armed; `Completed`/`Removed` forget the track outright, which ends
   any timer already sleeping on the next pass.

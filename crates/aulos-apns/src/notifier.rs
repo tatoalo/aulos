@@ -656,16 +656,8 @@ impl Shared {
     /// One `StatusChanged`, as far as Live Activity updates are concerned.
     async fn live_activity_update(self: &Arc<Self>, view: Arc<ItemView>) {
         let id = view.id;
-        if self.records_stale(id) {
-            match self.store.live_activities_for(id).await {
-                Ok(records) => self.store_records(id, records),
-                Err(e) => {
-                    tracing::warn!(item = %id, error = %e, "APNs: live activities unreadable");
-                    self.counters
-                        .set_last_error(&format!("live activities unreadable: {e}"));
-                    return;
-                }
-            }
+        if !self.refresh_records(id).await {
+            return;
         }
         if self.bundle_ids_stale(id) {
             self.refresh_devices().await;
@@ -675,6 +667,28 @@ impl Shared {
         self.dispatch_updates(id, step);
         if let Some(deadline) = arm {
             self.arm_timer(id, deadline);
+        }
+    }
+
+    /// Re-reads the item's registrations when the cache is older than one throttle window.
+    ///
+    /// Returns whether the caller may go on to [`Self::step`]: a failed read leaves the caller
+    /// deciding on registrations it has no reason to trust.
+    async fn refresh_records(&self, id: ItemId) -> bool {
+        if !self.records_stale(id) {
+            return true;
+        }
+        match self.store.live_activities_for(id).await {
+            Ok(records) => {
+                self.store_records(id, records);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(item = %id, error = %e, "APNs: live activities unreadable");
+                self.counters
+                    .set_last_error(&format!("live activities unreadable: {e}"));
+                false
+            }
         }
     }
 
@@ -813,12 +827,14 @@ impl Shared {
             );
         }
 
-        // A progressing item with a live activity on it is never "done": the numbers keep moving
-        // and the app is not there to ask for them, so the timer comes back on the progress
-        // cadence to pull the next frame (DESIGN §25.4). It terminates the moment the item leaves
-        // the progressing statuses, or when `Completed`/`Removed` forgets the track entirely.
-        let keep_pulling =
-            self.progress.is_some() && !track.records.is_empty() && is_progressing(view.status);
+        // A progressing item is never "done": the numbers keep moving and the app is not there to
+        // ask for them, so the timer comes back on the progress cadence to pull the next frame
+        // (DESIGN §25.4). It terminates the moment the item leaves the progressing statuses, or
+        // when `Completed`/`Removed` forgets the track entirely.
+        //
+        // Deliberately not conditioned on the item having a registration *now*: the app registers
+        // its activity seconds after the download starts, and the tick is what notices.
+        let keep_pulling = self.progress.is_some() && is_progressing(view.status);
         let arm = match next {
             // Someone still owes this view an update.
             Some(due) => {
@@ -897,6 +913,11 @@ impl Shared {
                         return;
                     }
                     () = tokio::time::sleep_until(at) => {}
+                }
+                // The registration can land after the download started, so the tick re-reads it.
+                shared.refresh_records(id).await;
+                if shared.bundle_ids_stale(id) {
+                    shared.refresh_devices().await;
                 }
                 let step = shared.step(id, None, true);
                 let next = step.arm;

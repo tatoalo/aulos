@@ -2785,10 +2785,11 @@ so the bar sat at `0 %` and the island never moved.
   entered `postprocessing`; taking the published status wholesale would push the stale word. A
   published row that is already terminal is ignored for the same reason. Groups are untouched either
   way — the engine writes their roll-up onto the event view and the snapshot computes it the same.
-- **`PROGRESS_INTERVAL` is 5 s, and the timer is what re-reads.** While an item is progressing and
-  has a registration, the trailing-edge timer re-arms at `now + 5 s` and pulls the next frame. An
-  identical view is not a frame, so a stalled download costs zero pushes. It terminates when the
-  item leaves the progressing statuses or when `Completed`/`Removed` forgets the track.
+- **`PROGRESS_INTERVAL` is 5 s, and the timer is what re-reads.** While an item is progressing —
+  registration or not — the trailing-edge timer re-arms at `now + 5 s` and pulls the next frame and
+  the item's registrations. An identical view is not a frame, so a stalled download costs zero
+  pushes and an unregistered one costs none ever. It terminates when the item leaves the progressing
+  statuses or when `Completed`/`Removed` forgets the track.
   **Consequence for tests:** `ApnsNotifier::quiesce()` never returns while a progressing item has a
   live activity, because the timer is deliberately still armed. The cadence tests use explicit
   sleeps and `shutdown()`; `wiring::run_apns` already gives `quiesce` a 1 s timeout before

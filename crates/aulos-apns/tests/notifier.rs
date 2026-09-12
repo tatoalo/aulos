@@ -1632,6 +1632,95 @@ async fn a_stalled_download_costs_no_push_while_the_timer_keeps_watching() {
 }
 
 #[tokio::test]
+async fn a_registration_that_arrives_after_the_download_started_gets_updates_on_the_cadence() {
+    // The bug this pins: the phone registers its activity a few seconds *after* the add, so the
+    // `downloading` edge found no registration, sent nothing and armed no timer — and nothing
+    // re-read the registrations until the next status change. The island sat on its first frame
+    // for the whole download.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let id = base.item_id();
+    let frame = |percent: f64| {
+        base.clone()
+            .progress(percent, None, None, None, None)
+            .view()
+    };
+
+    rig.progress.publish(frame(10.0));
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    settle().await;
+    assert!(
+        rig.requests().await.is_empty(),
+        "nothing is registered yet, so nothing may be pushed"
+    );
+
+    // The app finishes starting its activity and registers the update token.
+    rig.store
+        .add_activity(activity("aa11", id, "act-1", ApnsEnvironment::Sandbox));
+    rig.progress.publish(frame(25.0));
+
+    // No further `StatusChanged`: the cadence alone has to notice.
+    tokio::time::sleep(CADENCE + CADENCE / 3).await;
+    let bodies = rig.bodies().await;
+    assert!(
+        !bodies.is_empty(),
+        "the late registration was never noticed"
+    );
+    assert_eq!(last_state(&bodies)["percent"], json!(25.0));
+    assert_eq!(
+        bodies.last().expect("a body")["aps"]["event"],
+        json!("update")
+    );
+
+    rig.progress.publish(frame(60.0));
+    tokio::time::sleep(CADENCE + CADENCE / 3).await;
+    assert_eq!(
+        last_state(&rig.bodies().await)["percent"],
+        json!(60.0),
+        "and then it keeps to the cadence"
+    );
+    assert_eq!(
+        rig.tokens().await.iter().filter(|t| *t == "act-1").count(),
+        rig.requests().await.len(),
+        "every push went to the registration, and only to it"
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unregistered_download_costs_no_push_while_the_cadence_watches_for_one() {
+    // The other half of the late-registration fix: the timer is armed for every progressing item,
+    // so it must stay silent for the items — every Telegram or web add — nobody is watching.
+    let rig = Rig::pulling_progress().await;
+    rig.store
+        .add_device(device("aa11", ApnsEnvironment::Sandbox));
+    let base = ItemBuilder::new("x").status(Status::Downloading);
+    let frame = |percent: f64| {
+        base.clone()
+            .progress(percent, None, None, None, None)
+            .view()
+    };
+
+    rig.progress.publish(frame(10.0));
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &base))
+        .await;
+    for percent in [30.0, 70.0] {
+        rig.progress.publish(frame(percent));
+        tokio::time::sleep(CADENCE + CADENCE / 3).await;
+    }
+    assert!(
+        rig.requests().await.is_empty(),
+        "no registration, no push - however often the numbers move"
+    );
+    rig.notifier.shutdown().await;
+}
+
+#[tokio::test]
 async fn leaving_the_progressing_statuses_ends_the_cadence() {
     // The cadence has to terminate on its own, not only when `Completed` forgets the item: a
     // paused download that kept a timer alive for ever would be one leaked task per pause.
