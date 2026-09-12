@@ -6,8 +6,8 @@ mod support;
 use std::sync::Arc;
 
 use aulos_core::{
-    AddReason, Codec, DownloadType, ErrorCode, FormatId, QualityId, RelDir, Selection, SourceKind,
-    SourceRef, Status,
+    AddReason, Codec, DomainEvent, DownloadType, ErrorCode, FormatId, QualityId, RelDir, Selection,
+    SourceKind, SourceRef, Status,
 };
 use aulos_queue::{AddError, DedupeKey};
 use support::{Harness, request, selection};
@@ -56,6 +56,9 @@ async fn a_single_add_inserts_resolving_and_acks_before_resolution() {
         Some("fake")
     );
 
+    h.events
+        .until("add", |e| matches!(e, DomainEvent::Added(..)))
+        .await;
     let added = h.events.added();
     assert_eq!(added.len(), 1);
     assert_eq!(added[0], (vec![id], AddReason::Created));

@@ -11,7 +11,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aulos_core::{DomainEvent, Kind, Status};
+use aulos_core::{AddReason, DomainEvent, Kind, Status};
 use aulos_queue::GroupAcc;
 use support::{Harness, expanding, request};
 
@@ -43,6 +43,11 @@ async fn a_group_publishes_the_three_child_counters_and_children_inline() {
     req.auto_start = false;
     let group = h.add_request(req).await.unwrap().ids[0];
     h.until_all("the children", |rows| rows.len() == 4).await;
+    h.events
+        .until("expansion", |e| {
+            matches!(e, DomainEvent::Added(_, AddReason::Expanded))
+        })
+        .await;
     h.settle().await;
 
     let view = last_group_view(&h, group);
@@ -67,8 +72,7 @@ async fn the_counters_follow_the_children_all_the_way_to_finished() {
         .build()
         .await;
     let group = h.add("https://fake.test/playlist/run").await;
-    h.until(group, "the group roll-up", |i| i.status == Status::Finished)
-        .await;
+    h.until_status(group, Status::Finished).await;
     h.settle().await;
 
     let view = last_group_view(&h, group);
@@ -120,11 +124,7 @@ async fn a_deleted_child_stops_counting_against_its_group() {
     h.handle
         .actions(aulos_queue::Action::Start, vec![group], None)
         .await;
-    let row = h
-        .until(group, "the roll-up after the deletion", |i| {
-            i.status == Status::Finished
-        })
-        .await;
+    let row = h.until_status(group, Status::Finished).await;
     assert_eq!(row.status, Status::Finished);
     h.settle().await;
 
@@ -193,10 +193,18 @@ async fn the_drift_pass_leaves_a_group_whose_children_have_aged_out_alone() {
     h.advance(Duration::from_secs(301)).await;
     h.settle().await;
     let third = h.children(group).await[2].id;
+    // Cleared so the wait below cannot be satisfied by the group's `queued` frame from promotion.
+    h.events.clear();
     h.handle
         .actions(aulos_queue::Action::Pause, vec![third], None)
         .await;
     h.until(third, "parked", |i| i.status == Status::Queued)
+        .await;
+    h.events
+        .until(
+            "the group's republished frame",
+            |e| matches!(e, DomainEvent::StatusChanged { id, .. } if *id == group),
+        )
         .await;
     h.settle().await;
 
@@ -230,9 +238,7 @@ async fn a_group_whose_children_all_failed_rolls_up_to_error() {
     .unwrap();
     let h = Harness::builder().provider(Arc::new(failing)).build().await;
     let group = h.add("https://fake.test/playlist/broken").await;
-    let row = h
-        .until(group, "the error roll-up", |i| i.status == Status::Error)
-        .await;
+    let row = h.until_status(group, Status::Error).await;
     assert_eq!(row.status, Status::Error);
     h.settle().await;
     let view = last_group_view(&h, group);
@@ -270,8 +276,7 @@ async fn the_drift_recompute_corrects_a_deliberately_corrupted_accumulator() {
         .build()
         .await;
     let group = h.add("https://fake.test/playlist/drift").await;
-    h.until(group, "the group roll-up", |i| i.status == Status::Finished)
-        .await;
+    h.until_status(group, Status::Finished).await;
     let children = h.children(group).await;
     assert_eq!(children.len(), 4);
 
@@ -313,8 +318,7 @@ async fn the_byte_weighted_percent_survives_a_round_trip_through_the_entry_hints
         .build()
         .await;
     let group = h.add("https://fake.test/playlist/bytes").await;
-    h.until(group, "the group roll-up", |i| i.status == Status::Finished)
-        .await;
+    h.until_status(group, Status::Finished).await;
     let children = h.children(group).await;
     let acc = GroupAcc::recomputed(2, children.iter(), aulos_queue::entry::size_hint);
     assert_eq!(acc.n_with_total, 2, "both children know their size");

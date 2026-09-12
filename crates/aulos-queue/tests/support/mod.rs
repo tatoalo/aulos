@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use aulos_core::config::{RawEnv, load};
@@ -24,6 +24,16 @@ use aulos_queue::{Engine, EngineHandle, PreTerminalHooks, RecoveryReport};
 use aulos_store::{Store, StoreOptions};
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
+
+/// How long any harness wait may take before it gives up.
+///
+/// A wall-clock deadline rather than a poll count: a shared CI runner then gets exactly the same
+/// budget as a quiet laptop, instead of a budget that shrinks with every scheduling delay. Every
+/// step these tests wait on is milliseconds' work, so this is slack, not a measurement.
+const WAIT_BUDGET: Duration = Duration::from_secs(15);
+
+/// How often a wait re-reads what it is waiting for.
+const POLL: Duration = Duration::from_millis(1);
 
 /// A running engine plus everything a test needs to drive and observe it.
 pub struct Harness {
@@ -287,18 +297,21 @@ impl Harness {
         self.store.item(id).await.unwrap()
     }
 
-    /// Waits until the persisted row satisfies `pred`, or panics after two seconds.
+    /// Waits until the persisted row satisfies `pred`, or panics at [`WAIT_BUDGET`].
     pub async fn until(&self, id: ItemId, what: &str, pred: impl Fn(&Item) -> bool) -> Item {
-        for _ in 0..4_000 {
+        let deadline = Instant::now() + WAIT_BUDGET;
+        loop {
             if let Some(item) = self.store.item(id).await.unwrap()
                 && pred(&item)
             {
                 return item;
             }
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            if Instant::now() >= deadline {
+                let found = self.store.item(id).await.unwrap();
+                panic!("timed out waiting for {what}; the row is {found:?}");
+            }
+            tokio::time::sleep(POLL).await;
         }
-        let found = self.store.item(id).await.unwrap();
-        panic!("timed out waiting for {what}; the row is {found:?}");
     }
 
     /// Waits until the row reaches `status`.
@@ -330,14 +343,20 @@ impl Harness {
 
     /// Waits until `pred` holds over the whole persisted queue.
     pub async fn until_all(&self, what: &str, pred: impl Fn(&[Item]) -> bool) -> Vec<Item> {
-        for _ in 0..4_000 {
+        let deadline = Instant::now() + WAIT_BUDGET;
+        loop {
             let rows = self.rows().await;
             if pred(&rows) {
                 return rows;
             }
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            if Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for {what}; the queue holds {} rows",
+                    rows.len()
+                );
+            }
+            tokio::time::sleep(POLL).await;
         }
-        panic!("timed out waiting for {what}");
     }
 
     /// Every persisted row, `ord` ascending.
@@ -381,19 +400,24 @@ impl Harness {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    /// Waits until a path is gone, or panics after two seconds.
+    /// Waits until a path is gone, or panics at [`WAIT_BUDGET`].
     ///
     /// A delete's unlinks run on a blocking pool rather than on the engine task (DESIGN §8.2, §8.10
     /// — a bulk clear is tens of thousands of syscalls and nothing waits on their result), so
     /// "the file is gone" is an eventual assertion, not an immediate one.
     pub async fn until_gone(&self, path: &Path) {
-        for _ in 0..4_000 {
+        let deadline = Instant::now() + WAIT_BUDGET;
+        loop {
             if !path.exists() {
                 return;
             }
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {} to be removed",
+                path.display()
+            );
+            tokio::time::sleep(POLL).await;
         }
-        panic!("timed out waiting for {} to be removed", path.display());
     }
 
     /// The absolute download root.
@@ -453,15 +477,29 @@ impl Events {
         self.count(pred) > 0
     }
 
-    /// Waits until at least one event matches, or panics after two seconds.
+    /// Waits until at least one event matches, or panics at [`WAIT_BUDGET`].
     pub async fn until(&self, what: &str, pred: impl Fn(&DomainEvent) -> bool) {
-        for _ in 0..4_000 {
-            if self.any(&pred) {
+        self.until_count(what, 1, pred).await;
+    }
+
+    /// Waits until at least `n` events match, or panics at [`WAIT_BUDGET`].
+    ///
+    /// The router fans out on its own task, so an event is always a little behind the store write
+    /// that produced it. A test that reads the recorded events after waiting on a *row* has to
+    /// wait for the event too, or it races the router (DESIGN §15.1).
+    pub async fn until_count(&self, what: &str, n: usize, pred: impl Fn(&DomainEvent) -> bool) {
+        let deadline = Instant::now() + WAIT_BUDGET;
+        loop {
+            let seen = self.count(&pred);
+            if seen >= n {
                 return;
             }
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {n} {what} events, saw {seen}"
+            );
+            tokio::time::sleep(POLL).await;
         }
-        panic!("timed out waiting for the {what} event");
     }
 
     /// Every `added` batch, as `(ids, reason)`.

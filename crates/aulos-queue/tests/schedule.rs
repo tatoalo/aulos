@@ -5,7 +5,7 @@ mod support;
 
 use std::sync::Arc;
 
-use aulos_core::{SourceKind, SourceRef, Status};
+use aulos_core::{DomainEvent, SourceKind, SourceRef, Status};
 use aulos_provider::Provider;
 use aulos_provider::fake::FakeProvider;
 use aulos_queue::{Action, Priority};
@@ -113,6 +113,22 @@ async fn the_four_priority_classes_are_served_in_order() {
     })
     .await;
 
+    let first_child = h
+        .rows()
+        .await
+        .into_iter()
+        .filter(|i| i.group_id == Some(group))
+        .min_by_key(|i| i.ord)
+        .expect("a child")
+        .id;
+    for id in [failed, interactive, subscription, first_child] {
+        h.events
+            .until(
+                "completed",
+                |e| matches!(e, DomainEvent::Completed(v) if v.id == id),
+            )
+            .await;
+    }
     let order: Vec<_> = h.events.completed().iter().map(|v| v.id).collect();
     let at = |id| {
         order
@@ -128,14 +144,6 @@ async fn the_four_priority_classes_are_served_in_order() {
         at(interactive) < at(subscription),
         "Interactive beats Subscription: {order:?}"
     );
-    let first_child = h
-        .rows()
-        .await
-        .into_iter()
-        .filter(|i| i.group_id == Some(group))
-        .min_by_key(|i| i.ord)
-        .expect("a child")
-        .id;
     assert!(
         at(subscription) < at(first_child),
         "Subscription beats Bulk: {order:?}"

@@ -6,7 +6,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aulos_core::{ErrorCode, Kind, RemoveReason, SourceKind, SourceRef, Status};
+use aulos_core::{DomainEvent, ErrorCode, Kind, RemoveReason, SourceKind, SourceRef, Status};
 use aulos_provider::fake::FakeProvider;
 use aulos_queue::{Action, SkipReason};
 use support::{Harness, expanding, request};
@@ -575,6 +575,9 @@ async fn delete_removes_the_row_the_files_and_the_siblings() {
     h.until_gone(&file).await;
     h.until_gone(&info).await;
     h.until_gone(&nfo).await;
+    h.events
+        .until("removed", |e| matches!(e, DomainEvent::Removed { .. }))
+        .await;
     assert_eq!(h.events.removed(), vec![(vec![id], RemoveReason::Deleted)]);
 }
 
@@ -628,6 +631,9 @@ async fn clear_removes_every_terminal_row_and_publishes_cleared() {
         rows.len() == 1 && rows[0].id == parked
     })
     .await;
+    h.events
+        .until("removed", |e| matches!(e, DomainEvent::Removed { .. }))
+        .await;
     assert_eq!(
         h.events.removed(),
         vec![(vec![done], RemoveReason::Cleared)]
@@ -655,6 +661,11 @@ async fn the_auto_clear_sweeper_covers_rows_outside_the_memory_window() {
 
     h.advance(Duration::from_secs(61)).await;
     h.until_all("both rows swept", <[aulos_core::Item]>::is_empty)
+        .await;
+    h.events
+        .until("expiry", |e| {
+            matches!(e, DomainEvent::Removed { reason, .. } if *reason == RemoveReason::Expired)
+        })
         .await;
     let reasons: Vec<_> = h.events.removed().into_iter().map(|(_, r)| r).collect();
     assert!(reasons.contains(&RemoveReason::Expired));

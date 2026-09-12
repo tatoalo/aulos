@@ -49,6 +49,12 @@ async fn a_pre_terminal_hook_delays_the_terminal_write_until_hooks_finished() {
         "and it stays there until the dispatcher answers"
     );
 
+    h.hooks
+        .until(
+            "finishing",
+            |e| matches!(e, DomainEvent::Finishing(v) if v.id == id),
+        )
+        .await;
     let finishing = h.hooks.finishing();
     assert_eq!(finishing.len(), 1, "one Finishing, hooks-only");
     assert_eq!(finishing[0].id, id);
@@ -164,6 +170,12 @@ async fn set_size_lands_as_a_write_a_cache_update_and_a_delta() {
     let row = h.until(id, "the new size", |i| i.size == Some(4_242)).await;
     assert_eq!(row.size, Some(4_242), "persisted");
 
+    h.events
+        .until("re-diff", |e| {
+            matches!(e, DomainEvent::StatusChanged { id: got, view, .. }
+                if *got == id && view.size == Some(4_242))
+        })
+        .await;
     let deltas = h.events.changes(id);
     let carried = deltas
         .iter()
