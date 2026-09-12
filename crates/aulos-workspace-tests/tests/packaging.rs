@@ -94,13 +94,19 @@ fn the_ytdlp_pin_appears_exactly_once_in_the_repo() {
         1,
         "the yt-dlp pin must live in exactly one place"
     );
-    // The single install must go through the ARG, never spell a literal version out again.
+    // The pin is a master-builds release tag, so the single install must derive the tarball URL
+    // from the ARG and never spell a literal tag out again.
     assert_eq!(
-        dockerfile.matches("yt-dlp==").count(),
+        dockerfile
+            .matches("yt-dlp-master-builds/releases/download/")
+            .count(),
         1,
-        "`yt-dlp==` must appear once, as the ${{YTDLP_VERSION}} reference"
+        "the master-builds tarball URL must appear once, built from ${{YTDLP_VERSION}}"
     );
-    assert!(dockerfile.contains(r#""yt-dlp==${YTDLP_VERSION}""#));
+    assert!(
+        dockerfile
+            .contains("yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz")
+    );
 }
 
 #[test]

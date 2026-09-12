@@ -4832,7 +4832,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---------- runtime ----------
 FROM debian:${DEBIAN}-slim
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.8.30.232658.dev0
+ARG YTDLP_VERSION=2026.08.30.140045
 ARG BGUTIL_TAG=v1.2.3
 ARG NM3U8DL_VERSION=v0.5.1-beta
 ARG NM3U8DL_BUILD=20251029
@@ -4843,8 +4843,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg aria2 coreutils python3 python3-pip libssl3 libstdc++6 \
  && rm -rf /var/lib/apt/lists/* && mkdir -p /.cache && chmod 777 /.cache
 
-# yt-dlp: the nightly pin, exactly as the legacy image did
-RUN pip3 install --break-system-packages --no-cache-dir --no-deps "yt-dlp==${YTDLP_VERSION}"
+# yt-dlp: the master ("canary") pin — a release tag, so the install is that tag's source tarball
+RUN pip3 install --break-system-packages --no-cache-dir --no-deps \
+      "yt-dlp @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz"
 
 # deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y
@@ -5026,25 +5027,29 @@ a 700 MB download. It is a **developer-machine** gate: `AULOS_E2E=1 tests/e2e/ru
 `AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 tests/e2e/run.sh` to exercise the release architecture
 from an arm64 Mac (OrbStack runs amd64 under Rosetta). The **one** deliberate network check in CI
 is the `mode=extract` in `update-yt-dlp.yml` (§18.5), which runs every three days and is the entire
-reason that workflow exists: a nightly that still imports but can no longer extract is exactly what
-it must catch before auto-merge.
+reason that workflow exists: a master build that still imports but can no longer extract is exactly
+what it must catch before auto-merge.
 
 Every bump workflow uses `concurrency: { group: bump-<name>, cancel-in-progress: false }` so two
 crons cannot race on the same branch.
 
-### 18.5 The yt-dlp nightly bump automation
+### 18.5 The yt-dlp master bump automation
 
-Roughly 75 % of legacy commits are auto-merged nightly yt-dlp bumps, so this is the
-highest-leverage CI change available. Ported with the same shape — grep the pin,
-`pip install --dry-run --pre`, `sed`, reusable branch `auto/update-yt-dlp-nightly-<ver>`, reuse an
-open PR, the `automated` label if it exists, `gh pr merge --auto --squash`, a step summary — plus
-four changes that matter:
+Roughly 75 % of legacy commits are auto-merged yt-dlp bumps, so this is the highest-leverage CI
+change available. We track yt-dlp's **master** ("canary") channel rather than legacy's PyPI
+nightly: master builds are published to `yt-dlp/yt-dlp-master-builds` after every push to master,
+so extractor fixes arrive here first — which is what the owner wants — and the smoke job below is
+what makes running canary acceptable. Ported with the same shape — grep the pin, resolve the
+newest build, `sed`, reusable branch `auto/update-yt-dlp-master-<tag>`, reuse an open PR, the
+`automated` label if it exists, `gh pr merge --auto --squash`, a step summary — plus four changes
+that matter:
 
 | Change | Why |
 |---|---|
 | The pin lives in **one** place, `docker/Dockerfile`'s `ARG YTDLP_VERSION=`, and a second grep asserts the string appears exactly once, failing loudly if someone adds a duplicate. | Legacy grepped `yt-dlp==`; with a build arg the automation stays a one-line `sed` and the version is also settable via `docker build --build-arg`. |
-| After the `sed`, the workflow **builds the amd64 image and runs a smoke job**: `aulos-server doctor`, plus a real `mode=extract` against a public CC-licensed video through the shim. Only then is the PR opened and auto-merge enabled. | This is the entire point of pinning a nightly: a bad nightly must fail in CI, not on the VPS. Legacy auto-merged on a version-string diff alone. |
-| The commit message stays byte-identical: `upgrade yt-dlp nightly to <ver>`. | The existing release-notes tooling and muscle memory keep working. |
+| The newest build is resolved with `gh api repos/yt-dlp/yt-dlp-master-builds/releases/latest --jq .tag_name`, and the pin is installed as that tag's `yt-dlp.tar.gz` release asset. | Master builds are never published to PyPI, so `pip --dry-run --pre` cannot see them; the release tag *is* the version (`yt_dlp.version.__version__`), and the tarball is a normal sdist that `--no-deps` installs unchanged. |
+| After the `sed`, the workflow **builds the amd64 image and runs a smoke job**: `aulos-server doctor`, a `CHANNEL`-checking import, plus a real `mode=extract` against a public CC-licensed video through the shim. Only then is the PR opened and auto-merge enabled. | This is the entire point of running canary: a bad master build must fail in CI, not on the VPS. Legacy auto-merged on a version-string diff alone. |
+| The commit message is `upgrade yt-dlp master to <tag>`. | Nothing in this repo parses it — `release.yml` builds its body from `git log --pretty=%s` — so one stable shape is all it owes: a run of bumps reads as a run of bumps. |
 | The broad `TATOALO_REPO_PAT` is replaced by a fine-grained token with `contents:write` + `pull_requests:write` on this repo only; if absent, the PR is opened with `GITHUB_TOKEN` and auto-merge is skipped with a warning. | Least privilege. |
 
 ### 18.6 Dependencies
@@ -5408,7 +5413,7 @@ Likelihood / Impact: L / M / H, ordered by product.
 | R1 | **The v1 shim is subtly wrong and the shipped iOS build silently shows a broken queue during cutover.** | M | H | `tests/v1_golden/` replays captured legacy responses field-by-field; a JSON-Schema check generated from `print-schema` runs in CI; the shadow run exercises `/history` and `/add` against real state before any downtime. | `/history` counts compared against the pre-cutover numbers (19.3 step 5). |
 | R2 | **Losing Socket.IO leaves the currently installed client with an empty queue and a "server is down" UI** — not merely without live updates. It fetches `GET /history` only from its Socket.IO `.connect` handler, and pull-to-refresh is just a reconnect (§11.6). | H | M | Scheduling only, and the ordering is load-bearing: the v2 iOS build must be **installed on the device before** the image swap, and 19.3 step 0 makes that a gate rather than a note. There is no in-app fallback to rely on: with the handshake refused the old build never calls `/history`, never leaves `.testing`/`.error`, exhausts its three auto-retries and parks on "Retry Connection". `<p>socket.io` returns 501 with a pointer so a stale build's failure is legible instead of a hung handshake. | The 501 in access logs; the app's `.error` handler. **If the ordering slips, a burst of "the server is unreachable" reports from the old build IS this risk — do not triage it as a separate incident.** |
 | R3 | **yt-dlp option-dict drift** — a user's `YTDL_OPTIONS` holds something JSON cannot express. | L | H | Both `YTDL_OPTIONS` and `YTDL_OPTIONS_FILE` were already JSON in legacy, so anything a user has is expressible. `coerce` handles the one known object type; an unknown coercion is a loud `contract` error naming the key, never a silent behaviour change. | `healthz.components.ytdl_options`; the item's `error`. |
-| R4 | **A nightly yt-dlp bump breaks extraction on the VPS.** | H | M | The bump PR builds the image and runs a real extract before auto-merging (§18.5). The pin is a build arg, so rolling back is `--build-arg YTDLP_VERSION=<old>` or the previous image tag, and because Python lives only in the runtime stage that image builds in ~2 min. | The bump PR's smoke job; `healthz.components.ytdlp_runner`; a mass of items failing with the same code. |
+| R4 | **A yt-dlp master bump breaks extraction on the VPS.** | H | M | Running canary makes this likelier, which is exactly why the bump PR builds the image and runs a real extract before auto-merging (§18.5). The pin is a build arg, so rolling back is `--build-arg YTDLP_VERSION=<old>` or the previous image tag, and because Python lives only in the runtime stage that image builds in ~2 min. | The bump PR's smoke job; `healthz.components.ytdlp_runner`; a mass of items failing with the same code. |
 | R5 | **`wreq`/BoringSSL fails to build or churns.** | M | M | `ScHttp` trait with a compiled-in plain-`reqwest` implementation and the runtime switch `AULOS_SC_HTTP`; the feature is per-target; CI builds both feature combinations. Only StreamingCommunity degrades, and only if the site fingerprint-checks. | A CI build failure (blocking); at runtime a boot WARN naming the degradation, plus SC items failing with a 403. |
 | R6 | **StreamingCommunity changes its page structure.** | H | M | All scraping is five small fixture-driven modules; each step failure has a distinct code so logs say *which* step broke; the version cache retries once on 403/404/409; `AULOS_SC_EXTRA_HOSTS` covers mirrors; failures are per-item, never process-wide. A user can bridge the gap with a `command` plugin without waiting for a release. | SC items failing with `Upstream("Could not get site version")`; the SC provider probe in `healthz`. |
 | R7 | **An importer edge case loses history** (unknown status, duplicate URL, an SC entry blob, a 400 MB `completed.json`). | M | H | One atomic transaction, DB deleted on failure, legacy files never mutated (T2), a three-class failure taxonomy so it is never ambiguous whether the remaining files' data survives (§7.6.1), an `AULOS_IMPORT_ON_ERROR=skip` escape so one corrupt file cannot restart-loop the container the way it could in an earlier draft, an explicit SC entry translation with its own fixture (§7.6.3a), a fixture corpus including corrupt and mixed-version inputs, a mandatory `--dry-run` rehearsal, and the report served over HTTP and checked at cutover. | `api/v2/import-report`; the container restart loop with the report in the logs; `healthz.components.importer` degraded under `skip`. |
@@ -6594,7 +6599,7 @@ yt-dlp bump automation hardened (§18.5).
 | C29 | SC season resolution does 2 requests instead of ~60, caches the Inertia version with a TTL and retries once on version drift, and drops the debug-only m3u8 fetch. | Adding a 20-episode season takes seconds instead of a minute and is far less likely to be rate-limited or to break on a site deploy. |
 | C30 | `SC_THREAD_COUNT` and `SC_USE_FFMPEG` come from the config, not from a child re-reading the environment. | One source of truth; `check-config` shows what will actually be used. |
 | C31 | SC segment counts go to `fragment_*` and byte fields stay `null` until real sizes are known. | The byte counters stop lying and the progress bar stays monotonic. |
-| C32 | `bgutil-pot`, `N_m3u8DL-RE` and yt-dlp are all pinned build args with separate auto-bump PRs, and the yt-dlp bump PR must build the image and run a real extraction before auto-merging. | A bad nightly fails in CI instead of on the VPS, and a regression is bisectable to one PR. |
+| C32 | `bgutil-pot`, `N_m3u8DL-RE` and yt-dlp are all pinned build args with separate auto-bump PRs, and the yt-dlp bump PR must build the image and run a real extraction before auto-merging. | A bad master build fails in CI instead of on the VPS, and a regression is bisectable to one PR. |
 | C33 | The POT sidecar is supervised with backoff, health-probed, force-restarted when wedged, and surfaced in `healthz`; the Docker healthcheck hits `healthz` and honours `URL_PREFIX`. | "YouTube suddenly wants a login" becomes a visible red component instead of a mystery. |
 | C34 | `CHOWN_DIRS=true` chowns the directories themselves plus the state dir; `CHOWN_DIRS=recursive` restores the exact legacy walk. | Container start stops taking minutes on a multi-TB library. |
 | C35 | Automatic retry for retryable errors only (max 2), plus a real retry action reachable from v1 `POST /start`. | Transient failures self-heal, and a failed item is one call from retrying instead of delete-and-re-share. |

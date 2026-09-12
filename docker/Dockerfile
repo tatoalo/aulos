@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---------- runtime ----------
 FROM debian:${RUNTIME_DEBIAN}-slim
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.8.30.232658.dev0
+ARG YTDLP_VERSION=2026.08.30.140045
 ARG BGUTIL_TAG=v0.8.1
 ARG NM3U8DL_VERSION=v0.5.1-beta
 ARG NM3U8DL_BUILD=20251029
@@ -68,9 +68,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg aria2 coreutils python3 python3-pip libssl3t64 libstdc++6 \
  && rm -rf /var/lib/apt/lists/* && mkdir -p /.cache && chmod 777 /.cache
 
-# yt-dlp: the nightly pin, exactly as the legacy image did.
-# The pin lives in exactly ONE place in the repo (this ARG) — update-yt-dlp.yml asserts that.
-RUN pip3 install --break-system-packages --no-cache-dir --no-deps "yt-dlp==${YTDLP_VERSION}"
+# yt-dlp: pinned to a master ("canary") build, not the PyPI nightly — master carries the newest
+# extractor fixes, and update-yt-dlp.yml's smoke job is what makes running canary acceptable.
+# Master builds are release assets, never PyPI, so the pin is a tag and the install is that tag's
+# source tarball. The pin lives in exactly ONE place in the repo (this ARG) — CI asserts that.
+RUN pip3 install --break-system-packages --no-cache-dir --no-deps \
+      "yt-dlp @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz"
 
 # deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y

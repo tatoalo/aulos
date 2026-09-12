@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # A REAL `mode=extract` through the shipped shim, inside the shipped image (DESIGN §18.5).
 #
-# This is the check the nightly yt-dlp bump exists for: legacy auto-merged on a version-string
-# diff, so a nightly that imported but could no longer extract reached the VPS. `doctor` and a
+# This is the check the yt-dlp master bump exists for: legacy auto-merged on a version-string
+# diff, so a build that imported but could no longer extract reached the VPS. `doctor` and a
 # bare `import yt_dlp` cannot catch that — only asking yt-dlp for real metadata can.
 #
 # What it asserts, against the container's own network:
@@ -94,7 +94,7 @@ PY
 
 # fd 3 is not open through `docker exec`, so the shim writes its frames to the stdout it saved
 # before redirecting fd 1 to /dev/null — which is the documented fallback and is why this can be
-# read as plain stdout. stderr is left on the terminal so a failing nightly says why.
+# read as plain stdout. stderr is left on the terminal so a failing build says why.
 set +e
 printf '%s\n' "$job" | docker exec -i "$NAME" python3 "$SHIM" >"$TRANSCRIPT"
 shim_status=$?
