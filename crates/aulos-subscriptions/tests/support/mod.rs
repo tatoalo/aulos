@@ -482,6 +482,7 @@ impl Harness {
                     selection(),
                 )),
                 check_interval_minutes: None,
+                name: None,
                 ack,
             })
             .await
@@ -489,17 +490,19 @@ impl Harness {
         reply.await.unwrap().map(|v| *v)
     }
 
-    /// `SubCmd::Add` with a caller-supplied template and interval.
+    /// `SubCmd::Add` with a caller-supplied template, interval and name.
     pub async fn subscribe_with(
         &self,
         request: aulos_core::request::DownloadRequest,
         check_interval_minutes: Option<u32>,
+        name: Option<&str>,
     ) -> Result<SubscriptionView, aulos_core::subscription::SubError> {
         let (ack, reply) = oneshot::channel();
         self.handle
             .send(SubCmd::Add {
                 request: Box::new(request),
                 check_interval_minutes,
+                name: name.map(Box::from),
                 ack,
             })
             .await

@@ -254,6 +254,43 @@ async fn a_padded_url_is_normalised_and_is_its_own_uniqueness_key() {
     );
 }
 
+/// A `name` in the create body names the subscription, and a blank one does not: the record is
+/// then named after the probed feed, as it always was. Both shipped clients send the field, and
+/// before it travelled in `SubCmd::Add` a subscription added as "Flow Test NASA" came back named
+/// after the channel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supplied_name_wins_and_a_blank_one_falls_back_to_the_feed() {
+    use aulos_core::request::DownloadRequest;
+
+    let (h, provider) = with_feed("chan", vec![entry("a")]).await;
+    provider.set_feed(&feed_url("other"), vec![entry("b")]);
+    provider.set_feed(&feed_url("third"), vec![entry("c")]);
+    let request = |url: &str| {
+        DownloadRequest::new(url::Url::parse(url).unwrap(), crate::support::selection())
+    };
+
+    let named = h
+        .subscribe_with(request(&feed_url("chan")), None, Some("  Flow Test NASA  "))
+        .await
+        .expect("subscribed");
+    assert_eq!(&*named.name, "Flow Test NASA", "trimmed, and it wins");
+    assert_eq!(&*h.record(&named.id).await.name, "Flow Test NASA");
+
+    // Blank is no name at all — `update`'s rule — so the feed names it.
+    let blank = h
+        .subscribe_with(request(&feed_url("other")), None, Some("   "))
+        .await
+        .expect("subscribed");
+    assert_eq!(&*blank.name, "Scripted Feed");
+
+    // And an absent one is what every v1 add sends.
+    let absent = h
+        .subscribe_with(request(&feed_url("third")), None, None)
+        .await
+        .expect("subscribed");
+    assert_eq!(&*absent.name, "Scripted Feed");
+}
+
 /// The whole download template travels in `SubCmd::Add`, which is the v1 parity legacy's
 /// `POST <p>subscribe` had: it accepted every one of these fields and `add_subscription` stored
 /// them (legacy spec §7.4). Before the wave-2 integration pass the command carried only `url`,
@@ -279,7 +316,7 @@ async fn the_whole_download_template_and_the_interval_reach_the_record() {
     request.ytdl_options_overrides = serde_json::from_str(r#"{"noplaylist": true}"#).unwrap();
 
     let view = h
-        .subscribe_with(request.clone(), Some(15))
+        .subscribe_with(request.clone(), Some(15), None)
         .await
         .expect("subscribed");
     assert_eq!(view.check_interval_minutes, 15, "the requested interval");

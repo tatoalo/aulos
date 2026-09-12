@@ -253,6 +253,10 @@ pub enum SubCmd {
         /// The schedule, in minutes. `None` means `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`; the
         /// manager clamps to `max(1, n)`.
         check_interval_minutes: Option<u32>,
+        /// The display name the caller chose. `None` — and, as in [`SubChanges`], a blank one —
+        /// means "name it after the channel": the manager falls back to the probed feed's name,
+        /// and to the URL when the feed has none.
+        name: Option<Box<str>>,
         /// Answered with the created record's view.
         ack: oneshot::Sender<Result<Box<SubscriptionView>, SubError>>,
     },

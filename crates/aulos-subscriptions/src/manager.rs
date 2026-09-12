@@ -98,6 +98,9 @@ struct NewSubscription {
     request: Box<DownloadRequest>,
     check_interval_minutes: u32,
     chapter_template: Box<str>,
+    /// The caller's display name, still unfiltered: `on_probed` applies the blank rule, because
+    /// that is where the feed's own name — the fallback — becomes known.
+    name: Option<Box<str>>,
 }
 
 /// A finished subscribe probe, on its way back to the loop.
@@ -226,6 +229,7 @@ impl Manager {
             SubCmd::Add {
                 request,
                 check_interval_minutes,
+                name,
                 ack,
             } => {
                 // An empty `chapter_template` means "use the configured default"
@@ -242,6 +246,7 @@ impl Manager {
                         .unwrap_or(self.deps.cfg.subscription_default_check_interval)
                         .max(1),
                     chapter_template,
+                    name,
                 };
                 self.begin_subscribe(req, ack);
             }
@@ -333,7 +338,16 @@ impl Manager {
         // queueing, except an upcoming premiere — which stays unseen so it is queued when the
         // stream starts.
         let backfill = feed.backfill_ids();
-        let name = feed.name.unwrap_or_else(|| req.url.clone());
+        // The caller may name the subscription itself, under `update`'s rule: a blank name is no
+        // name at all, and only then is the record named after the feed (and after the URL when
+        // the feed is nameless). Trimmed, like the URL beside it, so padding never reaches the
+        // record.
+        let name = req
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map_or_else(|| feed.name.unwrap_or_else(|| req.url.clone()), Box::from);
 
         let template = *req.request;
         let mut record = SubscriptionRecord::new(SubId::new(), name, parsed, template.selection);

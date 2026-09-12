@@ -4,9 +4,9 @@
 //! crate does not depend on `aulos-subscriptions` (DESIGN §3, §14.1) and why these handlers can be
 //! tested against a fake receiver.
 //!
-//! `POST api/v2/subscriptions` takes **the same body as an add** plus `check_interval_minutes`, so
-//! it reuses the add parser rather than re-deriving a selection: the two bodies cannot drift, and a
-//! new add field is available to a subscription the day it lands.
+//! `POST api/v2/subscriptions` takes **the same body as an add** plus `check_interval_minutes` and
+//! an optional `name`, so it reuses the add parser rather than re-deriving a selection: the two
+//! bodies cannot drift, and a new add field is available to a subscription the day it lands.
 
 use aulos_core::{CheckJob, SubChanges, SubCmd, SubError, SubId, SubscriptionView};
 use axum::extract::{Path, State};
@@ -47,13 +47,21 @@ pub async fn create(
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_u32("check_interval_minutes", value)?.max(1)),
     };
+    // Both shipped clients send `name`, so it has to reach the manager: the web page and the iOS
+    // app let you name a subscription as you add it, and until it travelled the record was always
+    // named after the feed. A blank one is left to the manager, which names it after the channel.
+    let name = match root.get("name") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(Box::from(parse_str("name", value)?)),
+    };
 
-    // The whole download template and the interval travel in the one `SubCmd::Add`, so every
-    // documented body field reaches the record instead of being silently dropped.
+    // The whole download template, the interval and the name travel in the one `SubCmd::Add`, so
+    // every documented body field reaches the record instead of being silently dropped.
     let request = Box::new(request);
     let view = send(&state, move |ack| SubCmd::Add {
         request,
         check_interval_minutes: interval,
+        name,
         ack,
     })
     .await?;

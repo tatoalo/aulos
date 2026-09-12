@@ -1128,7 +1128,7 @@ always correct because every option has a server-side default.
 | GET | `livez` | — | `200 {"ok":true}` | — |
 | GET | `version` | — | `200 {"version":…,"yt-dlp":…,"url_prefix":…,"protocol":"v2"}` | — |
 | GET | `api/v2/subscriptions` | — | `200 {"subscriptions":[Subscription]}` | — |
-| POST | `api/v2/subscriptions` | an add body plus `check_interval_minutes` | `201 Subscription` | 400, 409 `conflict` |
+| POST | `api/v2/subscriptions` | an add body plus `check_interval_minutes` and an optional `name` (blank or absent means "name it after the channel") | `201 Subscription` | 400, 409 `conflict` |
 | PATCH | `api/v2/subscriptions/{id}` | `{name?, enabled?, check_interval_minutes?}` | `200 Subscription` | 400, 404 |
 | DELETE | `api/v2/subscriptions/{id}` | — | `204` | 404 |
 | POST | `api/v2/subscriptions/check` | `{"ids":[…]}` or `{}` | `202 {"job_id":"01JC…","count":3}` | 400 |

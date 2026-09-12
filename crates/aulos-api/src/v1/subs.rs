@@ -74,6 +74,8 @@ pub async fn subscribe(
     let view = match send(&state, move |ack| SubCmd::Add {
         request,
         check_interval_minutes: Some(interval),
+        // Legacy's `POST <p>subscribe` had no name field: the record is named after the feed.
+        name: None,
         ack,
     })
     .await

@@ -685,6 +685,7 @@ impl SubsFake {
             SubCmd::Add {
                 request,
                 check_interval_minutes,
+                name,
                 ack,
             } => {
                 let url: Box<str> = Box::from(request.url.as_str());
@@ -698,7 +699,13 @@ impl SubsFake {
                 } else {
                     let view = SubscriptionView {
                         id: SubId::new(),
-                        name: Arc::from("Veritasium"),
+                        // The manager's rule: a non-blank name wins, a blank one is named after
+                        // the feed — which here is always `Veritasium`.
+                        name: name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|n| !n.is_empty())
+                            .map_or_else(|| Arc::from("Veritasium"), Arc::from),
                         url: Arc::from(&*url),
                         enabled: true,
                         check_interval_minutes: check_interval_minutes.unwrap_or(60).max(1),

@@ -802,6 +802,36 @@ async fn the_subscription_routes_are_the_documented_lifecycle() {
 }
 
 #[tokio::test]
+async fn a_name_in_the_create_body_names_the_subscription() {
+    let rig = Rig::start("/").await;
+    let (status, created) = rig
+        .post(
+            "api/v2/subscriptions",
+            &json!({ "url": "https://www.youtube.com/@nasa", "name": "Custom" }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(
+        created["name"], "Custom",
+        "the body's name wins over the feed"
+    );
+
+    let (status, listed) = rig.get("api/v2/subscriptions").await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["subscriptions"][0]["name"], "Custom");
+
+    // A blank name is no name at all: the subscription is named after the channel.
+    let (status, blank) = rig
+        .post(
+            "api/v2/subscriptions",
+            &json!({ "url": "https://www.youtube.com/@veritasium", "name": "   " }),
+        )
+        .await;
+    assert_eq!(status, 201, "{blank}");
+    assert_eq!(blank["name"], "Veritasium");
+}
+
+#[tokio::test]
 async fn subscriptions_are_in_the_snapshot() {
     let rig = Rig::start("/").await;
     rig.post(
