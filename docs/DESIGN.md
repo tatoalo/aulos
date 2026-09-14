@@ -3354,6 +3354,13 @@ subscription batch (which fans out to every allowed chat regardless of the knob,
 playlist, with `AULOS_TELEGRAM_WATCH_ALL` on — would otherwise fire one bogus warning per queued
 item into every allowed chat.
 
+The stall clock is reset by **progress**, and progress is never an event (§15.1): on every tick,
+in both modes, the bot reads each running watched job's snapshot view and treats a change in
+`status`, `percent`, `downloaded_bytes`, `fragment_index`, `phase`, `phase_percent` or `msg` as
+progress. `speed` and `eta` are not progress. A snapshot whose numbers stop moving is reported
+stalled, measured from the last change. The engine's own 900 s stall notice (§8.11) is the safety
+net underneath and is unaffected.
+
 ### 12.6 The `Notifier` seam (for APNs later)
 
 ```rust
