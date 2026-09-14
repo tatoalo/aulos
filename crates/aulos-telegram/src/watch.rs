@@ -34,7 +34,9 @@ use std::time::Duration;
 
 use aulos_core::id::ItemId;
 use aulos_core::item::ItemView;
+use aulos_core::progress::PhaseTag;
 use aulos_core::source::SourceKind;
+use aulos_core::status::Status;
 use tokio::time::Instant;
 
 use crate::render::Mark;
@@ -43,6 +45,39 @@ use crate::render::Mark;
 ///
 /// Re-exported here because `aulos-telegram` is its first implementation.
 pub use aulos_core::event::Notifier;
+
+/// The fields of a snapshot that count as movement. Speed and eta are deliberately absent.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ProgressMark {
+    /// Lifecycle state.
+    pub status: Status,
+    /// Download percentage.
+    pub percent: f64,
+    /// Bytes on disk.
+    pub downloaded_bytes: Option<u64>,
+    /// Current HLS fragment.
+    pub fragment_index: Option<u32>,
+    /// Post-processing phase.
+    pub phase: Option<PhaseTag>,
+    /// Percentage within the phase.
+    pub phase_percent: Option<f64>,
+    /// The status line.
+    pub msg: Option<Arc<str>>,
+}
+
+impl From<&ItemView> for ProgressMark {
+    fn from(v: &ItemView) -> Self {
+        Self {
+            status: v.status,
+            percent: v.percent,
+            downloaded_bytes: v.downloaded_bytes,
+            fragment_index: v.fragment_index,
+            phase: v.phase,
+            phase_percent: v.phase_percent,
+            msg: v.msg.clone(),
+        }
+    }
+}
 
 /// One job the bot is reporting on.
 #[derive(Clone, Debug)]
@@ -69,6 +104,8 @@ pub struct Watched {
     pub title: Arc<str>,
     /// The marker the board line carries, if any.
     pub mark: Option<Mark>,
+    /// The snapshot as last observed on a tick.
+    pub last_seen: Option<ProgressMark>,
 }
 
 /// One warning to deliver.
@@ -172,6 +209,7 @@ impl WatchRegistry {
             url: Arc::clone(&item.url),
             title: Arc::clone(&item.title),
             mark: None,
+            last_seen: Some(ProgressMark::from(item)),
         });
         entry.chats.extend(chats.iter().copied());
         entry.title = Arc::clone(&item.title);
@@ -196,6 +234,32 @@ impl WatchRegistry {
     pub fn park(&mut self, id: ItemId, now: Instant) {
         if let Some(w) = self.jobs.get_mut(&id) {
             w.running_since = None;
+            w.last_progress_at = now;
+        }
+    }
+
+    /// The watched jobs that are running.
+    #[must_use]
+    pub fn running_ids(&self) -> Vec<ItemId> {
+        self.jobs
+            .iter()
+            .filter(|(_, w)| w.running_since.is_some())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Learns progress from a snapshot: the stall clock resets only when the mark moved.
+    ///
+    /// Writes `last_progress_at` directly, because a snapshot must never start the hard-timeout
+    /// clock on a parked job, which is what `touch` would do.
+    pub fn observe_progress(&mut self, view: &ItemView, now: Instant) {
+        let Some(w) = self.jobs.get_mut(&view.id) else {
+            return;
+        };
+        let mark = ProgressMark::from(view);
+        let moved = w.last_seen.as_ref() != Some(&mark);
+        w.last_seen = Some(mark);
+        if moved && w.running_since.is_some() {
             w.last_progress_at = now;
         }
     }
@@ -568,6 +632,108 @@ mod tests {
             r.get(queued.id).expect("watched").mark,
             None,
             "and the board line carries no warning glyph either"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_moving_snapshot_resets_the_stall_clock_without_any_event() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let mut v = item(SourceRef::bare(SourceKind::ApiV2));
+        let start = Instant::now();
+        r.watch(&v, start);
+        assert_eq!(r.running_ids(), vec![v.id]);
+
+        for i in 1..=10u64 {
+            v.percent = i as f64 * 5.0;
+            v.downloaded_bytes = Some(i * 1_000_000);
+            r.observe_progress(&v, start + Duration::from_secs(i * 100));
+            assert!(
+                r.due_warnings(start + Duration::from_secs(i * 100))
+                    .is_empty(),
+                "progress at +{}s is not a stall",
+                i * 100
+            );
+        }
+        assert_eq!(
+            r.get(v.id).expect("watched").last_progress_at,
+            start + Duration::from_secs(1_000)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unchanged_snapshot_still_reads_as_a_stall() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let mut v = item(SourceRef::bare(SourceKind::ApiV2));
+        let start = Instant::now();
+        r.watch(&v, start);
+        v.percent = 43.2;
+        v.downloaded_bytes = Some(9_000);
+        r.observe_progress(&v, start + Duration::from_secs(10));
+
+        for s in [20u64, 60, 120, 180] {
+            r.observe_progress(&v, start + Duration::from_secs(s));
+            assert!(r.due_warnings(start + Duration::from_secs(s)).is_empty());
+        }
+        r.observe_progress(&v, start + Duration::from_secs(191));
+        let stalls = r.due_warnings(start + Duration::from_secs(191));
+        assert_eq!(stalls.len(), 1, "{stalls:?}");
+        assert_eq!(stalls[0].kind, Mark::Stalled);
+        assert_eq!(
+            stalls[0].secs, 181,
+            "measured from the last change at +10 s"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn speed_and_eta_alone_are_not_progress() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let mut v = item(SourceRef::bare(SourceKind::ApiV2));
+        let start = Instant::now();
+        r.watch(&v, start);
+        r.observe_progress(&v, start);
+
+        v.speed = Some(1.0);
+        v.eta = Some(99);
+        r.observe_progress(&v, start + Duration::from_secs(100));
+        v.speed = Some(2.0);
+        v.eta = Some(50);
+        r.observe_progress(&v, start + Duration::from_secs(181));
+        assert_eq!(r.due_warnings(start + Duration::from_secs(181)).len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_postprocessing_phase_that_moves_is_progress() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let mut v = item_in(
+            SourceRef::bare(SourceKind::ApiV2),
+            Status::Postprocessing,
+            true,
+        );
+        let start = Instant::now();
+        r.watch(&v, start);
+        r.observe_progress(&v, start);
+
+        v.phase_percent = Some(10.0);
+        r.observe_progress(&v, start + Duration::from_secs(170));
+        v.phase_percent = Some(20.0);
+        r.observe_progress(&v, start + Duration::from_secs(340));
+        assert!(r.due_warnings(start + Duration::from_secs(340)).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_job_is_not_touched_by_its_snapshot_and_is_not_listed_as_running() {
+        let mut r = WatchRegistry::new(180, 7_200, true, vec![7]);
+        let mut v = item_in(SourceRef::bare(SourceKind::ApiV2), Status::Queued, true);
+        let start = Instant::now();
+        r.watch(&v, start);
+        assert!(r.running_ids().is_empty());
+
+        v.percent = 50.0;
+        r.observe_progress(&v, start + Duration::from_secs(30));
+        assert_eq!(r.get(v.id).expect("watched").running_since, None);
+        assert!(
+            r.due_warnings(start + Duration::from_secs(1_000))
+                .is_empty()
         );
     }
 
