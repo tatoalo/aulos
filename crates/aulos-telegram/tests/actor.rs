@@ -1172,21 +1172,90 @@ async fn the_two_warnings_fire_once_and_mark_the_board_line() {
     );
 }
 
-/// Progress resets the stall clock, so a slow-but-moving download is never called stalled.
+/// The bug this pins: progress never arrives as an event (DESIGN §15.1), so a stall clock reset
+/// only by `StatusChanged` called every download longer than 180 s stalled while it was moving.
 #[tokio::test]
-async fn progress_keeps_the_stall_warning_away() {
+async fn snapshot_progress_keeps_the_stall_warning_away() {
     let mut h = Harness::new().await;
-    let mut v = tg_view(ItemId::new(), "Slow", Status::Downloading, CHAT);
+    let id = ItemId::new();
+    let v = tg_view(id, "Slow", Status::Downloading, CHAT);
     h.observe(&added(&v)).await;
+    h.tick().await;
 
-    for i in 1..=10 {
-        v.percent = f64::from(i);
-        h.observe(&changed(&v, Status::Downloading)).await;
+    // Only the snapshot moves — not one further event reaches the actor.
+    for i in 1..=10u32 {
+        h.progress.publish(progressing(
+            id,
+            "Slow",
+            f64::from(i) * 5.0,
+            Some(1_000.0),
+            Some(100),
+        ));
         h.advance(Duration::from_secs(100)).await;
     }
     assert!(
         !h.transport.texts().iter().any(|t| t.contains("stalled")),
-        "1000 s of steady progress is not a stall"
+        "1000 s of steady snapshot progress is not a stall: {:?}",
+        h.transport.texts()
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_that_stops_moving_is_reported_stalled_from_its_last_change() {
+    let mut h = Harness::new().await;
+    let id = ItemId::new();
+    let v = tg_view(id, "Stuck", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    h.progress
+        .publish(progressing(id, "Stuck", 43.2, Some(1_000.0), Some(30)));
+    h.advance(Duration::from_secs(100)).await;
+    h.transport.clear();
+
+    // The same numbers, tick after tick: 170 s later still nothing …
+    h.advance(Duration::from_secs(170)).await;
+    assert!(!h.transport.texts().iter().any(|t| t.contains("stalled")));
+
+    // … and past 180 s since the last change, the warning, measured from that change.
+    h.advance(Duration::from_secs(11)).await;
+    let texts = h.transport.texts();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "⚠️ Download seems stalled for 181s:\nhttps://a.test/watch/1"),
+        "{texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn per_job_mode_also_reads_the_snapshot_for_the_stall_clock() {
+    let mut h = Harness::builder()
+        .telegram(TelegramConfig {
+            board: TelegramBoard::PerJob,
+            ..TelegramConfig::for_test(vec![CHAT])
+        })
+        .build()
+        .await;
+    let id = ItemId::new();
+    let v = tg_view(id, "Slow", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+
+    for i in 1..=10u32 {
+        h.progress.publish(progressing(
+            id,
+            "Slow",
+            f64::from(i) * 5.0,
+            Some(1_000.0),
+            Some(100),
+        ));
+        h.advance(Duration::from_secs(100)).await;
+    }
+    assert!(
+        !h.transport.texts().iter().any(|t| t.contains("stalled")),
+        "{:?}",
+        h.transport.texts()
     );
 }
 

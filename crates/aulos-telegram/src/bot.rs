@@ -773,6 +773,7 @@ impl TelegramActor {
 
     async fn on_tick(&mut self) {
         let now = self.clock.instant();
+        self.refresh_liveness(now);
 
         // The two watchdogs. In board mode they are sent as separate messages — they are alerts,
         // not state — and the board line gains its marker (DESIGN §12.5).
@@ -834,6 +835,18 @@ impl TelegramActor {
             .collect();
         for chat in chats {
             self.redraw(chat).await;
+        }
+    }
+
+    // Both modes, before the watchdogs: progress is never an event (DESIGN §15.1).
+    fn refresh_liveness(&mut self, now: Instant) {
+        let Some(reader) = self.progress.as_deref() else {
+            return;
+        };
+        for id in self.watches.running_ids() {
+            if let Some(view) = reader.view(id) {
+                self.watches.observe_progress(&view, now);
+            }
         }
     }
 
