@@ -389,6 +389,13 @@ cd tools/web && AULOS_WEB_BASE=http://127.0.0.1:8091/ npx playwright test
 
 [`tools/web/README.md`](tools/web/README.md) has the mock's flags and what each mode covers.
 
+Docker CI builds and smoke-tests PRs that change `docker/`, `.dockerignore`, `.cargo/`, Cargo
+manifests/lockfiles, Rust toolchains/build scripts, the packaged Python shim or plugin examples,
+or the Docker workflow itself. Other PRs keep the regular CI checks and skip the image build.
+Add the `docker-build` label to request an image build on any PR; subsequent pushes also build
+while that label is present. `main` and `v*` tags still build and publish, and manual dispatch
+can build and smoke-test without publishing (`push=false`).
+
 The end-to-end suite runs the **real image** against a real Creative-Commons video, so it is gated
 behind an env var and never runs under `cargo test`:
 
