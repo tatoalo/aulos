@@ -100,7 +100,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: ${{ (github.event_name == 'push' || inputs.push == true) && 'Build and publish image' || 'Build image (no push)' }}
         id: build
         uses: docker/build-push-action@v7
         with:
