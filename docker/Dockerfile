@@ -101,7 +101,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint && chmod +x /usr/local/bin/
 COPY plugins/examples /opt/aulos/plugins-examples
 
 ENV PUID=1000 PGID=1000 UMASK=022 \
-    DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube TEMP_DIR=/downloads \
+    DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube \
     PORT=8081 SC_USE_FFMPEG=false \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
     AULOS_PLUGINS_DIR=/config/plugins \

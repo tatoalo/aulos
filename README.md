@@ -32,7 +32,7 @@ services:
       DOWNLOAD_DIR: /downloads
       AUDIO_DOWNLOAD_DIR: /downloads/audio
       STATE_DIR: /downloads/.metube          # unchanged: the importer reads it on first start
-      TEMP_DIR: /downloads/.tmp
+      TEMP_DIR: /downloads/.aulos-tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       YTDL_OPTIONS_FILE: /config/ytdl-options.json
       # Optional integrations, all off unless enabled:
@@ -301,7 +301,18 @@ pickle/shelve state is out of scope. The report lists every error and warning; a
 
 ### Exec postprocessors carried over from MeTube
 
-Aulos downloads into a per-job scratch directory (`/downloads/<ULID>/`) and moves the finished
+Aulos defaults `TEMP_DIR` to `<DOWNLOAD_DIR>/.aulos-tmp`, for both yt-dlp partials and
+StreamingCommunity segments. Explicit `TEMP_DIR` settings still win; remove an old override
+that points at the library root to use the hidden default. Each job owns its entire ULID
+subdirectory, including files a media scanner may have created inside it, and removes it before
+completion hooks run. Failed and canceled jobs are cleaned too; paused yt-dlp jobs keep their
+partials so they can resume.
+
+`AULOS_CLEAN_ORPHAN_TEMP=true` also removes scratch directories belonging to terminal or
+unknown items on startup. It remains opt-in and scans only the configured `TEMP_DIR`; switching
+to the new default does not sweep leftovers in an old temp root.
+
+Aulos downloads into a per-job scratch directory (`/downloads/.aulos-tmp/<ULID>/`) and moves the finished
 file to its destination at the end of the job — MeTube downloaded straight into `DOWNLOAD_DIR`.
 That matters for a `YTDL_OPTIONS` entry many MeTube setups carry:
 

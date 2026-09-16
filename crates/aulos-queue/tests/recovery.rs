@@ -354,6 +354,46 @@ async fn orphan_temp_files_are_logged_not_deleted_by_default() {
     assert!(!temp.join(ghost.to_string()).exists());
 }
 
+#[tokio::test]
+async fn orphan_recovery_removes_terminal_and_unknown_jobs_but_keeps_resumable_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let rows: Vec<_> = [
+        Status::Finished,
+        Status::Error,
+        Status::Canceled,
+        Status::Queued,
+        Status::Downloading,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, status)| row(i as i64, status, false))
+    .collect();
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|item| item.id)
+        .chain([ItemId::new()])
+        .collect();
+    for id in &ids {
+        let segment_dir = dir.path().join(id.to_string()).join("episode");
+        std::fs::create_dir_all(&segment_dir).unwrap();
+        std::fs::write(segment_dir.join("raw.xml"), b"foreign playlist").unwrap();
+    }
+    let unrelated = dir.path().join("my-videos");
+    std::fs::create_dir(&unrelated).unwrap();
+    let (_h, report) = Harness::builder()
+        .env("TEMP_DIR", dir.path().to_str().unwrap())
+        .env("AULOS_CLEAN_ORPHAN_TEMP", "true")
+        .env("AULOS_RESTART_POLICY", "pause")
+        .seed(rows)
+        .build_reporting()
+        .await;
+    assert_eq!(report.unwrap().orphan_temp_deleted, 4);
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(dir.path().join(id.to_string()).exists(), i == 3 || i == 4);
+    }
+    assert!(unrelated.exists());
+}
+
 /// A resolved row owns **two** dedupe keys — the URL-derived one it was added under and the
 /// `media_id`-derived one resolution produced (DESIGN §8.5). Boot recovery used to reinstate only
 /// the second, so re-posting the very same URL after a restart quietly created a second item for

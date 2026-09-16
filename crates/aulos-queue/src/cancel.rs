@@ -439,12 +439,15 @@ impl Engine {
         // the `removed` frame lists.
         let mut seen: HashSet<ItemId> = HashSet::with_capacity(ids.len());
         let ids: Vec<ItemId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
-        if remove_files {
-            let paths = self.files_to_remove(&ids).await;
-            if !paths.is_empty() {
+        {
+            let (paths, scratch) = self.files_to_remove(&ids, remove_files).await;
+            if !paths.is_empty() || !scratch.is_empty() {
                 drop(tokio::task::spawn_blocking(move || {
                     for path in paths {
                         remove_path(&path);
+                    }
+                    for dir in scratch {
+                        dir.remove();
                     }
                 }));
             }
@@ -472,7 +475,7 @@ impl Engine {
         self.publish_removed(ids, reason).await;
     }
 
-    /// Every path the named rows produced, reading SQLite for the ones the done window evicted.
+    /// Scratch ownership and optionally output files, reading SQLite for evicted rows.
     ///
     /// The fallback is the whole point: a `clear` and the `CLEAR_COMPLETED_AFTER` sweep both take
     /// their id list straight out of SQLite, so most of what they remove was never in the working
@@ -480,37 +483,52 @@ impl Engine {
     /// deleting the record and leaving the media behind with nothing left to reference it
     /// (PROTOCOL §4.7). One query covers however many rows are missing, and none at all is run
     /// when the window still holds them.
-    async fn files_to_remove(&self, ids: &[ItemId]) -> Vec<PathBuf> {
+    async fn files_to_remove(
+        &self,
+        ids: &[ItemId],
+        remove_files: bool,
+    ) -> (Vec<PathBuf>, Vec<crate::scratch::ScratchDir>) {
         let mut paths: Vec<PathBuf> = Vec::new();
+        let mut scratch = Vec::new();
+        let mut collect = |item: &aulos_core::Item| {
+            if remove_files {
+                paths.extend(self.files_of(item));
+            }
+            scratch.push(crate::scratch::ScratchDir::new(
+                &self.cfg.paths,
+                item.id,
+                Some(&self.out_dir_for(item)),
+            ));
+        };
         let mut missing: HashSet<ItemId> = HashSet::new();
         for id in ids {
             match self.cached(*id) {
-                Some(item) => paths.extend(self.files_of(&item)),
+                Some(item) => collect(&item),
                 None => {
                     missing.insert(*id);
                 }
             }
         }
         if missing.is_empty() {
-            return paths;
+            return (paths, scratch);
         }
         match self.store.items(aulos_store::ItemFilter::terminal()).await {
             Ok(page) => {
                 for item in page.rows.iter().filter(|i| missing.contains(&i.id)) {
-                    paths.extend(self.files_of(item));
+                    collect(item);
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "cannot read the rows a removal is about to unlink");
             }
         }
-        paths
+        (paths, scratch)
     }
 
     /// Every path an item produced (DESIGN §8.10).
     ///
     /// `filename`, **every** `chapter_files`/`subtitle_files` entry, the StreamingCommunity
-    /// `.info.json` and `.nfo` siblings, and the scratch directory. Legacy orphaned all of those.
+    /// `.info.json` and `.nfo` siblings. Scratch directories have a separate ownership guard.
     fn files_of(&self, item: &aulos_core::Item) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         let dir = self.out_dir_for(item);
@@ -528,7 +546,6 @@ impl Engine {
         for file in item.chapter_files.iter().chain(item.subtitle_files.iter()) {
             paths.push(dir.join(&*file.filename));
         }
-        paths.push(self.tmp_dir_for(item.id));
         paths
     }
 

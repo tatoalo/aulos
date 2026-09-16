@@ -76,6 +76,60 @@ async fn cancel_from_queued() {
 }
 
 #[tokio::test]
+async fn deleting_a_record_without_its_media_still_removes_foreign_scratch_files() {
+    let h = Harness::new().await;
+    let id = h.add("https://fake.test/watch/episode").await;
+    let done = h.until_status(id, Status::Finished).await;
+    let output = h.download_dir().join(done.filename.unwrap().as_path());
+    let scratch = h.job_temp_dir(id);
+    std::fs::create_dir_all(scratch.join("episode")).unwrap();
+    std::fs::write(scratch.join("episode/raw.xml"), b"foreign playlist").unwrap();
+    h.handle
+        .actions(Action::Delete, vec![id], Some(false))
+        .await;
+    h.until_gone(&scratch).await;
+    assert!(output.exists());
+}
+
+#[tokio::test]
+async fn sc_failure_and_cancel_remove_foreign_scratch_files() {
+    for cancel in [false, true] {
+        let provider = FakeProvider::from_toml(&format!(
+            "id = \"streamingcommunity\"\nscore = 200\nhosts = [\"fake.test\"]\n\n[[timeline]]\ndownload = [{}]\n",
+            if cancel { "{ kind = \"stage\", stage = \"downloading\" }, { kind = \"hang\" }" }
+            else { "{ kind = \"fail\", code = \"network\" }" }
+        )).unwrap();
+        let h = Harness::builder()
+            .provider(Arc::new(provider))
+            .env("AULOS_AUTO_RETRY_MAX", "0")
+            .build()
+            .await;
+        let mut request = request("https://fake.test/watch/episode");
+        request.auto_start = false;
+        let id = h.add_request(request).await.unwrap().ids[0];
+        h.until_status(id, Status::Queued).await;
+        let scratch = h.job_temp_dir(id);
+        std::fs::create_dir_all(scratch.join("episode")).unwrap();
+        std::fs::write(scratch.join("episode/raw.xml"), b"foreign playlist").unwrap();
+        h.handle.actions(Action::Start, vec![id], None).await;
+        if cancel {
+            h.until_status(id, Status::Downloading).await;
+            h.handle.actions(Action::Cancel, vec![id], None).await;
+        }
+        h.until_status(
+            id,
+            if cancel {
+                Status::Canceled
+            } else {
+                Status::Error
+            },
+        )
+        .await;
+        h.until_gone(&scratch).await;
+    }
+}
+
+#[tokio::test]
 async fn cancel_from_downloading_leaves_no_process_and_no_partials() {
     let h = Harness::builder()
         .provider(Arc::new(hanging("fake.test")))

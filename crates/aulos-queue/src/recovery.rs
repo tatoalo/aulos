@@ -363,8 +363,8 @@ impl Engine {
         done
     }
 
-    /// `*.part`/`*.ytdl` files and per-job scratch directories in `TEMP_DIR` whose owning item no
-    /// longer exists (DESIGN §8.9).
+    /// `*.part`/`*.ytdl` files and per-job scratch directories in `TEMP_DIR` whose owning item
+    /// is terminal or no longer exists (DESIGN §8.9).
     ///
     /// Logged, not deleted, unless `AULOS_CLEAN_ORPHAN_TEMP=true`: deleting user data on boot by
     /// default is not acceptable, and yt-dlp resumes HTTP downloads from `.part`, so leaving them
@@ -380,10 +380,18 @@ impl Engine {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let orphan = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let directory = entry.file_type().is_ok_and(|t| t.is_dir());
+            let id = name
+                .parse::<ItemId>()
+                .ok()
+                .filter(|id| id.to_string() == name);
+            let orphan = if directory {
                 // A per-job scratch directory is named after its item.
-                name.parse::<ItemId>()
-                    .is_ok_and(|id| !self.items.contains_key(&id))
+                id.is_some_and(|id| {
+                    self.items
+                        .get(&id)
+                        .is_none_or(|item| item.status.is_terminal())
+                })
             } else {
                 (name.ends_with(".part") || name.ends_with(".ytdl")) && !self.owns_temp_file(&name)
             };
@@ -395,12 +403,15 @@ impl Engine {
                 tracing::warn!(path = %path.display(), "orphan temp file left in place");
                 continue;
             }
-            let removed = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            match removed {
+            if let Some(id) = id.filter(|_| directory) {
+                let output = self.cached(id).map(|item| self.out_dir_for(&item));
+                if crate::scratch::ScratchDir::new(&self.cfg.paths, id, output.as_deref()).remove()
+                {
+                    deleted += 1;
+                }
+                continue;
+            }
+            match std::fs::remove_file(&path) {
                 Ok(()) => deleted += 1,
                 Err(e) => tracing::warn!(path = %path.display(), error = %e, "cannot remove"),
             }

@@ -123,7 +123,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // --- paths and file serving ---
     ("DOWNLOAD_DIR", "."),
     ("AUDIO_DOWNLOAD_DIR", "%%DOWNLOAD_DIR"),
-    ("TEMP_DIR", "%%DOWNLOAD_DIR"),
+    ("TEMP_DIR", "%%DOWNLOAD_DIR/.aulos-tmp"),
     ("DOWNLOAD_DIRS_INDEXABLE", "false"),
     ("CUSTOM_DIRS", "true"),
     ("CREATE_CUSTOM_DIRS", "true"),
@@ -1246,7 +1246,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Resolves `%%KEY` indirection iteratively, with a cycle check (DESIGN §17.1 step 2).
+/// Resolves `%%KEY[/path]` indirection iteratively, with a cycle check (DESIGN §17.1 step 2).
 fn resolve_indirection(map: &mut BTreeMap<String, String>) -> Result<(), Vec<ConfigError>> {
     let mut errs = Vec::new();
     let keys: Vec<String> = map.keys().cloned().collect();
@@ -1254,15 +1254,24 @@ fn resolve_indirection(map: &mut BTreeMap<String, String>) -> Result<(), Vec<Con
     for key in keys {
         let mut seen: Vec<String> = vec![key.clone()];
         let mut current = key.clone();
+        let mut suffixes = Vec::new();
 
         while let Some(value) = map.get(&current).cloned() {
             let Some(target) = value.strip_prefix("%%") else {
                 // Resolved: copy the terminal value back onto the original key.
                 if current != key {
-                    map.insert(key.clone(), value);
+                    let mut resolved = PathBuf::from(value);
+                    for suffix in suffixes.iter().rev() {
+                        resolved.push(suffix);
+                    }
+                    map.insert(key.clone(), resolved.to_string_lossy().into_owned());
                 }
                 break;
             };
+            let (target, suffix) = target.split_once('/').unwrap_or((target, ""));
+            if !suffix.is_empty() {
+                suffixes.push(suffix.to_owned());
+            }
             let target = target.to_owned();
 
             if !map.contains_key(&target) {
@@ -1773,11 +1782,32 @@ mod tests {
     }
 
     #[test]
-    fn indirection_defaults_point_audio_and_temp_at_download_dir() {
+    fn temp_defaults_to_a_hidden_directory_under_the_download_root() {
         let c = ok(&[("DOWNLOAD_DIR", "/downloads")]);
         assert_eq!(c.paths.download, PathBuf::from("/downloads"));
         assert_eq!(c.paths.audio_download, PathBuf::from("/downloads"));
-        assert_eq!(c.paths.temp, PathBuf::from("/downloads"));
+        assert_eq!(c.paths.temp, PathBuf::from("/downloads/.aulos-tmp"));
+        let raw = RawEnv::from_pairs([("DOWNLOAD_DIR", "/downloads")]);
+        assert_eq!(
+            raw.effective_redacted().unwrap()["TEMP_DIR"],
+            "/downloads/.aulos-tmp"
+        );
+    }
+
+    #[test]
+    fn an_explicit_temp_directory_still_wins() {
+        let c = ok(&[("DOWNLOAD_DIR", "/downloads"), ("TEMP_DIR", "/scratch")]);
+        assert_eq!(c.paths.temp, PathBuf::from("/scratch"));
+    }
+
+    #[test]
+    fn indirection_composes_path_suffixes_across_multiple_hops() {
+        let c = ok(&[
+            ("DOWNLOAD_DIR", "%%STATE_DIR/videos"),
+            ("STATE_DIR", "/data"),
+        ]);
+        assert_eq!(c.paths.download, PathBuf::from("/data/videos"));
+        assert_eq!(c.paths.temp, PathBuf::from("/data/videos/.aulos-tmp"));
     }
 
     #[test]

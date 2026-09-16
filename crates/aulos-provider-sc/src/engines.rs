@@ -378,7 +378,7 @@ pub async fn cleanup_partial(names: &OutputNames, tmp: &Path) {
     if let Err(e) = tokio::fs::remove_file(&names.out_path).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        tracing::debug!(path = %names.out_path.display(), error = %e, "could not remove the partial output");
+        tracing::warn!(path = %names.out_path.display(), error = %e, "could not remove the partial output");
     }
     for dir in [
         tmp.join(&names.stem),
@@ -388,7 +388,7 @@ pub async fn cleanup_partial(names: &OutputNames, tmp: &Path) {
         if dir.is_dir()
             && let Err(e) = tokio::fs::remove_dir_all(&dir).await
         {
-            tracing::debug!(dir = %dir.display(), error = %e, "could not remove a temp directory");
+            tracing::warn!(dir = %dir.display(), error = %e, "could not remove a temp directory");
         }
     }
 }

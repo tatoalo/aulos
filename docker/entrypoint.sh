@@ -12,6 +12,8 @@ PGID="${GID:-$PGID}"
 # The audio root defaults to the download root, so the two collapse into one path unless the
 # operator split them (the shipped compose does: /downloads/audio).
 AUDIO_DIR="${AUDIO_DOWNLOAD_DIR:-$DOWNLOAD_DIR}"
+TEMP_DIR="${TEMP_DIR:-${DOWNLOAD_DIR}/.aulos-tmp}"
+export TEMP_DIR
 
 if [ "$(id -u)" -eq 0 ] && [ "$(id -g)" -eq 0 ]; then
   IS_ROOT=1
