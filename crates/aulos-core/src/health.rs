@@ -17,6 +17,8 @@ use crate::id::{BootId, Seq};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComponentStatus {
+    /// Initializing; no health result yet, so it does not degrade the service.
+    Starting,
     /// Working.
     Ok,
     /// Working, but not as it should be. Reported with HTTP 200 and `"status":"degraded"`.
@@ -32,6 +34,7 @@ impl ComponentStatus {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Starting => "starting",
             Self::Ok => "ok",
             Self::Degraded => "degraded",
             Self::Down => "down",
@@ -51,7 +54,7 @@ impl ComponentStatus {
 
     const fn severity(self) -> u8 {
         match self {
-            Self::Disabled => 0,
+            Self::Disabled | Self::Starting => 0,
             Self::Ok => 1,
             Self::Degraded => 2,
             Self::Down => 3,
@@ -240,6 +243,15 @@ mod tests {
 
     #[test]
     fn component_status_serialises_lowercase_and_orders_by_severity() {
+        assert_eq!(
+            serde_json::to_string(&ComponentStatus::Starting).unwrap(),
+            "\"starting\""
+        );
+        assert_eq!(ComponentStatus::Starting.as_str(), "starting");
+        assert_eq!(
+            ComponentStatus::Ok.worse(ComponentStatus::Starting),
+            ComponentStatus::Ok
+        );
         assert_eq!(
             serde_json::to_string(&ComponentStatus::Degraded).unwrap(),
             "\"degraded\""

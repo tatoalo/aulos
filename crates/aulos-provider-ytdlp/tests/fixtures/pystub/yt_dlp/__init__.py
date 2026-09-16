@@ -132,6 +132,9 @@ class YoutubeDL:
     POSTPROCESS_WHEN = ("pre_process", "after_filter", "before_dl", "post_process", "after_move")
 
     def __init__(self, params=None):
+        from yt_dlp import plugins
+        if not plugins.all_plugins_loaded.value:
+            plugins.load_all_plugins()
         self.params = dict(params or {})
         self.scenario = _scenario()
         # Upstream's own attribute name and shape: the shim splices its `after_move`

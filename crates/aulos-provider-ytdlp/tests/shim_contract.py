@@ -111,7 +111,7 @@ def scenario_file(tmp, value):
 def test_selftest():
     """``mode = selftest`` proves the interpreter can import yt-dlp."""
     print("selftest")
-    code, frames, stdout, _ = run_job({"v": 1, "protocol": 1, "job_id": "t", "mode": "selftest"})
+    code, frames, stdout, stderr = run_job({"v": 1, "protocol": 1, "job_id": "t", "mode": "selftest"})
     check(code == 0, "exits 0")
     check(kinds(frames) == ["hello", "result", "bye"], f"hello/result/bye, got {kinds(frames)}")
     check(envelope_is_well_formed(frames), "the envelope is well formed")
@@ -119,6 +119,32 @@ def test_selftest():
     check(frames[1]["ok"] is True, "the result is ok")
     check(frames[2]["frames"] == 3, "bye counts itself")
     check(stdout == "", f"stdout is empty, got {stdout!r}")
+    check("already registered" not in stderr, "hello does not register POT providers twice")
+    check(frames[0]["plugins"] == ["noisy"], "hello still lists loaded plugins")
+
+
+def test_plugin_discovery_is_idempotent():
+    """Discovery works both before and after YoutubeDL initialization, without reloading."""
+    print("idempotent plugin discovery")
+    for initialized_first in (False, True):
+        script = f"""
+import importlib.util
+import yt_dlp
+from yt_dlp import plugins
+spec = importlib.util.spec_from_file_location("shim", {SHIM!r})
+shim = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shim)
+if {initialized_first!r}:
+    yt_dlp.YoutubeDL()
+assert shim.plugin_names() == ["noisy"]
+assert shim.plugin_names() == ["noisy"]
+yt_dlp.YoutubeDL()
+assert plugins.load_calls == 1, plugins.load_calls
+"""
+        env = dict(os.environ, PYTHONPATH=PYSTUB, PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=False)
+        check(result.returncode == 0, f"discovery loads once (YoutubeDL first={initialized_first}): {result.stderr}")
+        check("already registered" not in result.stderr, "initializing YoutubeDL does not reload plugins")
 
 
 def test_stdout_isolation():
@@ -770,6 +796,7 @@ def main():
     """Runs every check and returns a process exit code."""
     for test in (
         test_selftest,
+        test_plugin_discovery_is_idempotent,
         test_stdout_isolation,
         test_bad_jobs,
         test_protocol_mismatch,

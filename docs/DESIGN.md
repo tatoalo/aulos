@@ -4312,11 +4312,16 @@ struct PotState { status: PotStatus, pid: Option<u32>, restarts: u32,
   piped into `tracing` (`target = "bgutil_pot"`, INFO for stdout, WARN for stderr).
 - On exit: log the code/signal, restart with backoff `1s, 2s, 4s, …, 60s` (±20 % jitter); the
   backoff resets after 60 s of healthy uptime. `restarts` is monotonic and exposed.
-- Health probe every 15 s: `GET {AULOS_POT_URL}/ping`, falling back to a plain TCP connect on the
-  host:port if that route 404s (the provider's route set changes across versions). **Three
+- Health probe immediately after each spawn, then every 15 s: `GET {AULOS_POT_URL}/ping`, falling
+  back to a plain TCP connect on the host:port if that route 404s (the provider's route set changes
+  across versions). **Three
   consecutive probe failures force a restart even when the process is still alive** — a wedged
   sidecar is worse than a dead one, because yt-dlp then fails bot checks silently, which is
   exactly the legacy failure nobody could see.
+- A new or restarted child reports `starting`, clears the previous probe result, and does not
+  degrade the service or show a warning in the web UI. Initial connection failures retry every
+  100 ms for up to 5 s before reporting `degraded`; an unanswered probe times out after 30 s.
+  Shutdown and child exit interrupt an in-flight probe.
 - After `AULOS_POT_MAX_RESTARTS` (10) in 10 minutes the supervisor enters `failed`, stops
   restarting, and logs an ERROR with remediation text. The server keeps serving; `bot_check`
   errors then carry a hint pointing at `healthz`.

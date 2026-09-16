@@ -43,6 +43,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import functools
 import json
 import math
 import os
@@ -327,6 +328,7 @@ def stream_of(info):
     return "unknown"
 
 
+@functools.cache
 def plugin_names():
     """The yt-dlp plugin packages that are actually loaded.
 
@@ -338,7 +340,8 @@ def plugin_names():
     except Exception:  # noqa: BLE001
         return []
     loader = getattr(ytdlp_plugins, "load_all_plugins", None)
-    if callable(loader):
+    loaded = getattr(getattr(ytdlp_plugins, "all_plugins_loaded", None), "value", False)
+    if callable(loader) and not loaded:
         with contextlib.suppress(Exception):
             loader()
     found = set()
@@ -1406,15 +1409,16 @@ def main(argv):
         job_error = exc
 
     policy = Policy((job or {}).get("policy"))
+    names = plugin_names()
     channel.emit(
         "hello",
         protocol=PROTOCOL,
         yt_dlp=ytdlp_version(),
         python=platform.python_version(),
         pid=os.getpid(),
-        plugins=plugin_names(),
+        plugins=names,
         pot={
-            "available": any("pot" in name for name in plugin_names()),
+            "available": any("pot" in name for name in names),
             "url": policy.pot_url or os.environ.get("BGUTIL_POT_BASE_URL"),
         },
     )

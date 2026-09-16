@@ -305,7 +305,7 @@ function applyFrame(f) {
       break;
     case 'health':
       for (const c of f.changed || []) {
-        if (c.to !== 'ok') toast('warning', `${c.component} is ${c.to}${c.detail ? ` — ${c.detail}` : ''}`);
+        if (c.to === 'degraded' || c.to === 'down') toast('warning', `${c.component} is ${c.to}${c.detail ? ` — ${c.detail}` : ''}`);
       }
       break;
     case 'providers':
