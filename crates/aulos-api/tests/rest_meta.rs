@@ -1131,6 +1131,25 @@ async fn healthz_and_livez_answer_without_auth() {
 }
 
 #[tokio::test]
+async fn a_starting_sidecar_keeps_healthz_and_fresh_client_health_ok() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        rig.state
+            .health
+            .set("pot", ComponentHealth::new(ComponentStatus::Starting));
+
+        let (status, health) = rig.get("healthz").await;
+        assert_eq!(status, 200);
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["components"]["pot"]["status"], "starting");
+        let (_, state) = rig.get("api/v2/state").await;
+        assert_eq!(state["health"]["status"], "ok");
+        assert_eq!(state["health"]["components"]["pot"], "starting");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_degraded_component_is_visible_to_a_fresh_client() {
     for_each_prefix(|prefix| async move {
         let rig = Rig::start(prefix).await;

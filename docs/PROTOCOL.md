@@ -1124,7 +1124,7 @@ always correct because every option has a server-side default.
 
 | Method | Path | Body / query | Success | Errors |
 |---|---|---|---|---|
-| GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down`, and each `components.<name>.status` additionally may be `disabled`; `items` is the §5.3 `counts` object and is windowed the same way | `503` when the store is unusable |
+| GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down`, and each `components.<name>.status` additionally may be `starting` or `disabled`; `items` is the §5.3 `counts` object and is windowed the same way | `503` when the store is unusable |
 | GET | `livez` | — | `200 {"ok":true}` | — |
 | GET | `version` | — | `200 {"version":…,"yt-dlp":…,"url_prefix":…,"protocol":"v2"}` | — |
 | GET | `api/v2/subscriptions` | — | `200 {"subscriptions":[Subscription]}` | — |
@@ -1456,7 +1456,9 @@ treat `frame.seq == stored` as a duplicate to drop.
   `GET api/v2/ytdl-options`. (The legacy server pushed `ytdl_options_changed` on connect for
   exactly this reason.) `ytdl_options` is the `ytdl_options` frame's payload minus `t`/`seq`;
   `health` is the abridged form — `status` plus a flat
-  `component → "ok" | "degraded" | "down" | "disabled"` map. `"disabled"` means the component is
+  `component → "starting" | "ok" | "degraded" | "down" | "disabled"` map. `"starting"` means
+  the component is initializing and has no probe result yet; it is neutral and must not show a
+  failure warning. `"disabled"` means the component is
   **not configured** rather than unwell — `jellyfin`, `nfo` and `telegram` report it when their
   integration is switched off — and it never drags the roll-up `status` below `ok`, so treat it
   exactly like `ok` unless you are drawing the component list itself. The roll-up `status` stays
@@ -1671,8 +1673,10 @@ Refetch `api/v2/capabilities` and/or `api/v2/catalog` when you see this.
 ```
 
 Emitted **only** on a component transition, never periodically. `status` is the roll-up,
-`ok | degraded | down`; `from` and `to` are per-component and may additionally be `"disabled"`,
-which means the integration is not configured (§5.3) and never makes the roll-up worse.
+`ok | degraded | down`; `from` and `to` are per-component and may additionally be `"starting"`
+or `"disabled"`. Both are neutral states (§5.3) and never make the roll-up worse.
+Health transitions also advance the published snapshot cursor on the next flush, even when no
+items changed, so refreshing an idle queue does not replay warnings from before that snapshot.
 
 ### 5.10 `pong` and `error`
 

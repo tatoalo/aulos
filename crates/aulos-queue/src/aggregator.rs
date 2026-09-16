@@ -751,6 +751,8 @@ impl Aggregator {
             FrameKind::Health,
             serde_json::json!({ "status": next.status, "changed": changed }),
         );
+        // A fresh snapshot must cover these transitions even while the item queue is idle.
+        self.state_dirty = true;
     }
 
     // -----------------------------------------------------------------------
@@ -2347,6 +2349,41 @@ mod tests {
         assert_eq!(
             frames[0].1["changed"][0]["detail"],
             "3 consecutive probe failures"
+        );
+    }
+
+    #[test]
+    fn health_transitions_advance_an_idle_snapshot_past_old_warnings() {
+        let mut rig = Rig::new(&[]);
+        rig.added(&[view(Status::Queued, 1)]);
+        rig.agg.flush();
+        rig.frames();
+
+        for status in [ComponentStatus::Degraded, ComponentStatus::Ok] {
+            let mut health = HealthView::empty();
+            health.status = status;
+            health
+                .components
+                .insert("pot".to_owned(), aulos_core::ComponentHealth::new(status));
+            rig.agg
+                .on_event(&DomainEvent::HealthChanged(Arc::new(health)));
+            let live = rig.frames();
+            assert_eq!(
+                live.len(),
+                1,
+                "connected clients still receive the transition"
+            );
+            assert_eq!(live[0].1["changed"][0]["to"], status.as_str());
+            rig.agg.flush();
+        }
+        let snapshot = rig.state.snapshot();
+        assert_eq!(snapshot.seq, rig.hub.head());
+        assert!(
+            matches!(
+                rig.hub.resume(snapshot.seq, Some(snapshot.boot_id)),
+                crate::Resume::UpToDate
+            ),
+            "refreshing an idle queue must not replay an earlier POT warning"
         );
     }
 

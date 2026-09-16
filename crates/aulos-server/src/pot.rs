@@ -12,7 +12,7 @@
 //! | own process group (`process_group(0)`) | a `killpg` for a cancelled download can never reach the sidecar (§2.1, risk R9) |
 //! | stdout → INFO, stderr → WARN, target `bgutil_pot` | the sidecar's own diagnostics reach the same log stream as everything else |
 //! | backoff `1s, 2s, 4s … 60s` ±20 %, reset after 60 s of healthy uptime | a crash loop must not spin, but a one-off crash must recover fast |
-//! | probe every 15 s, `GET {url}/ping` with a TCP-connect fallback | the provider's route set changes across versions, so a 404 is not "down" |
+//! | probe on spawn, then every 15 s, `GET {url}/ping` with a TCP-connect fallback | the provider's route set changes across versions, so a 404 is not "down" |
 //! | **three consecutive probe failures force a restart** | a wedged sidecar is worse than a dead one, because a dead one restarts |
 //! | `failed` after `AULOS_POT_MAX_RESTARTS` in 10 minutes | stop hammering; keep serving; say so in `healthz` |
 //! | `SIGTERM` the group, 5 s, `SIGKILL` | the DESIGN §16.4 step 9 shutdown |
@@ -60,6 +60,14 @@ pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// The probe period.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Allow the newly spawned process to bind its listener before reporting a failed probe.
+pub const STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(5);
+
+/// A hung probe must not leave the component starting indefinitely.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 /// `SIGTERM` → `SIGKILL` grace on shutdown and on a forced restart.
 pub const KILL_GRACE: Duration = Duration::from_secs(5);
 
@@ -84,14 +92,14 @@ pub enum PotStatus {
 impl PotStatus {
     /// The `healthz` status this maps onto.
     ///
-    /// `Starting` is `degraded` rather than `ok`: the sidecar is not usable yet, and a boot that
-    /// reported `ok` before the first successful probe would be lying for up to 15 seconds.
+    /// An unprobed sidecar is explicitly starting, without degrading the service.
     #[must_use]
     pub const fn component_status(self) -> ComponentStatus {
         match self {
             Self::Disabled => ComponentStatus::Disabled,
             Self::Up => ComponentStatus::Ok,
-            Self::Starting | Self::Degraded => ComponentStatus::Degraded,
+            Self::Starting => ComponentStatus::Starting,
+            Self::Degraded => ComponentStatus::Degraded,
             Self::Down | Self::Failed => ComponentStatus::Down,
         }
     }
@@ -274,6 +282,10 @@ pub struct PotSettings {
     pub max_restarts: u32,
     /// How often to probe.
     pub probe_interval: Duration,
+    /// Retry startup connection failures during this window before marking the child degraded.
+    pub startup_retry_window: Duration,
+    /// Upper bound on a probe, including startup retries.
+    pub probe_timeout: Duration,
     /// The first backoff step.
     pub backoff_base: Duration,
     /// The backoff ceiling.
@@ -295,6 +307,8 @@ impl PotSettings {
             endpoint: cfg.pot_url.clone(),
             max_restarts: cfg.pot_max_restarts,
             probe_interval: PROBE_INTERVAL,
+            startup_retry_window: STARTUP_RETRY_WINDOW,
+            probe_timeout: PROBE_TIMEOUT,
             backoff_base: BACKOFF_BASE,
             backoff_max: BACKOFF_MAX,
             healthy_uptime: HEALTHY_UPTIME,
@@ -578,16 +592,13 @@ impl Task {
 
     /// Watches one child until it exits, wedges, or shutdown is requested.
     async fn watch(&self, child: &mut Child, pid: Option<u32>, restarts: u32) -> Stop {
-        let mut ticker = tokio::time::interval_at(
-            tokio::time::Instant::now() + self.settings.probe_interval,
-            self.settings.probe_interval,
-        );
+        let mut ticker = tokio::time::interval(self.settings.probe_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut failures: u32 = 0;
+        let mut starting = true;
 
         loop {
-            tokio::select! {
-                // `Child::wait` is cancel-safe, so re-entering it on the next loop turn is sound.
+            let result = tokio::select! {
                 status = child.wait() => {
                     let detail: Box<str> = match status {
                         Ok(s) => describe_exit(&s).into(),
@@ -596,42 +607,71 @@ impl Task {
                     return Stop::Exited(detail);
                 }
                 () = self.shutdown.cancelled() => return Stop::Shutdown,
-                _ = ticker.tick() => {
-                    let result = self.probe.probe(&self.settings.endpoint).await;
-                    let at = self.clock.now_ms();
-                    match result {
-                        Ok(()) => {
-                            failures = 0;
-                            self.publish_probe(
-                                PotStatus::Up,
-                                pid,
-                                restarts,
-                                ProbeResult { ok: true, at, detail: None },
-                            );
-                        }
-                        Err(detail) => {
-                            failures += 1;
-                            tracing::warn!(
-                                pid, failures, %detail,
-                                "the bgutil-pot health probe failed"
-                            );
-                            let probe = ProbeResult {
-                                ok: false,
-                                at,
-                                detail: Some(detail.clone().into_boxed_str()),
-                            };
-                            if failures >= PROBE_FAILURES_BEFORE_RESTART {
-                                return Stop::Wedged(
-                                    format!("{failures} consecutive probe failures")
-                                        .into_boxed_str(),
-                                );
-                            }
-                            self.publish_probe(PotStatus::Degraded, pid, restarts, probe);
-                        }
+                result = async {
+                    ticker.tick().await;
+                    self.probe_with_startup_retry(starting).await
+                } => result,
+            };
+            if starting {
+                starting = false;
+                ticker.reset();
+            }
+            let at = self.clock.now_ms();
+            match result {
+                Ok(()) => {
+                    failures = 0;
+                    self.publish_probe(
+                        PotStatus::Up,
+                        pid,
+                        restarts,
+                        ProbeResult {
+                            ok: true,
+                            at,
+                            detail: None,
+                        },
+                    );
+                }
+                Err(detail) => {
+                    failures += 1;
+                    tracing::warn!(pid, failures, %detail, "the bgutil-pot health probe failed");
+                    let probe = ProbeResult {
+                        ok: false,
+                        at,
+                        detail: Some(detail.into_boxed_str()),
+                    };
+                    self.publish_probe(PotStatus::Degraded, pid, restarts, probe);
+                    if failures >= PROBE_FAILURES_BEFORE_RESTART {
+                        return Stop::Wedged(
+                            format!("{failures} consecutive probe failures").into_boxed_str(),
+                        );
                     }
                 }
             }
         }
+    }
+
+    async fn probe_with_startup_retry(&self, starting: bool) -> Result<(), String> {
+        let probe = async {
+            let started = tokio::time::Instant::now();
+            loop {
+                let result = self.probe.probe(&self.settings.endpoint).await;
+                if result.is_ok()
+                    || !starting
+                    || started.elapsed() >= self.settings.startup_retry_window
+                {
+                    return result;
+                }
+                tokio::time::sleep(STARTUP_RETRY_INTERVAL).await;
+            }
+        };
+        tokio::time::timeout(self.settings.probe_timeout, probe)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "POT probe timed out after {:?}",
+                    self.settings.probe_timeout
+                ))
+            })
     }
 
     /// Spawns the sidecar in its own process group, with both output streams piped into `tracing`.
@@ -748,6 +788,9 @@ impl Task {
         next.pid = pid;
         next.restarts = restarts;
         next.detail = detail.map(Into::into);
+        if status == PotStatus::Starting {
+            next.last_probe = None;
+        }
         self.store(next);
     }
 
@@ -832,6 +875,8 @@ mod tests {
             endpoint: "http://127.0.0.1:4416".into(),
             max_restarts: 10,
             probe_interval: Duration::from_millis(20),
+            startup_retry_window: Duration::ZERO,
+            probe_timeout: Duration::from_secs(30),
             backoff_base: Duration::from_millis(1),
             backoff_max: Duration::from_millis(4),
             healthy_uptime: Duration::from_secs(3600),
@@ -911,7 +956,7 @@ mod tests {
         );
         assert_eq!(
             PotStatus::Starting.component_status(),
-            ComponentStatus::Degraded
+            ComponentStatus::Starting
         );
         assert_eq!(
             PotStatus::Degraded.component_status(),
@@ -1091,6 +1136,141 @@ mod tests {
         assert!(alive.is_err(), "the sidecar's group must be gone");
     }
 
+    #[tokio::test]
+    async fn startup_probes_immediately_and_brief_connection_failures_stay_neutral() {
+        for answers in [vec![true], vec![false, false, true]] {
+            let health = Arc::new(HealthRegistry::new());
+            let shutdown = CancellationToken::new();
+            let mut s = settings(&["/bin/sh", "-c", "sleep 30"]);
+            s.probe_interval = PROBE_INTERVAL;
+            s.startup_retry_window = STARTUP_RETRY_WINDOW;
+            let probe = ScriptedProbe::new(answers);
+            let (sup, task) = PotSupervisor::builder(s)
+                .with_probe(Arc::clone(&probe) as Arc<dyn PotProbe>)
+                .with_shutdown(shutdown.clone())
+                .spawn_with(Arc::clone(&health));
+
+            assert_eq!(sup.state().status, PotStatus::Starting);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let snapshot = health.snapshot();
+                    assert_eq!(snapshot.status, ComponentStatus::Ok);
+                    assert!(matches!(
+                        snapshot.components[COMPONENT].status,
+                        ComponentStatus::Starting | ComponentStatus::Ok
+                    ));
+                    if sup.state().status == PotStatus::Up {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("startup must not wait for the 15-second probe interval");
+            let calls = probe.calls();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                probe.calls(),
+                calls,
+                "resume the normal cadence after startup"
+            );
+            shutdown.cancel();
+            task.await.unwrap();
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingProbe;
+
+    #[async_trait::async_trait]
+    impl PotProbe for PendingProbe {
+        async fn probe(&self, _endpoint: &str) -> Result<(), String> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_startup_probe_expires_and_does_not_block_shutdown() {
+        for timeout in [Duration::from_millis(50), PROBE_TIMEOUT] {
+            let health = Arc::new(HealthRegistry::new());
+            let shutdown = CancellationToken::new();
+            let mut s = settings(&["/bin/sh", "-c", "sleep 30"]);
+            s.probe_interval = PROBE_INTERVAL;
+            s.probe_timeout = timeout;
+            let (sup, task) = PotSupervisor::builder(s)
+                .with_probe(Arc::new(PendingProbe))
+                .with_shutdown(shutdown.clone())
+                .spawn_with(Arc::clone(&health));
+            if timeout < PROBE_TIMEOUT {
+                assert!(wait_for(&sup, PotStatus::Degraded).await);
+                assert_eq!(health.snapshot().status, ComponentStatus::Degraded);
+                let state = sup.state();
+                let probe = state.last_probe.as_ref().unwrap();
+                assert!(!probe.ok);
+                assert!(probe.detail.as_deref().unwrap().contains("timed out"));
+            } else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert_eq!(sup.state().status, PotStatus::Starting);
+            }
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("shutdown must interrupt a pending probe")
+                .unwrap();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RestartProbe {
+        calls: AtomicU32,
+        ready: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl PotProbe for RestartProbe {
+        async fn probe(&self, _endpoint: &str) -> Result<(), String> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err("first child failed".into());
+            }
+            self.ready.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restarted_child_starts_neutral_without_the_previous_probe_result() {
+        let health = Arc::new(HealthRegistry::new());
+        let shutdown = CancellationToken::new();
+        let mut s = settings(&["/bin/sh", "-c", "sleep 30"]);
+        s.probe_interval = PROBE_INTERVAL;
+        let probe = Arc::new(RestartProbe::default());
+        let (sup, task) = PotSupervisor::builder(s)
+            .with_probe(Arc::clone(&probe) as Arc<dyn PotProbe>)
+            .with_shutdown(shutdown.clone())
+            .spawn_with(Arc::clone(&health));
+        assert!(wait_for(&sup, PotStatus::Degraded).await);
+        signal_group(sup.pid().unwrap(), nix::sys::signal::Signal::SIGKILL);
+        assert!(wait_for(&sup, PotStatus::Starting).await);
+        assert_eq!(sup.state().restarts, 1);
+        assert!(sup.state().last_probe.is_none());
+        assert!(sup.state().detail.is_none());
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.status, ComponentStatus::Ok);
+        assert_eq!(
+            snapshot.components[COMPONENT].status,
+            ComponentStatus::Starting
+        );
+        assert!(
+            !snapshot.components[COMPONENT]
+                .detail
+                .contains_key("last_probe_ok")
+        );
+        probe.ready.notify_one();
+        assert!(wait_for(&sup, PotStatus::Up).await);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
     async fn wait_for(sup: &PotSupervisor, want: PotStatus) -> bool {
         for _ in 0..200 {
             if sup.state().status == want {
@@ -1117,6 +1297,8 @@ mod tests {
         assert_eq!(&*s.endpoint, "http://127.0.0.1:9999");
         assert_eq!(s.max_restarts, 4);
         assert_eq!(s.probe_interval, PROBE_INTERVAL);
+        assert_eq!(s.startup_retry_window, STARTUP_RETRY_WINDOW);
+        assert_eq!(s.probe_timeout, PROBE_TIMEOUT);
     }
 
     #[tokio::test]
