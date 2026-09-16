@@ -8,7 +8,7 @@ on:
     tags: ['v*']
     paths-ignore: ['**.md']
   pull_request:
-    paths-ignore: ['**.md']
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       push:
@@ -17,17 +17,55 @@ on:
         default: false
         type: boolean
 
-concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build:
+  changes:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      build: ${{ steps.filter.outputs.result }}
+    steps:
+      - name: Select Docker builds
+        id: filter
+        uses: actions/github-script@v9
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') return true;
+            const { action, label, pull_request: pr } = context.payload;
+            if (action === 'labeled' && label.name !== 'docker-build') return false;
+            if (pr.labels.some(label => label.name === 'docker-build')) return true;
+            let files;
+            try {
+              files = await github.paginate(github.rest.pulls.listFiles, {
+                ...context.repo, pull_number: pr.number, per_page: 100,
+              });
+            } catch (error) {
+              core.warning(`Cannot list PR files; building Docker: ${error.message}`);
+              return true;
+            }
+            // The API caps the list at 3,000 files; an incomplete diff must not skip a build.
+            if (files.length >= 3000) return true;
+            const packaging = path =>
+              /^(docker\/|\.cargo\/|\.dockerignore$|\.github\/workflows\/docker\.yml$|crates\/aulos-provider-ytdlp\/python\/|plugins\/examples\/)/.test(path) ||
+              /(^|\/)(Cargo\.toml|Cargo\.lock|build\.rs|rust-toolchain(\.toml)?)$/.test(path);
+            const build = files.some(file =>
+              packaging(file.filename) || (file.previous_filename && packaging(file.previous_filename)));
+            core.info(build ? 'Packaging or dependency changes: building Docker' : 'Application-only changes: skipping Docker');
+            return build;
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: docker-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v6
 
@@ -55,14 +93,14 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push' || inputs.push == true
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: ${{ (github.event_name == 'push' || inputs.push == true) && 'Build and publish image' || 'Build image (no push)' }}
         id: build
         uses: docker/build-push-action@v7
         with:
@@ -70,7 +108,7 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64
           push: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || inputs.push == true }}
-          load: ${{ github.event_name == 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.push != true) }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -87,8 +125,8 @@ jobs:
         run: |
           set -eu
           img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
-          # `load` is set only on pull requests; on a push buildx sent the image straight to the
-          # registry, so pull it back before running it.
+          # PRs and non-publishing manual builds are loaded locally; published builds are
+          # pulled back from the registry for the smoke.
           docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
           docker run --rm "$img" doctor
           # `healthcheck` probes a *running* server, so against this one-shot container it must
