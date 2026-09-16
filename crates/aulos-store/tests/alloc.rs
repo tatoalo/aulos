@@ -221,7 +221,7 @@ async fn a_missing_or_stale_seq_hwm_warns_and_is_reseeded() {
         reopened.next_seq().0 >= 2,
         "reseeded from the witness, not from zero"
     );
-    drop(reopened);
+    reopened.close().await.unwrap();
 
     // (b) behind the witness — the "an older file was restored" shape
     set_meta(&path, "seq_hwm", "1");
@@ -239,6 +239,7 @@ async fn a_missing_or_stale_seq_hwm_warns_and_is_reseeded() {
         reopened.id_warnings()
     );
     assert!(reopened.next_seq().0 >= 9_999);
+    reopened.close().await.unwrap();
 
     // (c) unparseable
     set_meta(&path, "seq_hwm", "not a number");
@@ -247,6 +248,7 @@ async fn a_missing_or_stale_seq_hwm_warns_and_is_reseeded() {
         reopened.id_warnings().first(),
         Some(IdWarning::SeqHwmMissing { found: Some(_) })
     ));
+    reopened.close().await.unwrap();
 }
 
 /// A property test over interleaved reserve/crash schedules: however many values each session

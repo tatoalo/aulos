@@ -100,7 +100,12 @@ async fn a_dispatcher_that_never_answers_is_finalised_by_the_timeout() {
         .build()
         .await;
     let id = h.add("https://fake.test/watch/wedged").await;
-    h.until_status(id, Status::Postprocessing).await;
+    h.hooks
+        .until(
+            "finishing",
+            |e| matches!(e, DomainEvent::Finishing(v) if v.id == id),
+        )
+        .await;
 
     // The engine's own safety net: `PRE_TERMINAL_TIMEOUT_MS` past the handshake it finalises with
     // the outcome it already had, and logs at WARN.
