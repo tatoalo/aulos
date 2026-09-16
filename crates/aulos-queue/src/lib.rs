@@ -86,6 +86,7 @@ pub mod recovery;
 pub mod resolve;
 pub mod ring;
 pub mod run;
+mod scratch;
 pub mod slots;
 pub mod watchdog;
 

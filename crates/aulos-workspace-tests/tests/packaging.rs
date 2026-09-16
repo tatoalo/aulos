@@ -310,6 +310,15 @@ fn the_workspace_tests_crate_has_no_src_dir() {
 /// `chown` argument lines, one per invocation.
 #[cfg(unix)]
 fn run_entrypoint(dirs: &EntrypointDirs<'_>, chown_dirs: &str) -> Vec<String> {
+    run_entrypoint_with_temp(dirs, chown_dirs, Some(&dirs.temp))
+}
+
+#[cfg(unix)]
+fn run_entrypoint_with_temp(
+    dirs: &EntrypointDirs<'_>,
+    chown_dirs: &str,
+    temp: Option<&Path>,
+) -> Vec<String> {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = dirs.root;
@@ -343,7 +352,9 @@ fn run_entrypoint(dirs: &EntrypointDirs<'_>, chown_dirs: &str) -> Vec<String> {
     cmd.env("CHOWN_DIRS", chown_dirs);
     cmd.env("DOWNLOAD_DIR", &dirs.download);
     cmd.env("STATE_DIR", &dirs.state);
-    cmd.env("TEMP_DIR", &dirs.temp);
+    if let Some(temp) = temp {
+        cmd.env("TEMP_DIR", temp);
+    }
     if let Some(audio) = &dirs.audio {
         cmd.env("AUDIO_DOWNLOAD_DIR", audio);
     }
@@ -414,6 +425,22 @@ fn the_entrypoint_chowns_every_root_it_creates_even_when_chown_dirs_is_false() {
             "{want} was created by the entrypoint but never chowned to PUID:PGID; chowns: {chowns:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_entrypoint_defaults_temp_to_the_configured_download_roots_hidden_child() {
+    let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let mut dirs = EntrypointDirs::split(tmp.path());
+    dirs.temp = dirs.download.join(".aulos-tmp");
+    let chowns = run_entrypoint_with_temp(&dirs, "false", None);
+    assert!(dirs.temp.is_dir());
+    assert!(
+        chowns
+            .iter()
+            .any(|line| line.contains(&dirs.temp.display().to_string()))
+    );
+    assert!(!read("docker/Dockerfile").contains("TEMP_DIR=/downloads"));
 }
 
 #[cfg(unix)]

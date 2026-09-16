@@ -29,7 +29,7 @@ services:
       DOWNLOAD_DIR: /downloads
       AUDIO_DOWNLOAD_DIR: /downloads/audio
       STATE_DIR: /downloads/.metube          # unchanged: the importer reads it
-      TEMP_DIR: /downloads/.tmp
+      TEMP_DIR: /downloads/.aulos-tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       SC_MAX_CONCURRENT_DOWNLOADS: "1"
       # The built-in web UI, served at the same address as the API. `GET <URL_PREFIX>` answers the

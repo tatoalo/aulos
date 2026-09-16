@@ -18,6 +18,45 @@ struct CountingGate {
     label: &'static str,
 }
 
+#[tokio::test]
+async fn scratch_with_foreign_files_is_gone_before_completion_hooks_run() {
+    for provider in ["streamingcommunity", "fake"] {
+        let h = Harness::builder()
+            .provider(Arc::new(support::fake_named(
+                provider,
+                aulos_provider::Match::Strong(200),
+            )))
+            .pre_terminal(Arc::new(AlwaysPreTerminal("Test hook")))
+            .build()
+            .await;
+        let mut request = support::request("https://fake.test/watch/episode");
+        request.auto_start = false;
+        let id = h.add_request(request).await.unwrap().ids[0];
+        h.until_status(id, Status::Queued).await;
+        let scratch = h.job_temp_dir(id);
+        std::fs::create_dir_all(scratch.join("episode")).unwrap();
+        std::fs::write(scratch.join("episode/raw.xml"), b"foreign playlist").unwrap();
+        h.handle
+            .actions(aulos_queue::Action::Start, vec![id], None)
+            .await;
+        h.hooks
+            .until(
+                "finishing",
+                |event| matches!(event, DomainEvent::Finishing(view) if view.id == id),
+            )
+            .await;
+        assert!(!scratch.exists(), "{provider}: cleanup must precede hooks");
+        h.handle.hooks_finished(id).await;
+        let done = h.until_status(id, Status::Finished).await;
+        assert_eq!(
+            std::fs::metadata(h.download_dir().join(done.filename.unwrap().as_path()))
+                .unwrap()
+                .len(),
+            1024
+        );
+    }
+}
+
 impl PreTerminalHooks for CountingGate {
     fn label_for(&self, _view: &ItemView) -> Option<Box<str>> {
         self.asked.fetch_add(1, Ordering::SeqCst);

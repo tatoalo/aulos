@@ -162,6 +162,69 @@ pub fn parse_nm3u8_frame(chunk: &str) -> Option<RawProgress> {
     Some(out)
 }
 
+/// Assembles console rows across arbitrary pipe reads before the engine samples progress.
+#[derive(Debug, Default)]
+pub struct Nm3u8Progress {
+    pending: Vec<u8>,
+    latest: Option<RawProgress>,
+}
+
+impl Nm3u8Progress {
+    /// Bounds a malformed or unterminated console row.
+    const MAX_PENDING: usize = 16 * 1024;
+
+    /// Keeps every piece of output, including pieces arriving inside the reporting interval.
+    pub fn feed(&mut self, chunk: &[u8]) {
+        for part in chunk.split_inclusive(|b| matches!(b, b'\r' | b'\n')) {
+            if part.len() >= Self::MAX_PENDING {
+                self.pending.clear();
+                self.pending
+                    .extend_from_slice(&part[part.len() - Self::MAX_PENDING..]);
+            } else {
+                let excess = (self.pending.len() + part.len()).saturating_sub(Self::MAX_PENDING);
+                self.pending.drain(..excess);
+                self.pending.extend_from_slice(part);
+            }
+            if part.last().is_some_and(|b| matches!(b, b'\r' | b'\n')) {
+                self.capture();
+                self.pending.clear();
+            }
+        }
+    }
+
+    fn capture(&mut self) {
+        if let Some(frame) = parse_nm3u8_frame(&String::from_utf8_lossy(&self.pending)) {
+            self.latest = Some(frame);
+        }
+    }
+
+    /// The newest completed row since the previous sample.
+    pub fn take_frame(&mut self) -> Option<RawProgress> {
+        // A console repaint need not end in a newline. Its final column is an ETA (or the
+        // unknown-ETA placeholder), so wait for that column before accepting a partial row.
+        let text = strip_ansi(&String::from_utf8_lossy(&self.pending));
+        if text.trim_end().ends_with("--:--:--")
+            || PATTERNS.as_ref().is_some_and(|p| {
+                p.eta
+                    .find_iter(&text)
+                    .last()
+                    .is_some_and(|m| m.end() == text.trim_end().len())
+            })
+        {
+            self.capture();
+            self.pending.clear();
+        }
+        self.latest.take()
+    }
+
+    /// Accepts the last unterminated row when the child closes its output.
+    pub fn finish(&mut self) -> Option<RawProgress> {
+        self.capture();
+        self.pending.clear();
+        self.latest.take()
+    }
+}
+
 /// The ffmpeg `-progress pipe:1` reader (DESIGN §10.5, legacy `app/ytdl.py:660-686`).
 ///
 /// ffmpeg writes `key=value` lines and terminates each group with `progress=continue|end`, so this
@@ -363,6 +426,71 @@ mod tests {
     fn an_osc_sequence_is_stripped_like_a_csi_one() {
         let f = parse_nm3u8_frame("\u{1b}]0;title\u{7}5/10 50.00%").expect("a frame");
         assert_eq!((f.fragment_index, f.fragment_count), (Some(5), Some(10)));
+    }
+
+    #[test]
+    fn split_rows_keep_their_counters_sizes_speed_and_eta_together() {
+        let row = "Vid ━━━ 325/2000 16.25% 512 MB/3.20 GB 8.50 MBps 00:01:15";
+        let expected = parse_nm3u8_frame(row).expect("frame");
+        for split in 1..row.len() {
+            let mut parser = Nm3u8Progress::default();
+            parser.feed(&row.as_bytes()[..split]);
+            assert_eq!(parser.take_frame(), None, "premature row at split {split}");
+            parser.feed(&row.as_bytes()[split..]);
+            assert_eq!(parser.take_frame(), Some(expected), "split {split}");
+            assert_eq!(parser.take_frame(), None, "no stale replay");
+        }
+    }
+
+    #[test]
+    fn the_actual_piped_output_survives_every_chunk_size() {
+        let bytes = include_bytes!("../tests/fixtures/sc/nm3u8_v0_5_1_pipe.txt");
+        for size in 1..=bytes.len() {
+            let mut parser = Nm3u8Progress::default();
+            for chunk in bytes.chunks(size) {
+                parser.feed(chunk);
+            }
+            let frame = parser.finish().expect("captured progress");
+            assert_eq!(
+                (frame.fragment_index, frame.fragment_count),
+                (Some(12), Some(12)),
+                "size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn repaint_rows_are_buffered_while_publication_is_throttled() {
+        let mut parser = Nm3u8Progress::default();
+        parser.feed(b"video 1/10 10.00% 1 MB/10 MB 2 MBps 00:00:05\r");
+        parser.feed(b"video 2/10 20.00% 2 MB/10 MB 2 MBps 00:00:04\r");
+        let frame = parser.take_frame().expect("latest row");
+        assert_eq!(frame.fragment_index, Some(2));
+        assert_eq!(frame.downloaded_bytes, Some(2.0 * 1024.0 * 1024.0));
+        assert_eq!(frame.eta, Some(4));
+        assert_eq!(parser.take_frame(), None);
+    }
+
+    #[test]
+    fn an_ansi_repaint_split_inside_an_escape_is_reassembled() {
+        let mut parser = Nm3u8Progress::default();
+        for byte in b"\x1b[2K\x1b[1Avideo 5/10 50.00% 5 MB/10 MB 1 MBps 00:00:05" {
+            parser.feed(&[*byte]);
+        }
+        let frame = parser.take_frame().expect("reassembled repaint");
+        assert_eq!(frame.fragment_index, Some(5));
+        assert_eq!(frame.eta, Some(5));
+    }
+
+    #[test]
+    fn an_unterminated_row_is_bounded_and_eof_flushes_the_last_frame() {
+        let mut parser = Nm3u8Progress::default();
+        parser.feed(&vec![b'x'; Nm3u8Progress::MAX_PENDING * 3]);
+        assert!(parser.pending.len() <= Nm3u8Progress::MAX_PENDING);
+        assert_eq!(parser.take_frame(), None);
+        parser.feed(b"\nvideo 5/10 50.00%");
+        assert_eq!(parser.finish().expect("final row").fragment_index, Some(5));
+        assert_eq!(parser.finish(), None);
     }
 
     // -- ffmpeg -------------------------------------------------------------------------------

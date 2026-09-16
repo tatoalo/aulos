@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cmd::EngineCmd;
 use crate::engine::{Engine, PendingHooks, RunSlot, Settled};
 use crate::entry::SC_PROVIDER;
+use crate::scratch::ScratchDir;
 use crate::slots::Slot;
 use crate::watchdog::{self, Watchdog};
 
@@ -66,6 +67,8 @@ impl Engine {
             entry: crate::entry::rebuild_entry(item),
             request: item.request.clone(),
             ytdl: self.ytdl.load_full(),
+            scratch: (provider.id().as_str() == SC_PROVIDER)
+                .then(|| ScratchDir::new(&self.cfg.paths, id, Some(&out_dir))),
             out_dir,
             tmp_dir,
             outtmpl: self.outtmpl_for(item),
@@ -211,6 +214,8 @@ impl Engine {
             return;
         }
 
+        self.cleanup_partials(id, true);
+
         // The pre-terminal phase: write `postprocessing`, publish `Finishing`, and finalise only
         // on `HooksFinished` (DESIGN §13). The download slot has already been released above, so a
         // pre-terminal hook never blocks the next download.
@@ -293,9 +298,9 @@ impl Engine {
             }
         });
 
+        self.cleanup_partials(id, true);
         self.terminate(id, Status::Finished, FieldUpdate::Clear)
             .await;
-        self.cleanup_partials(id, true);
     }
 
     /// [`EngineCmd::Failed`]: the provider gave up (DESIGN §8.8).
@@ -431,12 +436,8 @@ impl Engine {
         if !remove_partials && !is_sc {
             return;
         }
-        let tmp = self.tmp_dir_for(id);
-        if tmp.exists()
-            && let Err(e) = std::fs::remove_dir_all(&tmp)
-        {
-            tracing::warn!(item = %id, dir = %tmp.display(), error = %e, "cannot remove the scratch directory");
-        }
+        let output = self.cached(id).map(|item| self.out_dir_for(&item));
+        ScratchDir::new(&self.cfg.paths, id, output.as_deref()).remove();
         // A provider that wrote its partial next to the final file rather than in the scratch
         // directory: legacy left both of these behind.
         if let Some(item) = self.cached(id)
@@ -494,6 +495,7 @@ fn remove_file_quietly(path: &Path) {
 
 /// One download, running off the engine task.
 struct RunJob {
+    scratch: Option<ScratchDir>,
     id: ItemId,
     provider: Arc<dyn Provider>,
     entry: MediaEntry,
@@ -511,6 +513,7 @@ impl RunJob {
     /// Calls `download` and reports the result exactly once.
     async fn run(self) {
         let Self {
+            scratch,
             id,
             provider,
             entry,
@@ -524,6 +527,7 @@ impl RunJob {
             tx,
         } = self;
         let mut guard = ReportGuard {
+            scratch,
             id,
             tx: tx.clone(),
             armed: true,
@@ -553,7 +557,11 @@ impl RunJob {
             cancel,
         };
         let result = provider.download(ctx, sink).await;
+        if let Some(scratch) = guard.scratch.take() {
+            let _ = tokio::task::spawn_blocking(move || scratch.remove()).await;
+        }
         guard.armed = false;
+        drop(guard);
         let cmd = match result {
             Ok(outcome) => EngineCmd::Finished {
                 id,
@@ -573,6 +581,7 @@ impl RunJob {
 /// A provider that panics, or a runtime that drops the task at shutdown, would otherwise leave the
 /// item `downloading` with its slot held until the next restart.
 struct ReportGuard {
+    scratch: Option<ScratchDir>,
     id: ItemId,
     tx: mpsc::Sender<EngineCmd>,
     armed: bool,
@@ -580,6 +589,9 @@ struct ReportGuard {
 
 impl Drop for ReportGuard {
     fn drop(&mut self) {
+        if let Some(scratch) = &self.scratch {
+            scratch.remove();
+        }
         if !self.armed {
             return;
         }
@@ -595,6 +607,32 @@ impl Drop for ReportGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreported_sc_task_cleans_scratch_and_reports_failure_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = aulos_core::paths::Paths {
+            download: dir.path().to_path_buf(),
+            audio_download: dir.path().to_path_buf(),
+            temp: dir.path().join(".aulos-tmp"),
+            state: dir.path().join("state"),
+        };
+        let id = ItemId::new();
+        let scratch = paths.temp.join(id.to_string());
+        std::fs::create_dir_all(scratch.join("episode")).unwrap();
+        std::fs::write(scratch.join("episode/raw.xml"), b"foreign playlist").unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(ReportGuard {
+            id,
+            tx,
+            armed: true,
+            scratch: Some(ScratchDir::new(&paths, id, Some(&paths.download))),
+        });
+        assert!(!scratch.exists());
+        assert!(
+            matches!(rx.try_recv().unwrap(), EngineCmd::Failed { id: failed, .. } if failed == id)
+        );
+    }
 
     #[test]
     fn the_backoff_curve_is_thirty_times_two_to_the_n_within_twenty_percent() {

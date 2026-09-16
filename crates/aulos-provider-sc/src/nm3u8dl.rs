@@ -4,7 +4,7 @@
 //! when it is done. Three things about driving it are not obvious:
 //!
 //! 1. **Its progress is not lines.** Spectre.Console repaints, so the output has to be read as
-//!    *chunks* and parsed with [`crate::progress::parse_nm3u8_frame`]; a line reader would deliver
+//!    *chunks* and assembled with [`crate::progress::Nm3u8Progress`]; a line reader would deliver
 //!    nothing for minutes and then one enormous line.
 //! 2. **Exit 0 does not mean "the file is there".** When its own mux step fails — which is what a
 //!    16-thread run on a slow disk does — it exits 0 having left a directory of segments. That is
@@ -20,11 +20,11 @@ use aulos_provider::outcome::Outcome;
 use aulos_provider::proc::{Child, ProcError, SpawnSpec};
 use aulos_provider::provider::{DownloadCtx, ProviderError};
 use aulos_provider::sink::ProgressSink;
-use tokio::time::Instant;
+use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::engines::{EngineCfg, OutputNames, cleanup_partial, error_tail};
 use crate::jit::StreamTarget;
-use crate::progress::{MIN_PROGRESS_INTERVAL, parse_nm3u8_frame, strip_ansi};
+use crate::progress::{MIN_PROGRESS_INTERVAL, Nm3u8Progress, strip_ansi};
 
 /// The tool's name, as `argv[0]` and as the [`ProviderError::ToolMissing`] label.
 pub const TOOL: &str = "N_m3u8DL-RE";
@@ -119,6 +119,8 @@ impl Tail {
 enum Step {
     /// `ctx.cancel` fired.
     Cancel,
+    /// Publish the newest assembled progress row.
+    Progress,
     /// A chunk of the tool's output, or `None` at end of stream.
     Out(Option<Vec<u8>>),
     /// Reading the output failed.
@@ -152,12 +154,20 @@ pub async fn download_nm3u8(
     let mut child = Child::spawn(&spec)?;
     let mut stdout = child.take_stdout();
     let mut tail = Tail::default();
-    let mut last_frame = Instant::now();
+    let mut progress = Nm3u8Progress::default();
+    let mut tick = tokio::time::interval_at(
+        Instant::now() + MIN_PROGRESS_INTERVAL,
+        MIN_PROGRESS_INTERVAL,
+    );
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut output_bytes = 0_u64;
+    let mut progress_frames = 0_u64;
 
     let status = loop {
         let step = tokio::select! {
             biased;
             () = ctx.cancel.cancelled() => Step::Cancel,
+            _ = tick.tick() => Step::Progress,
             r = read_chunk(stdout.as_mut()), if stdout.is_some() => match r {
                 Ok(chunk) => Step::Out(chunk),
                 Err(e) => Step::Read(e),
@@ -176,12 +186,13 @@ pub async fn download_nm3u8(
             Step::Out(Some(chunk)) => {
                 let text = String::from_utf8_lossy(&chunk);
                 tail.push(&text);
-                let now = Instant::now();
-                if now.duration_since(last_frame) >= MIN_PROGRESS_INTERVAL
-                    && let Some(frame) = parse_nm3u8_frame(&text)
-                {
-                    last_frame = now;
+                output_bytes += chunk.len() as u64;
+                progress.feed(&chunk);
+            }
+            Step::Progress => {
+                if let Some(frame) = progress.take_frame() {
                     sink.progress(frame);
+                    progress_frames += 1;
                 }
             }
             // End of stream: stop polling it and wait for the exit.
@@ -197,6 +208,15 @@ pub async fn download_nm3u8(
             }
         }
     };
+
+    if let Some(frame) = progress.finish() {
+        sink.progress(frame);
+        progress_frames += 1;
+    }
+    tracing::debug!(item = %ctx.item_id, output_bytes, progress_frames, "N_m3u8DL-RE progress summary");
+    if status.success() && progress_frames == 0 {
+        tracing::warn!(item = %ctx.item_id, output_bytes, "N_m3u8DL-RE completed without readable progress");
+    }
 
     if !status.success() {
         let code = status.code().unwrap_or(1);
@@ -247,7 +267,7 @@ async fn resolve_output(cfg: &EngineCfg, names: &OutputNames) -> Result<Outcome,
 
     let size = crate::mux::gapless_mux(&cfg.ffmpeg, &names.seg_dir, &names.out_path).await?;
     if let Err(e) = tokio::fs::remove_dir_all(&names.seg_dir).await {
-        tracing::debug!(dir = %names.seg_dir.display(), error = %e, "could not remove the segment directory");
+        tracing::warn!(dir = %names.seg_dir.display(), error = %e, "could not remove the segment directory");
     }
     Ok(Outcome::file(names.rel.clone(), size))
 }
@@ -437,6 +457,47 @@ mod tests {
         assert_eq!(outcome.size, Some(14));
         let frames = crate::testing::drain_frames(&mut rx);
         assert!(!frames.is_empty(), "progress must reach the sink");
+    }
+
+    #[tokio::test]
+    async fn split_progress_reaches_the_sink_before_the_downloader_finishes() {
+        let mut f = EngineFixture::new().await;
+        f.cfg.nm3u8dl = fixture_bin("fake_nm3u8dl_split.sh").into();
+        let ctx = f.ctx();
+        let names = OutputNames::plan(&f.cfg, &ctx, Some(&f.state)).expect("names");
+        let (sink, mut rx) = f.sink();
+        let target = target();
+        let tmp = f.tmp_dir();
+        let run = download_nm3u8(&f.cfg, &ctx, &target, &names, &tmp, &sink);
+        tokio::pin!(run);
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut run => panic!("downloader finished before progress: {result:?}"),
+                msg = rx.recv() => match msg.expect("progress channel") {
+                    aulos_provider::sink::ProgressMsg::Progress { raw, .. } => raw,
+                    other => panic!("expected progress: {other:?}"),
+                },
+            }
+        })
+        .await
+        .expect("progress while the process is running");
+        assert_eq!(
+            (frame.fragment_index, frame.fragment_count),
+            (Some(4), Some(12))
+        );
+        assert_eq!(frame.downloaded_bytes, Some((369.02_f64 * 1024.0).trunc()));
+        assert_eq!(
+            frame.total_bytes,
+            Some((2.16_f64 * 1024.0 * 1024.0).trunc())
+        );
+        assert_eq!(frame.speed, Some((369.02_f64 * 1024.0).trunc()));
+        assert_eq!(frame.eta, Some(6));
+        assert!(
+            !names.out_path.exists(),
+            "progress arrived before completion"
+        );
+        write(&f.out_dir().join("allow-finish"), b"");
+        run.await.expect("download completes");
     }
 
     #[tokio::test]

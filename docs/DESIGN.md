@@ -2194,7 +2194,9 @@ sees a consistent snapshot.
 operator who wants to inspect before resuming.
 
 Stale temp files: on boot, `*.part`/`*.ytdl` files in `TEMP_DIR` whose owning item no longer
-exists are **logged, not deleted**, unless `AULOS_CLEAN_ORPHAN_TEMP=true`. Deleting user data on
+exists, and ULID scratch directories whose item is terminal or unknown, are **logged, not deleted**,
+unless `AULOS_CLEAN_ORPHAN_TEMP=true`. Scratch cleanup removes the whole guarded per-item directory,
+including foreign files, while retaining directories for resumable items. Deleting user data on
 boot by default is not acceptable. yt-dlp resumes HTTP downloads from `.part`, so leaving them is
 also the faster choice. SC partials are deleted on cancel/restart because the m3u8 token is dead
 anyway.
@@ -4552,8 +4554,8 @@ pub fn load(env: &RawEnv) -> Result<Config, Vec<ConfigError>>;
 1. Start from the `DEFAULTS` table (§17.3) and overlay `std::env::vars()`. **Everything is a
    string at this stage**, exactly like legacy.
 2. `%%INDIRECTION`: a value starting with `%%` is replaced by the value of the named key
-   (`AUDIO_DOWNLOAD_DIR=%%DOWNLOAD_DIR`, `TEMP_DIR=%%DOWNLOAD_DIR`). Resolution is iterative with
-   a cycle check; a cycle or an unknown target is a fatal config error (legacy raised
+   (`AUDIO_DOWNLOAD_DIR=%%DOWNLOAD_DIR`, `TEMP_DIR=%%DOWNLOAD_DIR/.aulos-tmp`). A `/path` suffix is
+   appended after resolution. Resolution is iterative with a cycle check; a cycle or an unknown target is a fatal config error (legacy raised
    `AttributeError`; we report it).
 3. Booleans accept **exactly** `true|false|True|False|on|off|1|0`; the truthy set is
    `{true, True, on, 1}`. Anything else is `INVALID_BOOLEAN`. The key list is legacy's `_BOOLEAN`
@@ -4669,7 +4671,7 @@ variable is ignored rather than fatal (§17.1), which is the price of the except
 |---|---|---|---|---|
 | `DOWNLOAD_DIR` | `.` (image `/downloads`) | path | base dir for video/other; served at `<p>download/` | L |
 | `AUDIO_DOWNLOAD_DIR` | `%%DOWNLOAD_DIR` | path | used when `download_type == audio`; served at `<p>audio_download/` | L |
-| `TEMP_DIR` | `%%DOWNLOAD_DIR` | path | yt-dlp `paths.temp`; N_m3u8DL-RE `--tmp-dir` | L |
+| `TEMP_DIR` | `%%DOWNLOAD_DIR/.aulos-tmp` | path | yt-dlp `paths.temp`; N_m3u8DL-RE `--tmp-dir` | L |
 | `DOWNLOAD_DIRS_INDEXABLE` | `false` | bool | directory listing on the file routes; now a JSON listing, not HTML | L\* |
 | `CUSTOM_DIRS` | `true` | bool | allows `folder`; gates `api/v2/custom-dirs` | L |
 | `CREATE_CUSTOM_DIRS` | `true` | bool | `create_dir_all` a missing `folder` instead of erroring | L |
@@ -4757,7 +4759,7 @@ variable is ignored rather than fatal (§17.1), which is the price of the except
 | `AULOS_KILL_GRACE_MS` | `5000` | int | SIGTERM → SIGKILL grace for a process group | N |
 | `AULOS_AUTO_RETRY_MAX` | `2` | int (0 = off) | automatic retry of retryable errors only | N |
 | `AULOS_RESTART_POLICY` | `resume` | `resume\|pause` | what boot recovery does with in-flight items | N |
-| `AULOS_CLEAN_ORPHAN_TEMP` | `false` | bool | delete orphan `*.part`/`*.ytdl` at boot | N |
+| `AULOS_CLEAN_ORPHAN_TEMP` | `false` | bool | delete orphan `*.part`/`*.ytdl` and terminal/unknown ULID scratch dirs at boot | N |
 | `AULOS_ENTRY_MAX_BYTES` | `262144` | int | entry-blob hard cap | N |
 | `AULOS_CUSTOM_DIRS_MAX_DEPTH` | `8` | int | bounds the custom-dirs walk | N |
 | `AULOS_PLUGINS_DIR` | `${PLUGINS_DIR:-/config/plugins}` | path | provider and hook manifests | N |
@@ -4880,7 +4882,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint && chmod +x /usr/local/bin/
 COPY plugins/examples /opt/aulos/plugins-examples
 
 ENV PUID=1000 PGID=1000 UMASK=022 \
-    DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube TEMP_DIR=/downloads \
+    DOWNLOAD_DIR=/downloads STATE_DIR=/downloads/.metube \
     PORT=8081 SC_USE_FFMPEG=false \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
     AULOS_PLUGINS_DIR=/config/plugins \
@@ -4930,6 +4932,8 @@ AUDIO_DIR="${AUDIO_DOWNLOAD_DIR:-$DOWNLOAD_DIR}"
 if [ "$(id -u)" -eq 0 ] && [ "$(id -g)" -eq 0 ]; then IS_ROOT=1; else IS_ROOT=0; fi
 echo "Setting umask to ${UMASK}"
 umask "${UMASK}"
+TEMP_DIR="${TEMP_DIR:-${DOWNLOAD_DIR}/.aulos-tmp}"
+export TEMP_DIR
 echo "Creating download (${DOWNLOAD_DIR}), state (${STATE_DIR}), temp (${TEMP_DIR}), audio (${AUDIO_DIR}) directories"
 # A directory the entrypoint itself creates as root is its own mess: chown it right away, before
 # the CHOWN_DIRS switch, so CHOWN_DIRS=false cannot leave a root-owned root behind.
@@ -4997,7 +5001,7 @@ services:
       DOWNLOAD_DIR: /downloads
       AUDIO_DOWNLOAD_DIR: /downloads/audio
       STATE_DIR: /downloads/.metube          # unchanged: the importer reads it
-      TEMP_DIR: /downloads/.tmp
+      TEMP_DIR: /downloads/.aulos-tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       SC_MAX_CONCURRENT_DOWNLOADS: "1"
       YTDL_OPTIONS_FILE: /config/ytdl-options.json
