@@ -39,6 +39,7 @@ url = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 rstest = { workspace = true }
 wiremock = { workspace = true }
 proptest = { workspace = true }

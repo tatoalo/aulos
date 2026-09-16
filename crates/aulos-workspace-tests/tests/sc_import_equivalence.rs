@@ -57,7 +57,7 @@ const NOW_MS: i64 = 1_772_582_400_000;
 async fn resolve_fresh() -> (MediaEntry, Url) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/it"))
+        .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_string(sc_fixture("it_page.html")))
         .mount(&server)
         .await;

@@ -101,6 +101,18 @@ pub enum ScError {
         /// The status code.
         status: u16,
     },
+    /// The version probe could not complete an HTTP request or safely follow its redirect.
+    #[error("{url} returned HTTP {status} (Location: {location}); {reason}")]
+    VersionProbe {
+        /// The URL that was being fetched.
+        url: String,
+        /// The response status.
+        status: u16,
+        /// The Location header, or `(none)` when absent.
+        location: String,
+        /// Why the probe stopped.
+        reason: &'static str,
+    },
     /// A body that should have been JSON was not.
     #[error("{url} did not return JSON: {message}")]
     BadJson {
@@ -109,10 +121,10 @@ pub enum ScError {
         /// The parser's message.
         message: String,
     },
-    /// `GET {base}/it` carried no `div#app[data-page]`, or the blob had no `version` string.
+    /// The site page carried no `div#app[data-page]`, or the blob had no `version` string.
     #[error("could not read the site version from {url}")]
     VersionUnreadable {
-        /// The `/it` URL.
+        /// The page URL.
         url: String,
     },
     /// The Inertia call rejected the asset version twice, one forced refresh apart.
@@ -167,7 +179,7 @@ impl ScError {
         match self {
             Self::Transport { .. } => ScErrorCode::Transport,
             Self::Timeout { .. } => ScErrorCode::Timeout,
-            Self::Status { .. } => ScErrorCode::Status,
+            Self::Status { .. } | Self::VersionProbe { .. } => ScErrorCode::Status,
             Self::BadJson { .. } => ScErrorCode::BadJson,
             Self::VersionUnreadable { .. } => ScErrorCode::VersionUnreadable,
             Self::VersionRejected { .. } => ScErrorCode::VersionRejected,
@@ -191,15 +203,18 @@ impl ScError {
     pub fn into_provider_error(self) -> ProviderError {
         let message = self.to_string();
         match &self {
-            Self::Transport { .. } => ProviderError::Network(message),
             Self::Timeout { .. } => ProviderError::Timeout(message),
+            Self::VersionProbe {
+                status: 400..=499, ..
+            } => ProviderError::Unavailable(message),
+            Self::Transport { .. } | Self::VersionProbe { .. } => ProviderError::Network(message),
             Self::Status { status, .. } => match *status {
                 401 => ProviderError::AuthRequired(message),
                 // Cloudflare fronts the site; a 403 here is a bot check, not a login wall.
                 403 => ProviderError::BotCheck(message),
                 404 | 410 => ProviderError::Unavailable(message),
                 429 => ProviderError::Throttled(message),
-                500..=599 => ProviderError::Network(message),
+                300..=399 | 500..=599 => ProviderError::Network(message),
                 _ => ProviderError::Other(message),
             },
             Self::BadUrlShape { .. }
@@ -310,6 +325,7 @@ mod tests {
     #[test]
     fn http_statuses_map_onto_the_honest_codes() {
         let cases = [
+            (301, ErrorCode::Network),
             (401, ErrorCode::AuthRequired),
             (403, ErrorCode::BotCheck),
             (404, ErrorCode::Unavailable),

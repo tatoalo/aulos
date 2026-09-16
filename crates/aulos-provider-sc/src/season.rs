@@ -267,6 +267,8 @@ async fn season_entries(
         .unwrap_or_default();
 
     let total = u32::try_from(episodes.len()).unwrap_or(u32::MAX);
+    let site = versions.site(http, base, false).await?;
+    let base = &site.base;
     let mut out = Vec::with_capacity(episodes.len());
     for (i, ep) in episodes.iter().enumerate() {
         let Some(ep_id) = ep.get("id").and_then(Value::as_u64) else {
@@ -362,7 +364,7 @@ mod tests {
 
     fn version_mock() -> MockHttp {
         MockHttp::new().on(
-            "https://sc.test/it",
+            "https://sc.test/",
             200,
             include_str!("../tests/fixtures/sc/it_page.html"),
         )

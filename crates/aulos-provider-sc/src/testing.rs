@@ -30,6 +30,7 @@ struct Recorded {
 #[derive(Debug, Default)]
 pub struct MockHttp {
     routes: Mutex<HashMap<String, Scripted>>,
+    locations: Mutex<HashMap<String, String>>,
     calls: Mutex<Vec<(String, Recorded)>>,
     cookies: String,
     /// What [`ScHttp::new_session`] hands out, if anything. `None` (the default) means "no
@@ -66,6 +67,16 @@ impl MockHttp {
     #[must_use]
     pub fn on(self, url: &str, status: u16, body: &str) -> Self {
         self.on_sequence(url, vec![(status, body.to_owned())])
+    }
+
+    /// Scripts a redirect without following it inside the transport.
+    #[must_use]
+    pub fn on_redirect(self, url: &str, status: u16, location: &str) -> Self {
+        self.locations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(url.to_owned(), location.to_owned());
+        self.on(url, status, "")
     }
 
     /// Scripts one URL with a sequence of responses; the last repeats.
@@ -164,6 +175,12 @@ impl ScHttp for MockHttp {
         };
         Ok(ScRes {
             status,
+            location: self
+                .locations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .cloned(),
             url: Url::parse(&key).unwrap_or(req.url),
             body,
         })
@@ -380,7 +397,7 @@ impl EngineFixture {
         let http = MockHttp::new()
             .with_cookies("sid=abc")
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )

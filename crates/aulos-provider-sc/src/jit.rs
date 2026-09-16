@@ -70,6 +70,8 @@ pub async fn fresh_stream(
     }
 
     let page = inertia_get(http, &versions, base, &path).await?;
+    let site = versions.site(http, base, false).await?;
+    let http = site.http(http);
     let embed_url = props(&page)
         .get("embedUrl")
         .and_then(serde_json::Value::as_str)
@@ -119,7 +121,7 @@ mod tests {
         MockHttp::new()
             .with_cookies("sid=abc; cf_clearance=zzz")
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -173,14 +175,14 @@ mod tests {
             !http.requested_anything_containing("/playlist/"),
             "the legacy debug GET of the m3u8 is removed (DESIGN §10.5)"
         );
-        assert_eq!(http.count("https://sc.test/it"), 1);
+        assert_eq!(http.count("https://sc.test/"), 1);
         // Exactly four hops: version, watch, embed, iframe.
         assert_eq!(http.total(), 4, "{:?}", http.urls());
         // A second call re-fetches the version rather than trusting a cache.
         let _ = fresh_stream(&http, &base(), &watch)
             .await
             .expect("a target");
-        assert_eq!(http.count("https://sc.test/it"), 2);
+        assert_eq!(http.count("https://sc.test/"), 2);
     }
 
     #[tokio::test]
@@ -225,7 +227,7 @@ mod tests {
     async fn a_site_that_no_longer_serves_the_stream_fails_per_step() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -253,6 +255,41 @@ mod tests {
         assert_eq!(
             origin_of(&Url::parse("https://vixcloud.co/embed/1").expect("url")),
             "https://vixcloud.co"
+        );
+    }
+    #[tokio::test]
+    async fn a_migrated_download_keeps_the_new_session_through_the_embed_steps() {
+        use std::sync::Arc;
+        let migrated = Arc::new(
+            mock()
+                .on(
+                    "https://streamingcommunity.new/",
+                    200,
+                    include_str!("../tests/fixtures/sc/it_page.html"),
+                )
+                .on(
+                    "https://streamingcommunity.new/it/watch/9?e=456",
+                    200,
+                    include_str!("../tests/fixtures/sc/watch_episode.json"),
+                ),
+        );
+        let old = Arc::new(
+            MockHttp::new()
+                .with_cookies("secret=old")
+                .with_session(Arc::clone(&migrated))
+                .on_redirect("https://sc.test/", 301, "https://streamingcommunity.new/"),
+        );
+        let http = MockHttp::new().with_session(Arc::clone(&old));
+        let watch = Url::parse("https://sc.test/it/watch/9?e=456").expect("url");
+        let target = fresh_stream(&http, &base(), &watch)
+            .await
+            .expect("migrated stream");
+        assert_eq!(target.cookies, "sid=abc; cf_clearance=zzz");
+        assert_eq!(old.urls(), ["https://sc.test/"]);
+        assert_eq!(migrated.total(), 4);
+        assert_eq!(
+            migrated.count("https://streamingcommunity.new/it/watch/9?e=456"),
+            1
         );
     }
 }
