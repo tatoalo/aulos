@@ -31,7 +31,7 @@ fn client() -> Arc<dyn ScHttp> {
 
 async fn mount_version(server: &MockServer) {
     Mock::given(method("GET"))
-        .and(path("/it"))
+        .and(path("/"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(IT_PAGE)
@@ -111,7 +111,7 @@ async fn a_real_403_drives_the_one_shot_version_refresh() {
         .received_requests()
         .await
         .expect("the mock records requests");
-    let it_calls = requests.iter().filter(|r| r.url.path() == "/it").count();
+    let it_calls = requests.iter().filter(|r| r.url.path() == "/").count();
     assert_eq!(it_calls, 2);
 }
 
@@ -222,4 +222,170 @@ async fn the_whole_pipeline_runs_over_a_socket_and_hands_the_engines_the_cookie_
         "{:?}",
         requests.iter().map(|r| r.url.path()).collect::<Vec<_>>()
     );
+}
+
+fn clients() -> Vec<Arc<dyn ScHttp>> {
+    let clients = vec![client()];
+    #[cfg(feature = "sc-impersonate")]
+    let clients = {
+        let mut clients = clients;
+        clients.push(Arc::new(
+            aulos_provider_sc::http::WreqClient::new().expect("wreq client"),
+        ));
+        clients
+    };
+    clients
+}
+
+#[tokio::test]
+async fn the_root_version_succeeds_when_the_old_locale_redirects() {
+    let server = MockServer::start().await;
+    mount_version(&server).await;
+    Mock::given(path("/it"))
+        .respond_with(ResponseTemplate::new(301).insert_header("location", server.uri()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    for http in clients() {
+        let version = inertia::fetch_version(http.as_ref(), &Url::parse(&server.uri()).unwrap())
+            .await
+            .expect("root version");
+        assert_eq!(&*version, VERSION);
+    }
+}
+
+#[tokio::test]
+async fn a_missing_root_data_page_falls_back_and_follows_relative_redirects() {
+    let server = MockServer::start().await;
+    Mock::given(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>language picker</html>"))
+        .mount(&server)
+        .await;
+    Mock::given(path("/it"))
+        .respond_with(ResponseTemplate::new(301).insert_header("location", "/home"))
+        .mount(&server)
+        .await;
+    Mock::given(path("/home"))
+        .and(header("cookie", "sid=keep"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(IT_PAGE))
+        .mount(&server)
+        .await;
+    Mock::given(path("/seed"))
+        .respond_with(ResponseTemplate::new(200).insert_header("set-cookie", "sid=keep; Path=/"))
+        .mount(&server)
+        .await;
+    for http in clients() {
+        http.get(ScReq::get(
+            Url::parse(&format!("{}/seed", server.uri())).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let version = inertia::fetch_version(http.as_ref(), &Url::parse(&server.uri()).unwrap())
+            .await
+            .expect("same-host redirect preserves the session");
+        assert_eq!(&*version, VERSION);
+    }
+}
+
+#[tokio::test]
+async fn a_new_origin_gets_no_old_cookies_and_becomes_the_inertia_base() {
+    let old = MockServer::start().await;
+    let new = MockServer::start().await;
+    Mock::given(path("/"))
+        .respond_with(
+            ResponseTemplate::new(301)
+                .insert_header("location", new.uri())
+                .insert_header("set-cookie", "secret=old; Path=/"),
+        )
+        .mount(&old)
+        .await;
+    mount_version(&new).await;
+    Mock::given(path("/it/watch/1"))
+        .and(header("cookie", "sid=abc123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"props":{"ok":true}}"#))
+        .mount(&new)
+        .await;
+    for http in clients() {
+        let versions = SiteVersions::new();
+        let page = inertia::inertia_get(
+            http.as_ref(),
+            &versions,
+            &Url::parse(&old.uri()).unwrap(),
+            "/it/watch/1",
+        )
+        .await
+        .expect("new-origin watch");
+        assert_eq!(page["props"]["ok"], true);
+    }
+    for req in new.received_requests().await.unwrap() {
+        assert!(
+            !req.headers
+                .get("cookie")
+                .is_some_and(|v| v.to_str().unwrap().contains("secret"))
+        );
+        assert!(!req.headers.contains_key("referer"));
+    }
+}
+
+#[tokio::test]
+async fn failed_probes_report_the_status_and_location_without_falling_back() {
+    for (status, location, code) in [
+        (301, None, aulos_core::error::ErrorCode::Network),
+        (
+            403,
+            Some("/blocked"),
+            aulos_core::error::ErrorCode::Unavailable,
+        ),
+        (404, None, aulos_core::error::ErrorCode::Unavailable),
+        (503, None, aulos_core::error::ErrorCode::Network),
+    ] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status);
+        if let Some(location) = location {
+            response = response.insert_header("location", location);
+        }
+        Mock::given(path("/"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        Mock::given(path("/it"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(IT_PAGE))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for http in clients() {
+            let error = inertia::fetch_version(http.as_ref(), &Url::parse(&server.uri()).unwrap())
+                .await
+                .expect_err("HTTP failure");
+            assert!(error.to_string().contains(&format!("HTTP {status}")));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Location: {}", location.unwrap_or("(none)")))
+            );
+            assert_eq!(error.into_provider_error().code(), code);
+        }
+    }
+}
+
+#[tokio::test]
+async fn version_probe_redirects_are_limited_to_three() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/"))
+        .mount(&server)
+        .await;
+    let clients = clients();
+    let count = clients.len();
+    for http in clients {
+        let error = inertia::fetch_version(http.as_ref(), &Url::parse(&server.uri()).unwrap())
+            .await
+            .expect_err("redirect loop");
+        assert!(error.to_string().contains("exceeded 3 redirects"));
+        assert_eq!(
+            error.into_provider_error().code(),
+            aulos_core::error::ErrorCode::Network
+        );
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 4 * count);
 }

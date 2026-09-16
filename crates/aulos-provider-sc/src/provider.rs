@@ -485,7 +485,7 @@ mod tests {
     async fn resolving_a_season_yields_one_playlist_entry() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -517,7 +517,7 @@ mod tests {
     async fn playlist_end_truncates_the_children() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -549,7 +549,7 @@ mod tests {
         // `__extract_info` retried through yt-dlp (DESIGN §6.4).
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )

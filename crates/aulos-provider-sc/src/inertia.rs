@@ -10,7 +10,7 @@
 //! [`ScError::VersionRejected`](crate::ScError::VersionRejected).
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use scraper::{Html, Selector};
@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::error::ScError;
-use crate::http::{ScHttp, ScReq};
+use crate::http::{ScHttp, ScReq, ScRes};
 
 /// How long a site version is trusted (DESIGN §10.2).
 pub const VERSION_TTL: Duration = Duration::from_secs(30 * 60);
@@ -39,7 +39,7 @@ static APP_DIV: LazyLock<Option<Selector>> = LazyLock::new(|| Selector::parse("d
 /// The per-base site-version cache with single-flight (DESIGN §10.2).
 ///
 /// One `tokio::sync::Mutex` per base URL is the whole single-flight mechanism: the first caller
-/// holds it across the `GET {base}/it`, every other caller for the same base waits and then reads
+/// holds it across the site-version probe, every other caller for the same base waits and then reads
 /// the value it stored. There is no dogpile and no second request.
 #[derive(Debug, Default)]
 pub struct SiteVersions {
@@ -50,7 +50,7 @@ type Slot = tokio::sync::Mutex<Option<Cached>>;
 
 #[derive(Clone, Debug)]
 struct Cached {
-    version: std::sync::Arc<str>,
+    site: Site,
     fetched: Instant,
 }
 
@@ -67,51 +67,49 @@ impl SiteVersions {
         std::sync::Arc::clone(slots.entry(key).or_default())
     }
 
-    /// The cached version, or one fresh `GET {base}/it` shared by every concurrent caller.
+    /// The cached version, or one fresh site probe shared by concurrent callers.
     ///
     /// # Errors
     /// Whatever [`fetch_version`] returns.
-    pub async fn version(
-        &self,
-        http: &dyn ScHttp,
-        base: &Url,
-    ) -> Result<std::sync::Arc<str>, ScError> {
-        let slot = self.slot(base);
-        let mut guard = slot.lock().await;
-        if let Some(c) = guard.as_ref()
-            && c.fetched.elapsed() < VERSION_TTL
-        {
-            return Ok(std::sync::Arc::clone(&c.version));
-        }
-        let version = fetch_version(http, base).await?;
-        *guard = Some(Cached {
-            version: std::sync::Arc::clone(&version),
-            fetched: Instant::now(),
-        });
-        Ok(version)
+    pub async fn version(&self, http: &dyn ScHttp, base: &Url) -> Result<Arc<str>, ScError> {
+        Ok(self.site(http, base, false).await?.version)
     }
 
     /// Discards the cached version and fetches a new one, ignoring the TTL.
     ///
-    /// This is the "the site deployed while we were scraping" path, and it is the only thing that
-    /// runs between the first rejected Inertia call and its one retry.
-    ///
     /// # Errors
     /// Whatever [`fetch_version`] returns.
-    pub async fn refresh(
+    pub async fn refresh(&self, http: &dyn ScHttp, base: &Url) -> Result<Arc<str>, ScError> {
+        Ok(self.site(http, base, true).await?.version)
+    }
+
+    pub(crate) async fn site(
         &self,
         http: &dyn ScHttp,
         base: &Url,
-    ) -> Result<std::sync::Arc<str>, ScError> {
+        refresh: bool,
+    ) -> Result<Site, ScError> {
         let slot = self.slot(base);
         let mut guard = slot.lock().await;
-        *guard = None;
-        let version = fetch_version(http, base).await?;
+        if !refresh
+            && let Some(c) = guard.as_ref()
+            && c.fetched.elapsed() < VERSION_TTL
+        {
+            return Ok(c.site.clone());
+        }
+        let previous = guard.take();
+        let mut site = match &previous {
+            Some(c) => fetch_site(c.site.http(http), &c.site.base).await?,
+            None => fetch_site(http, base).await?,
+        };
+        if site.session.is_none() {
+            site.session = previous.and_then(|c| c.site.session);
+        }
         *guard = Some(Cached {
-            version: std::sync::Arc::clone(&version),
+            site: site.clone(),
             fetched: Instant::now(),
         });
-        Ok(version)
+        Ok(site)
     }
 
     /// Drops the cached version for one base without fetching.
@@ -122,28 +120,149 @@ impl SiteVersions {
     }
 }
 
-/// S1: `GET {base}/it`, then `div#app[data-page]` → JSON → `.version` (DESIGN §10.2).
-///
-/// Byte-for-byte the legacy extraction (`streamingcommunity.py:30-44`), including the
-/// `raise_for_status()` before any parsing.
+#[derive(Clone)]
+pub(crate) struct Site {
+    pub base: Url,
+    version: Arc<str>,
+    session: Option<Arc<dyn ScHttp>>,
+}
+
+impl std::fmt::Debug for Site {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Site")
+            .field("base", &self.base)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Site {
+    pub fn http<'a>(&'a self, fallback: &'a dyn ScHttp) -> &'a dyn ScHttp {
+        self.session.as_deref().unwrap_or(fallback)
+    }
+}
+
+/// S1: probe the site root for `div#app[data-page]` → JSON → `.version`.
+/// Only a page without `data-page` falls back to the legacy `/it` route.
 ///
 /// # Errors
-/// [`ScError::Status`] for a non-2xx, [`ScError::VersionUnreadable`] when the page carries no
-/// `div#app`, no `data-page`, unparseable JSON in it, or no `version` string.
-pub async fn fetch_version(http: &dyn ScHttp, base: &Url) -> Result<std::sync::Arc<str>, ScError> {
-    let url = base.join("/it").map_err(|_| ScError::VersionUnreadable {
-        url: base.to_string(),
-    })?;
-    let res = http
-        .get(ScReq::get(url.clone()))
-        .await?
-        .error_for_status()?;
-    version_from_page(&res.body).ok_or(ScError::VersionUnreadable {
-        url: url.to_string(),
+/// [`ScError::VersionProbe`] for HTTP or redirect failures, [`ScError::VersionUnreadable`]
+/// for a missing or malformed version, plus transport errors. Probe failures are logged at WARN.
+pub async fn fetch_version(http: &dyn ScHttp, base: &Url) -> Result<Arc<str>, ScError> {
+    Ok(fetch_site(http, base).await?.version)
+}
+
+async fn fetch_site(http: &dyn ScHttp, base: &Url) -> Result<Site, ScError> {
+    let result = probe_site(http, base).await;
+    if let Err(error) = &result {
+        tracing::warn!(provider = crate::PROVIDER_ID, %base, %error,
+            "StreamingCommunity version probe failed");
+    }
+    result
+}
+
+fn probe_error(res: &ScRes, reason: &'static str) -> ScError {
+    ScError::VersionProbe {
+        url: res.url.to_string(),
+        status: res.status,
+        location: res.location.clone().unwrap_or_else(|| "(none)".to_owned()),
+        reason,
+    }
+}
+
+fn migration_host(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let host = host.strip_prefix("www.").unwrap_or(host);
+        let Some((label, _)) = host.split_once('.') else {
+            return false;
+        };
+        label
+            .strip_prefix(crate::HOST_NEEDLE)
+            .is_some_and(|suffix| suffix.bytes().all(|b| b.is_ascii_alphanumeric()))
     })
 }
 
-/// Pulls the Inertia asset version out of an `/it` page body.
+async fn probe_site(http: &dyn ScHttp, base: &Url) -> Result<Site, ScError> {
+    let mut url = base.join("/").map_err(|_| ScError::VersionUnreadable {
+        url: base.to_string(),
+    })?;
+    let mut session: Option<Arc<dyn ScHttp>> = None;
+    let mut redirects = 0;
+    let mut fallback = false;
+    loop {
+        let client = session.as_deref().unwrap_or(http);
+        let res = client.get(ScReq::probe(url.clone())).await?;
+        if matches!(res.status, 301 | 302 | 303 | 307 | 308) {
+            if redirects == 3 {
+                return Err(probe_error(&res, "version probe exceeded 3 redirects"));
+            }
+            let next = res
+                .location
+                .as_deref()
+                .and_then(|location| url.join(location).ok())
+                .ok_or_else(|| probe_error(&res, "missing or invalid redirect destination"))?;
+            if !matches!(next.scheme(), "http" | "https")
+                || !next.username().is_empty()
+                || next.password().is_some()
+                || (url.scheme() == "https" && next.scheme() != "https")
+            {
+                return Err(probe_error(&res, "unsafe redirect destination"));
+            }
+            if next.origin() != url.origin() {
+                if next.host_str() != url.host_str() && !migration_host(&next) {
+                    return Err(probe_error(
+                        &res,
+                        "redirect is not a StreamingCommunity host",
+                    ));
+                }
+                session = Some(client.new_session().ok_or_else(|| {
+                    probe_error(&res, "cannot isolate the migrated site's session")
+                })?);
+            }
+            redirects += 1;
+            url = next;
+            continue;
+        }
+        if !res.is_success() {
+            return Err(probe_error(&res, "could not fetch the site version"));
+        }
+        if let Some(version) = version_from_page(&res.body) {
+            if url.host_str() != base.host_str() {
+                tracing::warn!(
+                    "StreamingCommunity moved to {}",
+                    url.host_str().unwrap_or_default()
+                );
+            }
+            return Ok(Site {
+                base: url.join("/").map_err(|_| ScError::VersionUnreadable {
+                    url: url.to_string(),
+                })?,
+                version,
+                session,
+            });
+        }
+        if !fallback && !has_data_page(&res.body) {
+            fallback = true;
+            url = url.join("/it").map_err(|_| ScError::VersionUnreadable {
+                url: url.to_string(),
+            })?;
+        } else {
+            return Err(ScError::VersionUnreadable {
+                url: url.to_string(),
+            });
+        }
+    }
+}
+
+fn has_data_page(html: &str) -> bool {
+    APP_DIV.as_ref().is_some_and(|selector| {
+        Html::parse_document(html)
+            .select(selector)
+            .any(|node| node.value().attr("data-page").is_some())
+    })
+}
+
+/// Pulls the Inertia asset version out of a site page body.
 ///
 /// Split out from [`fetch_version`] so the parsing is testable without a client, and so a
 /// malformed page has one obvious place to be diagnosed.
@@ -173,12 +292,15 @@ pub async fn inertia_get(
     base: &Url,
     path: &str,
 ) -> Result<Value, ScError> {
-    let url = base.join(path).map_err(|_| ScError::BadUrlShape {
+    let site = versions.site(http, base, false).await?;
+    let url = site.base.join(path).map_err(|_| ScError::BadUrlShape {
         what: "inertia",
-        url: format!("{base}{path}"),
+        url: format!("{}{path}", site.base),
     })?;
-    let version = versions.version(http, base).await?;
-    let res = http.get(ScReq::inertia(url.clone(), &version)).await?;
+    let res = site
+        .http(http)
+        .get(ScReq::inertia(url.clone(), &site.version))
+        .await?;
     if !VERSION_REJECTED_STATUSES.contains(&res.status) {
         return res.error_for_status()?.json();
     }
@@ -188,8 +310,15 @@ pub async fn inertia_get(
         status = res.status,
         "the site rejected the cached Inertia version; refreshing it once"
     );
-    let fresh = versions.refresh(http, base).await?;
-    let retry = http.get(ScReq::inertia(url.clone(), &fresh)).await?;
+    let fresh = versions.site(http, base, true).await?;
+    let url = fresh.base.join(path).map_err(|_| ScError::BadUrlShape {
+        what: "inertia",
+        url: format!("{}{path}", fresh.base),
+    })?;
+    let retry = fresh
+        .http(http)
+        .get(ScReq::inertia(url.clone(), &fresh.version))
+        .await?;
     if VERSION_REJECTED_STATUSES.contains(&retry.status) {
         return Err(ScError::VersionRejected {
             url: url.to_string(),
@@ -247,9 +376,9 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_page_is_its_own_error_code() {
         let http = MockHttp::new().on(
-            "https://sc.test/it",
+            "https://sc.test/",
             200,
-            include_str!("../tests/fixtures/sc/it_page_no_app_div.html"),
+            include_str!("../tests/fixtures/sc/it_page_bad_data_page.html"),
         );
         let err = fetch_version(&http, &base())
             .await
@@ -260,7 +389,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_cache_is_single_flight_and_ttl_bounded() {
         let http = Arc::new(MockHttp::new().on(
-            "https://sc.test/it",
+            "https://sc.test/",
             200,
             include_str!("../tests/fixtures/sc/it_page.html"),
         ));
@@ -281,22 +410,22 @@ mod tests {
             seen.push(t.await.expect("join").expect("version"));
         }
         assert!(seen.windows(2).all(|w| w[0] == w[1]));
-        assert_eq!(http.count("https://sc.test/it"), 1);
+        assert_eq!(http.count("https://sc.test/"), 1);
 
         // Still one after 29 minutes, two after 31.
         tokio::time::advance(Duration::from_secs(29 * 60)).await;
         let _ = versions.version(http.as_ref(), &base()).await.expect("v");
-        assert_eq!(http.count("https://sc.test/it"), 1);
+        assert_eq!(http.count("https://sc.test/"), 1);
         tokio::time::advance(Duration::from_secs(2 * 60)).await;
         let _ = versions.version(http.as_ref(), &base()).await.expect("v");
-        assert_eq!(http.count("https://sc.test/it"), 2);
+        assert_eq!(http.count("https://sc.test/"), 2);
     }
 
     #[tokio::test]
     async fn a_409_refreshes_the_version_once_and_then_succeeds() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -313,7 +442,7 @@ mod tests {
             .expect("the retry must succeed");
         assert_eq!(props(&page)["ok"], true);
         // S1 ran exactly twice: once for the first attempt, once for the forced refresh.
-        assert_eq!(http.count("https://sc.test/it"), 2);
+        assert_eq!(http.count("https://sc.test/"), 2);
         assert_eq!(http.count("https://sc.test/it/watch/123"), 2);
     }
 
@@ -321,7 +450,7 @@ mod tests {
     async fn a_second_rejection_fails_with_its_own_code_and_does_not_loop() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -331,7 +460,7 @@ mod tests {
             .await
             .expect_err("two rejections must fail");
         assert_eq!(err.code(), crate::ScErrorCode::VersionRejected);
-        assert_eq!(http.count("https://sc.test/it"), 2);
+        assert_eq!(http.count("https://sc.test/"), 2);
         assert_eq!(
             http.count("https://sc.test/it/watch/123"),
             2,
@@ -344,7 +473,7 @@ mod tests {
         for status in VERSION_REJECTED_STATUSES {
             let http = MockHttp::new()
                 .on(
-                    "https://sc.test/it",
+                    "https://sc.test/",
                     200,
                     include_str!("../tests/fixtures/sc/it_page.html"),
                 )
@@ -359,7 +488,7 @@ mod tests {
                     .is_ok(),
                 "status {status} must trigger the refresh"
             );
-            assert_eq!(http.count("https://sc.test/it"), 2, "status {status}");
+            assert_eq!(http.count("https://sc.test/"), 2, "status {status}");
         }
     }
 
@@ -367,7 +496,7 @@ mod tests {
     async fn a_non_rejection_error_is_reported_as_is() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -377,14 +506,14 @@ mod tests {
             .await
             .expect_err("a 500 is not a version problem");
         assert_eq!(err.code(), crate::ScErrorCode::Status);
-        assert_eq!(http.count("https://sc.test/it"), 1, "no refresh for a 500");
+        assert_eq!(http.count("https://sc.test/"), 1, "no refresh for a 500");
     }
 
     #[tokio::test]
     async fn the_inertia_request_sends_the_cached_version() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -408,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_forces_the_next_read_to_refetch() {
         let http = MockHttp::new().on(
-            "https://sc.test/it",
+            "https://sc.test/",
             200,
             include_str!("../tests/fixtures/sc/it_page.html"),
         );
@@ -416,6 +545,131 @@ mod tests {
         let _ = versions.version(&http, &base()).await.expect("v");
         versions.invalidate(&base()).await;
         let _ = versions.version(&http, &base()).await.expect("v");
-        assert_eq!(http.count("https://sc.test/it"), 2);
+        assert_eq!(http.count("https://sc.test/"), 2);
+    }
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("logs").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_domain_move_uses_a_fresh_session_and_caches_the_new_base() {
+        use tracing::instrument::WithSubscriber as _;
+        let migrated = Arc::new(
+            MockHttp::new()
+                .with_cookies("new_session=clean")
+                .on(
+                    "https://streamingcommunityz.new/",
+                    200,
+                    include_str!("../tests/fixtures/sc/it_page.html"),
+                )
+                .on_sequence(
+                    "https://streamingcommunityz.new/it/watch/1?e=2",
+                    vec![
+                        (409, String::new()),
+                        (200, r#"{"props":{"ok":true}}"#.to_owned()),
+                    ],
+                ),
+        );
+        let http = MockHttp::new()
+            .with_cookies("secret=old")
+            .with_session(Arc::clone(&migrated))
+            .on_redirect("https://sc.test/", 301, "https://streamingcommunityz.new/");
+        let versions = SiteVersions::new();
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        async {
+            for _ in 0..2 {
+                let page = inertia_get(&http, &versions, &base(), "/it/watch/1?e=2")
+                    .await
+                    .expect("migrated watch page");
+                assert_eq!(props(&page)["ok"], true);
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(http.urls(), ["https://sc.test/"]);
+        assert_eq!(migrated.count("https://streamingcommunityz.new/"), 2);
+        assert_eq!(
+            migrated.count("https://streamingcommunityz.new/it/watch/1?e=2"),
+            3
+        );
+        let site = versions
+            .site(&http, &base(), false)
+            .await
+            .expect("cached site");
+        assert_eq!(site.base.as_str(), "https://streamingcommunityz.new/");
+        assert_eq!(site.http(&http).cookie_header(), "new_session=clean");
+        let output = String::from_utf8(logs.0.lock().expect("logs").clone()).expect("utf8");
+        assert!(output.contains("WARN"), "{output}");
+        assert!(
+            output.contains("StreamingCommunity moved to streamingcommunityz.new"),
+            "{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_redirects_are_not_requested_and_warn_with_the_location() {
+        use tracing::instrument::WithSubscriber as _;
+        for location in [
+            "https://unrelated.test/",
+            "https://streaming-community.test/",
+            "https://evilstreamingcommunity.test/",
+            "http://sc.test/",
+            "https://user:pass@sc.test/",
+            "file:///tmp/version",
+            "https://[",
+        ] {
+            let http = MockHttp::new().on_redirect("https://sc.test/", 301, location);
+            let logs = Logs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            let error = fetch_version(&http, &base())
+                .with_subscriber(subscriber)
+                .await
+                .expect_err("unsafe redirect must fail");
+            assert!(error.to_string().contains(location));
+            assert_eq!(
+                error.into_provider_error().code(),
+                aulos_core::error::ErrorCode::Network
+            );
+            assert_eq!(http.total(), 1);
+            let output = String::from_utf8(logs.0.lock().expect("logs").clone()).expect("utf8");
+            assert!(
+                output.contains("WARN") && output.contains(location),
+                "{output}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_domain_move_cannot_reuse_a_client_that_cannot_isolate_its_session() {
+        let http = MockHttp::new().with_cookies("secret=old").on_redirect(
+            "https://sc.test/",
+            301,
+            "https://streamingcommunity.new/",
+        );
+        let error = fetch_version(&http, &base())
+            .await
+            .expect_err("no fresh session");
+        assert!(error.to_string().contains("cannot isolate"));
+        assert_eq!(http.total(), 1);
     }
 }

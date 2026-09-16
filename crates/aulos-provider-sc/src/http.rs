@@ -60,6 +60,8 @@ pub struct ScReq {
     pub url: Url,
     /// Extra request headers, in order. The client's own Chrome header set is merged underneath.
     pub headers: Vec<(Box<str>, Box<str>)>,
+    /// Return redirects to the caller so it can validate each destination.
+    pub no_redirect: bool,
 }
 
 impl ScReq {
@@ -69,6 +71,7 @@ impl ScReq {
         Self {
             url,
             headers: Vec::new(),
+            no_redirect: false,
         }
     }
 
@@ -77,6 +80,15 @@ impl ScReq {
     pub fn header(mut self, name: &str, value: impl Into<Box<str>>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// A request whose redirects are handled by the version probe.
+    #[must_use]
+    pub fn probe(url: Url) -> Self {
+        Self {
+            no_redirect: true,
+            ..Self::get(url)
+        }
     }
 
     /// The S2 Inertia request: the two `x-inertia*` headers plus a JSON `Accept`
@@ -102,6 +114,8 @@ pub struct ScRes {
     pub url: Url,
     /// The body.
     pub body: String,
+    /// The redirect destination, if the response supplied one.
+    pub location: Option<String>,
 }
 
 impl ScRes {
@@ -141,7 +155,8 @@ impl ScRes {
 /// The client seam (DESIGN §10.1).
 #[async_trait]
 pub trait ScHttp: Send + Sync {
-    /// Performs one `GET`, following redirects, and reads the whole body.
+    /// Performs one `GET` and reads the whole body. `no_redirect` requests return redirects
+    /// untouched; other requests use the client's default redirect policy.
     ///
     /// A non-2xx status is **returned, not raised**: S2's version-drift retry has to inspect the
     /// status before deciding, so raising here would force it to unwrap an error type.
@@ -251,6 +266,7 @@ impl CookieRecorder {
 /// client the test matrix uses (there is no BoringSSL in CI).
 pub struct PlainClient {
     client: reqwest::Client,
+    probe_client: reqwest::Client,
     cookies: CookieRecorder,
 }
 
@@ -269,16 +285,23 @@ impl PlainClient {
                 headers.insert(n, v);
             }
         }
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .default_headers(headers)
-            .cookie_store(true)
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(|e| ScInitError::Client(e.to_string()))?;
+        let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
+        let build = |redirect| {
+            reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .default_headers(headers.clone())
+                .cookie_provider(std::sync::Arc::clone(&jar))
+                .redirect(redirect)
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .map_err(|e| ScInitError::Client(e.to_string()))
+        };
+        let client = build(reqwest::redirect::Policy::default())?;
+        let probe_client = build(reqwest::redirect::Policy::none())?;
         Ok(Self {
             client,
+            probe_client,
             cookies: CookieRecorder::default(),
         })
     }
@@ -287,7 +310,12 @@ impl PlainClient {
 #[async_trait]
 impl ScHttp for PlainClient {
     async fn get(&self, req: ScReq) -> Result<ScRes, ScError> {
-        let mut builder = self.client.get(req.url.clone());
+        let client = if req.no_redirect {
+            &self.probe_client
+        } else {
+            &self.client
+        };
+        let mut builder = client.get(req.url.clone());
         for (name, value) in &req.headers {
             builder = builder.header(&**name, &**value);
         }
@@ -297,6 +325,11 @@ impl ScHttp for PlainClient {
             .map_err(|e| classify_reqwest(&req.url, &e))?;
         let status = res.status().as_u16();
         let url = res.url().clone();
+        let location = res
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         for c in res.cookies() {
             self.cookies.record(c.name(), c.value());
         }
@@ -304,7 +337,12 @@ impl ScHttp for PlainClient {
             .text()
             .await
             .map_err(|e| classify_reqwest(&req.url, &e))?;
-        Ok(ScRes { status, url, body })
+        Ok(ScRes {
+            status,
+            url,
+            body,
+            location,
+        })
     }
 
     fn impersonating(&self) -> bool {
@@ -451,6 +489,9 @@ mod impersonate {
     impl ScHttp for WreqClient {
         async fn get(&self, req: ScReq) -> Result<ScRes, ScError> {
             let mut builder = self.client.get(req.url.as_str());
+            if req.no_redirect {
+                builder = builder.redirect(wreq::redirect::Policy::none());
+            }
             for (name, value) in &req.headers {
                 builder = builder.header(&**name, &**value);
             }
@@ -460,6 +501,11 @@ mod impersonate {
             })?;
             let status = res.status().as_u16();
             let url = Url::parse(&res.uri().to_string()).unwrap_or_else(|_| req.url.clone());
+            let location = res
+                .headers()
+                .get(wreq::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             for c in res.cookies() {
                 self.cookies.record(c.name(), c.value());
             }
@@ -467,7 +513,12 @@ mod impersonate {
                 url: req.url.to_string(),
                 message: e.to_string(),
             })?;
-            Ok(ScRes { status, url, body })
+            Ok(ScRes {
+                status,
+                url,
+                body,
+                location,
+            })
         }
 
         fn impersonating(&self) -> bool {
@@ -577,6 +628,7 @@ mod tests {
     fn error_for_status_reproduces_raise_for_status() {
         let ok = ScRes {
             status: 200,
+            location: None,
             url: Url::parse("https://sc.test/it").expect("url"),
             body: "{}".to_owned(),
         };
@@ -590,6 +642,7 @@ mod tests {
     fn a_non_json_body_is_a_distinct_error() {
         let res = ScRes {
             status: 200,
+            location: None,
             url: Url::parse("https://sc.test/it").expect("url"),
             body: "<html>nope</html>".to_owned(),
         };

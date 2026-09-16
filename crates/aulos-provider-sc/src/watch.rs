@@ -89,6 +89,9 @@ pub async fn resolve_watch(
         path.push_str(e);
     }
     let page = inertia_get(http, versions, base, &path).await?;
+    let site = versions.site(http, base, false).await?;
+    let base = &site.base;
+    let http = site.http(http);
     let props = props(&page);
 
     let title = props.get("title");
@@ -204,7 +207,7 @@ mod tests {
     fn movie_mock() -> MockHttp {
         MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -228,7 +231,7 @@ mod tests {
     fn episode_mock(watch_fixture: &str) -> MockHttp {
         MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
@@ -332,7 +335,7 @@ mod tests {
     async fn a_watch_page_with_no_embed_url_is_unsupported_not_an_internal_error() {
         let http = MockHttp::new()
             .on(
-                "https://sc.test/it",
+                "https://sc.test/",
                 200,
                 include_str!("../tests/fixtures/sc/it_page.html"),
             )
