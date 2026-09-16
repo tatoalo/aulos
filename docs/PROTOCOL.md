@@ -1675,6 +1675,8 @@ Refetch `api/v2/capabilities` and/or `api/v2/catalog` when you see this.
 Emitted **only** on a component transition, never periodically. `status` is the roll-up,
 `ok | degraded | down`; `from` and `to` are per-component and may additionally be `"starting"`
 or `"disabled"`. Both are neutral states (§5.3) and never make the roll-up worse.
+Health transitions also advance the published snapshot cursor on the next flush, even when no
+items changed, so refreshing an idle queue does not replay warnings from before that snapshot.
 
 ### 5.10 `pong` and `error`
 

@@ -140,6 +140,7 @@ const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 const state = {
   items: new Map(),
   subs: new Map(),
+  health: new Map(),
   subsOk: false,
   seq: 0,
   bootId: null,
@@ -252,6 +253,14 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, wait);
 }
 
+function applyHealth(component, status, detail) {
+  const previous = state.health.get(component);
+  state.health.set(component, status);
+  if (previous !== status && (status === 'degraded' || status === 'down')) {
+    toast('warning', `${component} is ${status}${detail ? ` — ${detail}` : ''}`);
+  }
+}
+
 /** PROTOCOL §7 — the complete apply algorithm. */
 function applyFrame(f) {
   switch (f.t) {
@@ -261,6 +270,9 @@ function applyFrame(f) {
       state.subs = new Map((f.subscriptions || []).map((s) => [s.id, s]));
       for (const id of [...subEditing]) if (!state.subs.has(id)) subEditing.delete(id);
       state.bootId = f.boot_id;
+      const health = Object.entries(f.health?.components || {});
+      for (const [component, status] of health) applyHealth(component, status);
+      state.health = new Map(health);
       state.doneTotal = f.done_total || 0;
       state.hasOlder = !!(f.truncated && f.truncated.done);
       state.cursor = null;
@@ -305,7 +317,7 @@ function applyFrame(f) {
       break;
     case 'health':
       for (const c of f.changed || []) {
-        if (c.to === 'degraded' || c.to === 'down') toast('warning', `${c.component} is ${c.to}${c.detail ? ` — ${c.detail}` : ''}`);
+        applyHealth(c.component, c.to, c.detail);
       }
       break;
     case 'providers':

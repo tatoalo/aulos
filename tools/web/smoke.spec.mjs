@@ -733,6 +733,25 @@ test('starting health stays neutral while real failures warn', withMock({}, asyn
   await expect(page.locator('.toast')).toHaveCount(0);
   await health('degraded');
   await expect(page.locator('.toast')).toHaveText(/pot.*degraded/);
+  await health('degraded');
+  await expect(page.locator('.toast')).toHaveCount(1);
+}));
+
+test('health snapshots stay quiet for startup but expose an active failure', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  const snapshot = async (pot) => page.evaluate((pot) => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'snapshot', seq: A.state.seq + 1, boot_id: A.state.bootId,
+      health: { status: pot === 'down' ? 'degraded' : 'ok', components: { pot } } });
+  }, pot);
+  await snapshot('starting');
+  await expect(page.locator('.toast')).toHaveCount(0);
+  await snapshot('ok');
+  await expect(page.locator('.toast')).toHaveCount(0);
+  await snapshot('down');
+  await expect(page.locator('.toast')).toHaveText(/pot.*down/);
+  await snapshot('down');
+  await expect(page.locator('.toast')).toHaveCount(1);
 }));
 
 test('a notice frame becomes a toast, and errors stay until dismissed', withMock({}, async ({ page, mock }) => {
