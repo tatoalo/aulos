@@ -792,6 +792,44 @@ def test_replay_is_byte_faithful():
     check(proc.stdout.decode() == expected, "the transcript is reproduced byte for byte")
 
 
+def test_premieres_wait_for_the_recording():
+    with tempfile.TemporaryDirectory() as tmp:
+        media = os.path.join(tmp, "clip.mp4")
+        for status in ("is_upcoming", "is_live", "post_live", "was_live", "not_live"):
+            scenario = scenario_file(tmp, {
+                "extract": {"id": "premiere", "title": "Premiere", "live_status": status},
+                "write_files": [media],
+            })
+            code, frames, _, _ = run_job({
+                "v": 1, "protocol": 1, "mode": "download", "url": "https://stub.test/x",
+                "policy": {"download_dir": tmp, "wait_for_video": True},
+            }, scenario=scenario)
+            waiting = status in ("is_upcoming", "is_live", "post_live")
+            check(("error" in kinds(frames)) == waiting, f"{status}: waits only before the recording is available")
+            check(os.path.exists(media) != waiting, f"{status}: no broadcast was downloaded")
+            if waiting:
+                check(frames[-2].get("code") == "not_yet_live", f"{status}: classified as waiting")
+            if os.path.exists(media):
+                os.remove(media)
+
+        for status in ("is_upcoming", "is_live", "post_live"):
+            scenario = scenario_file(tmp, {
+                "extract": {"id": "premiere", "title": "Premiere", "live_status": status, "formats": []},
+            })
+            code, frames, _, _ = run_job({
+                "v": 1, "protocol": 1, "mode": "extract", "url": "https://stub.test/x",
+            }, scenario=scenario)
+            check(code == 0, f"{status}: metadata extraction succeeds")
+            check("phase" not in kinds(frames), f"{status}: extraction does not retry without formats")
+            check(any(f.get("entry", {}).get("title") == "Premiere" for f in frames), f"{status}: keeps its title")
+
+        scenario = scenario_file(tmp, {"extract": {"live_status": "is_live"}, "write_files": [media]})
+        code, _, _, _ = run_job({
+            "v": 1, "protocol": 1, "mode": "download", "url": "https://stub.test/x",
+        }, scenario=scenario)
+        check(code == 0 and os.path.exists(media), "explicit live downloads remain available")
+
+
 def main():
     """Runs every check and returns a process exit code."""
     for test in (
@@ -801,6 +839,7 @@ def main():
         test_bad_jobs,
         test_protocol_mismatch,
         test_extract_streams_entries,
+        test_premieres_wait_for_the_recording,
         test_info_frame_drops_the_format_tables,
         test_error_classification,
         test_message_cleaning,

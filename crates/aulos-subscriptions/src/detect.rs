@@ -166,9 +166,6 @@ fn feed_name(title: Option<&str>, first_child: Option<&MediaEntry>) -> Option<Bo
         .map(Into::into)
 }
 
-/// How many child URLs the tab-page recursion tries (DESIGN §14.3 step 3, legacy `entries[:5]`).
-pub const TAB_RECURSION_FANOUT: usize = 5;
-
 /// The maximum recursion depth (legacy `_depth < 1`).
 pub const TAB_RECURSION_MAX_DEPTH: u32 = 1;
 

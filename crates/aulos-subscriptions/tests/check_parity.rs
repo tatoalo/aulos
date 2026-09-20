@@ -50,10 +50,8 @@ async fn backfill_suppression_marks_everything_seen_without_queueing() {
     );
 }
 
-/// DESIGN §14.3 step 5: a later check queues only unseen entries, **plus** already-seen entries
-/// that are live right now (a live stream is re-queued when it starts).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_subsequent_check_queues_unseen_entries_and_already_seen_live_ones() {
+async fn a_subsequent_check_queues_only_unseen_entries_even_when_seen_entries_go_live() {
     let (h, provider) = with_feed("chan", vec![entry("a"), entry("b")]).await;
     let view = h.subscribe(&feed_url("chan")).await.expect("subscribed");
     h.settle().await;
@@ -65,16 +63,13 @@ async fn a_subsequent_check_queues_unseen_entries_and_already_seen_live_ones() {
     provider.set_feed(&feed_url("chan"), vec![live_a, entry("b"), entry("c")]);
 
     h.check(vec![view.id.clone()]).await;
-    let queued = wait_for_items(&h, 2).await;
+    let queued = wait_for_items(&h, 1).await;
     let mut urls: Vec<String> = queued.iter().map(|i| i.url.to_string()).collect();
     urls.sort();
     assert_eq!(
         urls,
-        vec![
-            format!("https://{}/watch/a", support::GOOD_HOST),
-            format!("https://{}/watch/c", support::GOOD_HOST),
-        ],
-        "b was already seen and is not live"
+        vec![format!("https://{}/watch/c", support::GOOD_HOST)],
+        "seen entries are never requeued"
     );
 
     // Every queued item is attributed to the subscription (DESIGN §14.3 step 6).
@@ -88,6 +83,57 @@ async fn a_subsequent_check_queues_unseen_entries_and_already_seen_live_ones() {
         .await;
     assert_eq!(record.error, None);
     assert_eq!(record.consecutive_failures, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_videos_tab_never_falls_back_to_fifty_unseen_shorts() {
+    let provider = ScriptProvider::new();
+    let root = feed_url("chan");
+    let videos = format!("{root}/videos");
+    let shorts = format!("{root}/shorts");
+    let tab = |url: &str| {
+        let mut entry = entry(url);
+        entry.url = url::Url::parse(url).unwrap();
+        entry.kind = aulos_provider::EntryKind::Playlist {
+            title: url.into(),
+            entries: Vec::new(),
+        };
+        entry
+    };
+    provider.set_feed(&root, vec![tab(&videos), tab(&shorts)]);
+    provider.set_feed(&videos, vec![entry("a"), entry("b")]);
+    provider.set_feed(
+        &shorts,
+        (0..50).map(|i| entry(&format!("short{i}"))).collect(),
+    );
+    let h = Harness::builder()
+        .provider(Arc::clone(&provider) as Arc<dyn aulos_provider::Provider>)
+        .build()
+        .await;
+    let view = h.subscribe(&root).await.unwrap();
+    assert_eq!(view.seen_count, 2);
+
+    provider.set_feed(&videos, Vec::new());
+    h.check(vec![view.id.clone()]).await;
+    h.until(&view.id, "empty tab failure", |r| {
+        r.consecutive_failures == 1
+    })
+    .await;
+    assert!(h.items().await.is_empty());
+    assert_eq!(h.seen(&view.id).await.len(), 2);
+    assert_eq!(
+        provider.resolve_count(),
+        4,
+        "the Shorts tab was never probed"
+    );
+
+    provider.set_feed(&videos, vec![entry("a"), entry("b"), entry("new")]);
+    h.check(vec![view.id.clone()]).await;
+    h.until(&view.id, "videos recovered", |r| r.seen_count == 3)
+        .await;
+    let items = h.items().await;
+    assert_eq!(items.len(), 1);
+    assert!(items[0].url.as_str().ends_with("/watch/new"));
 }
 
 /// DESIGN §14.3 step 6: entries that fail validation are **not** marked seen (so they retry) and

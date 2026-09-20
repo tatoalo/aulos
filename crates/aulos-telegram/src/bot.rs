@@ -701,6 +701,25 @@ impl TelegramActor {
                         self.watches.park(*id, now);
                     }
                     self.watches.retitle(view);
+                    if self.cfg.board == TelegramBoard::PerJob
+                        && view.status == Status::Queued
+                        && view
+                            .error
+                            .as_ref()
+                            .is_some_and(|e| e.code == aulos_core::ErrorCode::NotYetLive)
+                        && self.watches.notify_waiting(*id)
+                    {
+                        let text = format!(
+                            "⏳ {}\n{}",
+                            view.title,
+                            view.msg
+                                .as_deref()
+                                .unwrap_or("Waiting for the full-quality video")
+                        );
+                        for chat in &chats {
+                            self.send(*chat, &text, None).await;
+                        }
+                    }
                     for chat in chats {
                         self.board_upsert(chat, view);
                     }

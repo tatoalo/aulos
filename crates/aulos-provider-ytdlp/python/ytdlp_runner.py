@@ -440,6 +440,7 @@ class Policy:
         self.debug = bool(raw.get("debug"))
         self.hard_timeout_ms = max(0, int(raw.get("hard_timeout_ms") or 0))
         self.pot_url = raw.get("pot_url")
+        self.wait_for_video = bool(raw.get("wait_for_video"))
 
     def accepts_caption(self, path):
         """Whether a produced caption file may be reported as an artifact.
@@ -717,6 +718,8 @@ def needs_strict_retry(entry):
     asked) and a non-empty ``formats`` both mean "no retry".
     """
     if not isinstance(entry, dict):
+        return False
+    if entry.get("live_status") in ("is_upcoming", "is_live", "post_live"):
         return False
     if (entry.get("_type") or "video") != "video":
         return False
@@ -1248,6 +1251,17 @@ class DownloadRun:
         return re.sub(r"\.webm$", ".jpg", str(path))
 
 
+def wait_for_video_filter(existing):
+    def check(info, *, incomplete=False):
+        if info.get("is_live") or info.get("live_status") in ("is_upcoming", "is_live", "post_live"):
+            raise _entry_error("not_yet_live", "Waiting for the premiere or live stream to finish processing")
+        if existing is not None:
+            return existing(info, incomplete=incomplete)
+        return None
+
+    return check
+
+
 def run_download(channel, job, options, policy):
     """Runs the real download and emits the ``result`` frame."""
     import yt_dlp
@@ -1259,6 +1273,8 @@ def run_download(channel, job, options, policy):
     params["logger"] = FrameLogger(channel, policy)
     params.setdefault("quiet", not policy.debug)
     params.setdefault("no_color", True)
+    if policy.wait_for_video:
+        params["match_filter"] = wait_for_video_filter(params.get("match_filter"))
 
     try:
         with yt_dlp.YoutubeDL(params) as ydl:

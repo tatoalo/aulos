@@ -320,12 +320,10 @@ impl Provider for YtdlpProvider {
 
         let job = Job::download(ctx.item_id.to_string(), ctx.entry.url.clone())
             .with_options(options)
-            .with_policy(Policy::for_download(
-                &self.cfg,
-                download_type,
-                format_id,
-                ctx.out_dir.clone(),
-            ))
+            .with_policy(Policy {
+                wait_for_video: ctx.source == aulos_core::SourceKind::Subscription,
+                ..Policy::for_download(&self.cfg, download_type, format_id, ctx.out_dir.clone())
+            })
             .with_download_root(self.cfg.paths.root_for(download_type).to_path_buf());
 
         sink.stage(Stage::Preparing, None).await;

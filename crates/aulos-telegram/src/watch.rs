@@ -106,6 +106,8 @@ pub struct Watched {
     pub mark: Option<Mark>,
     /// The snapshot as last observed on a tick.
     pub last_seen: Option<ProgressMark>,
+    /// Whether the waiting-for-video notice has been sent.
+    pub waiting_notified: bool,
 }
 
 /// One warning to deliver.
@@ -210,10 +212,19 @@ impl WatchRegistry {
             title: Arc::clone(&item.title),
             mark: None,
             last_seen: Some(ProgressMark::from(item)),
+            waiting_notified: false,
         });
         entry.chats.extend(chats.iter().copied());
         entry.title = Arc::clone(&item.title);
         chats
+    }
+
+    pub(crate) fn notify_waiting(&mut self, id: ItemId) -> bool {
+        self.jobs.get_mut(&id).is_some_and(|w| {
+            let notify = !w.waiting_notified;
+            w.waiting_notified = true;
+            notify
+        })
     }
 
     /// Records that a watched job is **running** and made progress, which is what keeps the stall

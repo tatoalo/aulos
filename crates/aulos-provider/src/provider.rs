@@ -411,6 +411,8 @@ pub struct ResolveCtx<'a> {
 pub struct DownloadCtx<'a> {
     /// The item being downloaded.
     pub item_id: ItemId,
+    /// The origin of this download.
+    pub source: aulos_core::SourceKind,
     /// The resolved entry this download is for.
     pub entry: &'a MediaEntry,
     /// What the user asked for.

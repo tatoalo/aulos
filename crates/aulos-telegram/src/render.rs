@@ -282,7 +282,13 @@ pub fn render_line(line: &JobLine) -> String {
             "{GLYPH_ERROR}  {title}\n{DETAIL_INDENT}{}",
             error_detail(line.error.as_deref())
         ),
-        Status::Queued | Status::Resolving => format!("{GLYPH_WAITING}  {title}{suffix}"),
+        Status::Queued | Status::Resolving => {
+            let mut row = format!("{GLYPH_WAITING}  {title}{suffix}");
+            if let Some(reason) = line.error.as_deref() {
+                row.push_str(&format!("\n{DETAIL_INDENT}{}", error_detail(Some(reason))));
+            }
+            row
+        }
         Status::Preparing | Status::Downloading | Status::Postprocessing => {
             let head = match line.group {
                 Some((d, t)) => format!("{GLYPH_RUNNING}  {title} [{d}/{t}]{suffix}"),
