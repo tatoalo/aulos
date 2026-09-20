@@ -66,6 +66,7 @@ impl Engine {
             provider: Arc::clone(&provider),
             entry: crate::entry::rebuild_entry(item),
             request: item.request.clone(),
+            source: item.source.kind,
             ytdl: self.ytdl.load_full(),
             scratch: (provider.id().as_str() == SC_PROVIDER)
                 .then(|| ScratchDir::new(&self.cfg.paths, id, Some(&out_dir))),
@@ -329,7 +330,11 @@ impl Engine {
         }
 
         let attempts_left = u32::from(item.attempt) < self.cfg.auto_retry_max;
-        if err.retryable() && attempts_left {
+        if err.code() == aulos_core::ErrorCode::NotYetLive
+            && item.source.kind == aulos_core::SourceKind::Subscription
+        {
+            self.wait_for_video(id, wire).await;
+        } else if err.retryable() && attempts_left {
             self.arm_auto_retry(id, wire).await;
         } else {
             self.terminate(id, Status::Error, FieldUpdate::Set(wire))
@@ -337,6 +342,50 @@ impl Engine {
             self.cleanup_partials(id, true);
         }
         self.schedule().await;
+    }
+
+    pub(crate) async fn wait_for_video(&mut self, id: ItemId, error: WireError) {
+        let Some(item) = self.cached(id) else {
+            return;
+        };
+        let auto_start = item.auto_start;
+        let msg = if auto_start {
+            "Waiting for the full-quality video; checking again in 15 minutes"
+        } else {
+            "Waiting for the full-quality video; automatic start is paused"
+        };
+        if !self
+            .apply(
+                vec![WriteOp::SetStatus {
+                    id,
+                    status: Status::Queued,
+                    msg: FieldUpdate::Set(msg.into()),
+                    error: FieldUpdate::Set(error.clone()),
+                    auto_start: None,
+                    at: self.clock.now_ms(),
+                }],
+                Durability::Batched,
+            )
+            .await
+        {
+            return;
+        }
+        let from = item.status;
+        self.patch(id, |item| {
+            item.status = Status::Queued;
+            item.msg = Some(msg.into());
+            item.error = Some(error.clone());
+            item.finished_at = None;
+        });
+        if auto_start {
+            self.retries.retain(|r| r.id != id);
+            self.retries.push(crate::engine::PendingRetry {
+                id,
+                at_ms: self.clock.now_ms() + 15 * 60 * 1_000,
+            });
+        }
+        self.on_child_status(id, from, Status::Queued).await;
+        self.publish_changed(id, from, Status::Queued).await;
     }
 
     /// Schedules an automatic retry with the DESIGN §8.8 backoff.
@@ -500,6 +549,7 @@ struct RunJob {
     provider: Arc<dyn Provider>,
     entry: MediaEntry,
     request: aulos_core::DownloadRequest,
+    source: aulos_core::SourceKind,
     ytdl: Arc<aulos_core::YtdlOptions>,
     out_dir: PathBuf,
     tmp_dir: PathBuf,
@@ -518,6 +568,7 @@ impl RunJob {
             provider,
             entry,
             request,
+            source,
             ytdl,
             out_dir,
             tmp_dir,
@@ -548,6 +599,7 @@ impl RunJob {
 
         let ctx = DownloadCtx {
             item_id: id,
+            source,
             entry: &entry,
             request: &request,
             ytdl_options: ytdl,

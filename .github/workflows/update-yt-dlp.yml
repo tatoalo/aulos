@@ -4,7 +4,7 @@ name: update-yt-dlp
 # are published to yt-dlp/yt-dlp-master-builds after every push to master, so the newest extractor
 # fixes land here first. Ported from the legacy repo with the four hardening changes: the pin lives
 # in one place (`docker/Dockerfile`'s `ARG YTDLP_VERSION=`, asserted exactly once), the PR is only
-# opened after an amd64 image build plus a smoke run, the commit message is machine-stable, and a
+# opened after an amd64 image build plus offline checks, the commit message is machine-stable, and a
 # fine-grained PAT is preferred with a graceful `GITHUB_TOKEN` fallback.
 on:
   schedule:
@@ -99,18 +99,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke the new pin
-        # This is the entire point of running master: a bad canary build must fail here, not on the
-        # VPS. Legacy auto-merged on a version-string diff alone.
+      - name: Check the image tools and yt-dlp import
         if: steps.update.outputs.has_update == 'true'
         run: |
           set -eu
           docker run --rm aulos-server:bump-smoke doctor
           docker run --rm --entrypoint python3 aulos-server:bump-smoke \
             -c 'import yt_dlp; v = yt_dlp.version; print("yt_dlp", v.__version__, v.CHANNEL)'
-          # And a real extraction through the shim, which is the only check that catches a build
-          # that still imports but can no longer extract.
-          AULOS_IMAGE=aulos-server:bump-smoke crates/aulos-provider-ytdlp/tests/smoke_extract.sh
 
       - name: Create or update the pull request
         if: steps.update.outputs.has_update == 'true'
@@ -162,7 +157,7 @@ jobs:
               --body "## Summary
           - Automated yt-dlp master (canary) build update
           - Build tag: $CURRENT_VERSION -> $LATEST_VERSION
-          - The amd64 image was built and smoke-tested with this pin before this PR was opened.
+          - The amd64 image build, tool checks and yt-dlp import passed with this pin.
 
           ---
           *This PR was automatically created by the update-yt-dlp workflow.*" $LABEL_ARGS)

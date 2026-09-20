@@ -363,6 +363,8 @@ class YoutubeDL:
 
     def download(self, urls):
         """Fires the scripted hooks and returns the scripted retcode."""
+        if self.params.get("match_filter"):
+            self.params["match_filter"](self.scenario.get("extract") or {}, incomplete=False)
         noise = self.scenario.get("stderr_bytes", 0)
         if noise:
             chunk = "x" * 79 + "\n"

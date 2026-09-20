@@ -88,6 +88,7 @@ impl Harness {
     fn download_ctx(&self) -> DownloadCtx<'_> {
         DownloadCtx {
             item_id: self.id,
+            source: aulos_core::SourceKind::ApiV2,
             entry: &self.entry,
             request: &self.request,
             ytdl_options: Arc::new(aulos_core::ytdl_options::YtdlOptions::empty()),

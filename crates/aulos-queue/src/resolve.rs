@@ -263,6 +263,23 @@ impl Engine {
             item.canonical_key = key.clone();
         });
 
+        if before.source.kind == aulos_core::SourceKind::Subscription
+            && (entry.live.is_upcoming() || entry.live == aulos_provider::LiveStatus::IsLive)
+        {
+            self.wait_for_video(
+                id,
+                WireError::new(
+                    ErrorCode::NotYetLive,
+                    entry.pre_error.as_ref().map_or(
+                        "Waiting for the premiere or live stream to finish",
+                        |error| &error.message,
+                    ),
+                ),
+            )
+            .await;
+            return;
+        }
+
         let (error, auto_start) = match pre_error_of(&entry) {
             // A pre-download problem is **not** terminal: the row lands in `queued` with
             // `auto_start = false` and a populated `error` (DESIGN §8.4).
@@ -583,6 +600,14 @@ impl Engine {
 
     /// A resolution that ends the item.
     pub(crate) async fn fail_resolution(&mut self, id: ItemId, error: WireError) {
+        if error.code == ErrorCode::NotYetLive
+            && self
+                .cached(id)
+                .is_some_and(|item| item.source.kind == aulos_core::SourceKind::Subscription)
+        {
+            self.wait_for_video(id, error).await;
+            return;
+        }
         self.terminate(id, Status::Error, FieldUpdate::Set(error))
             .await;
     }

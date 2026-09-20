@@ -190,6 +190,7 @@ pub fn download_ctx<'a>(
     std::fs::create_dir_all(&tmp_dir).expect("tmp_dir");
     DownloadCtx {
         item_id: ItemId::new(),
+        source: aulos_core::SourceKind::ApiV2,
         entry,
         request,
         ytdl_options: Arc::new(YtdlOptions::empty()),

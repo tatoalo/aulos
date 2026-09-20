@@ -1063,6 +1063,75 @@ async fn a_retry_after_a_completion_is_reported_again() {
 
 /// DESIGN §12.5: each discrete message fires **exactly once** per chat per job.
 #[tokio::test]
+async fn a_subscription_premiere_stays_waiting_on_the_board() {
+    let mut h = Harness::new().await;
+    let mut v = view(
+        ItemId::new(),
+        "Premiere",
+        Status::Resolving,
+        SourceRef::with_ref(SourceKind::Subscription, "channel"),
+    );
+    h.observe(&added(&v)).await;
+    v.status = Status::Queued;
+    v.msg = Some("Waiting for the full-quality video; checking again in 15 minutes".into());
+    v.error = Some(aulos_core::WireError::new(
+        aulos_core::ErrorCode::NotYetLive,
+        "Premieres in 14 hours",
+    ));
+    h.observe(&changed(&v, Status::Resolving)).await;
+    h.tick().await;
+    h.advance(Duration::from_secs(120)).await;
+    let texts = h.transport.texts();
+    assert!(texts.iter().any(|t| t.contains("⏳  Premiere") && t.contains("Waiting for the full-quality video")));
+    assert!(
+        texts
+            .iter()
+            .all(|t| !t.contains("❌") && !t.contains("All done") && !t.contains("failed"))
+    );
+    assert_eq!(h.actor.health().watched_jobs, 1);
+
+    v.status = Status::Finished;
+    v.error = None;
+    v.msg = None;
+    h.observe(&completed(&v)).await;
+    h.advance(Duration::from_secs(61)).await;
+    assert!(h.transport.texts().last().unwrap().contains("1 finished"));
+}
+
+#[tokio::test]
+async fn a_per_job_premiere_sends_one_waiting_notice_then_completion() {
+    let mut h = Harness::builder()
+        .telegram(TelegramConfig {
+            board: TelegramBoard::PerJob,
+            ..TelegramConfig::for_test(vec![CHAT])
+        })
+        .build()
+        .await;
+    let mut v = view(
+        ItemId::new(),
+        "Premiere",
+        Status::Resolving,
+        SourceRef::with_ref(SourceKind::Subscription, "channel"),
+    );
+    h.observe(&added(&v)).await;
+    v.status = Status::Queued;
+    v.msg = Some("Waiting for the full-quality video; checking again in 15 minutes".into());
+    v.error = Some(aulos_core::WireError::new(
+        aulos_core::ErrorCode::NotYetLive,
+        "Premieres in 14 hours",
+    ));
+    h.observe(&changed(&v, Status::Resolving)).await;
+    h.observe(&changed(&v, Status::Preparing)).await;
+    assert_eq!(h.transport.texts().len(), 1);
+    assert!(h.transport.texts()[0].starts_with("⏳ Premiere\nWaiting for the full-quality video"));
+    v.status = Status::Finished;
+    v.error = None;
+    h.observe(&completed(&v)).await;
+    assert_eq!(h.transport.texts().len(), 2);
+    assert!(h.transport.texts()[1].starts_with("✅ Download complete: Premiere"));
+}
+
+#[tokio::test]
 async fn the_terminal_messages_fire_exactly_once_per_chat_per_job() {
     let mut h = Harness::builder()
         .telegram(TelegramConfig {

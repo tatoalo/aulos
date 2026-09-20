@@ -359,6 +359,7 @@ impl EngineFixture {
     pub fn ctx(&self) -> aulos_provider::provider::DownloadCtx<'_> {
         aulos_provider::provider::DownloadCtx {
             item_id: self.item_id,
+            source: aulos_core::SourceKind::ApiV2,
             entry: &self.entry,
             request: &self.request,
             ytdl_options: std::sync::Arc::new(aulos_core::ytdl_options::YtdlOptions::default()),

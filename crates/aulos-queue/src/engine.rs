@@ -534,6 +534,10 @@ impl Engine {
             if item.status != Status::Queued || !item.auto_start {
                 continue;
             }
+            if item.provider.is_none() {
+                self.restart_resolution(id).await;
+                continue;
+            }
             let msg = FieldUpdate::Set(Box::<str>::from("Retrying"));
             self.write_status(id, Status::Queued, msg, FieldUpdate::Keep, None)
                 .await;

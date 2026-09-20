@@ -48,6 +48,37 @@ pub fn media_id_of(entry: &MediaEntry) -> Box<str> {
     }
 }
 
+fn is_youtube_url(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host == "youtu.be"
+            || host == "youtube.com"
+            || host.ends_with(".youtube.com")
+            || host == "youtube-nocookie.com"
+            || host.ends_with(".youtube-nocookie.com")
+    })
+}
+
+pub(crate) fn is_shorts_url(url: &Url) -> bool {
+    is_youtube_url(url)
+        && url
+            .path_segments()
+            .is_some_and(|mut parts| parts.any(|part| part == "shorts"))
+}
+
+pub(crate) fn is_short(entry: &MediaEntry) -> bool {
+    is_shorts_url(&entry.url)
+        || (is_youtube_url(&entry.url)
+            && entry.state.get("media_type").and_then(Value::as_str) == Some("short"))
+        || ["url", "webpage_url", "original_url"].iter().any(|key| {
+            entry
+                .state
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(|value| Url::parse(value).ok())
+                .is_some_and(|url| is_shorts_url(&url))
+        })
+}
+
 /// A verbatim port of legacy `_is_media_entry` (`app/subscriptions.py:60`).
 ///
 /// | Legacy test | Here |
@@ -166,9 +197,6 @@ fn feed_name(title: Option<&str>, first_child: Option<&MediaEntry>) -> Option<Bo
         .map(Into::into)
 }
 
-/// How many child URLs the tab-page recursion tries (DESIGN §14.3 step 3, legacy `entries[:5]`).
-pub const TAB_RECURSION_FANOUT: usize = 5;
-
 /// The maximum recursion depth (legacy `_depth < 1`).
 pub const TAB_RECURSION_MAX_DEPTH: u32 = 1;
 
@@ -185,6 +213,34 @@ mod tests {
 
     fn video(id: &str) -> MediaEntry {
         MediaEntry::video(id, format!("Title {id}"), url("https://x.test/v/1"))
+    }
+
+    #[test]
+    fn shorts_are_identified_by_urls_and_metadata_not_duration() {
+        for address in [
+            "https://www.youtube.com/shorts/abc",
+            "https://m.youtube.com/@channel/shorts",
+            "https://www.youtube.com/channel/UC123/shorts/",
+        ] {
+            assert!(is_shorts_url(&url(address)));
+            assert!(is_short(&MediaEntry::video("abc", "Short", url(address))));
+        }
+        for address in [
+            "https://youtube.com/watch?v=shorts",
+            "https://notyoutube.com/shorts/abc",
+        ] {
+            assert!(!is_shorts_url(&url(address)));
+        }
+        let mut e = MediaEntry::video("abc", "Short", url("https://youtube.com/watch?v=abc"));
+        e.state = json!({"media_type": "short"});
+        assert!(is_short(&e));
+        for key in ["url", "webpage_url", "original_url"] {
+            e.state = json!({key: "https://youtube.com/shorts/abc"});
+            assert!(is_short(&e));
+        }
+        e.state = json!({"media_type": "video", "duration": 10});
+        e.hints.duration = Some(10.0);
+        assert!(!is_short(&e));
     }
 
     fn with_state(id: &str, state: Value) -> MediaEntry {
