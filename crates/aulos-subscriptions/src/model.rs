@@ -194,6 +194,9 @@ impl CheckReport {
 /// Why a check did not complete. Every variant **counts as a failure** for backoff purposes.
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 pub enum CheckFailure {
+    /// Shorts cannot be subscription sources.
+    #[error("YouTube Shorts are excluded from subscriptions")]
+    ShortsExcluded,
     /// The URL resolved to a single video, or to nothing at all (DESIGN §14.3 step 4).
     ///
     /// Legacy set the same message but hot-retried it every 60 s forever; here it backs off.

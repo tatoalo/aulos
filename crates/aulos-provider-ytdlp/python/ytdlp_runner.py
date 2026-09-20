@@ -52,6 +52,7 @@ import re
 import signal
 import sys
 import time
+from urllib.parse import urlsplit
 
 # --------------------------------------------------------------------------------------------
 # Constants. Every one of these is also a constant on the Rust side; they must not drift.
@@ -117,6 +118,7 @@ ENTRY_KEYS = (
     "webpage_url",
     "original_url",
     "duration",
+    "media_type",
     "live_status",
     "is_live",
     "was_live",
@@ -440,7 +442,7 @@ class Policy:
         self.debug = bool(raw.get("debug"))
         self.hard_timeout_ms = max(0, int(raw.get("hard_timeout_ms") or 0))
         self.pot_url = raw.get("pot_url")
-        self.wait_for_video = bool(raw.get("wait_for_video"))
+        self.subscription_download = bool(raw.get("subscription_download"))
 
     def accepts_caption(self, path):
         """Whether a produced caption file may be reported as an artifact.
@@ -1251,8 +1253,23 @@ class DownloadRun:
         return re.sub(r"\.webm$", ".jpg", str(path))
 
 
-def wait_for_video_filter(existing):
+def is_shorts_url(url):
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+    except ValueError:
+        return False
+    return (host == "youtube.com" or host.endswith(".youtube.com")) and "shorts" in parsed.path.split("/")
+
+
+def subscription_filter(existing, url):
     def check(info, *, incomplete=False):
+        if info.get("media_type") == "short" or any(
+            is_shorts_url(candidate) for candidate in (url, info.get("webpage_url"), info.get("original_url"), info.get("url"))
+        ):
+            raise _entry_error("canceled", "YouTube Shorts are excluded from subscriptions")
         if info.get("is_live") or info.get("live_status") in ("is_upcoming", "is_live", "post_live"):
             raise _entry_error("not_yet_live", "Waiting for the premiere or live stream to finish processing")
         if existing is not None:
@@ -1273,8 +1290,8 @@ def run_download(channel, job, options, policy):
     params["logger"] = FrameLogger(channel, policy)
     params.setdefault("quiet", not policy.debug)
     params.setdefault("no_color", True)
-    if policy.wait_for_video:
-        params["match_filter"] = wait_for_video_filter(params.get("match_filter"))
+    if policy.subscription_download:
+        params["match_filter"] = subscription_filter(params.get("match_filter"), job["url"])
 
     try:
         with yt_dlp.YoutubeDL(params) as ydl:

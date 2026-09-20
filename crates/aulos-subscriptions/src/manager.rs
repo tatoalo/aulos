@@ -715,6 +715,10 @@ impl Manager {
 /// The legacy error mapping for `POST <p>subscribe` (DESIGN §14.3 steps 4 and 9).
 fn subscribe_error(failure: &CheckFailure) -> SubError {
     match failure {
+        CheckFailure::ShortsExcluded => SubError::Invalid {
+            field: "url".into(),
+            message: failure.error_text(),
+        },
         CheckFailure::VideoOnly => SubError::VideoOnly,
         CheckFailure::NoProvider(_) => SubError::CouldNotResolve,
         // Legacy surfaced the yt-dlp message verbatim for a `YoutubeDLError`.

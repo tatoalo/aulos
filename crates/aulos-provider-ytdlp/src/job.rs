@@ -103,8 +103,8 @@ pub struct Policy {
     pub hard_timeout_ms: u64,
     /// The POT sidecar endpoint, reported back in `hello.pot.url`.
     pub pot_url: Option<String>,
-    /// Wait for the finished recording instead of downloading a live broadcast.
-    pub wait_for_video: bool,
+    /// Exclude Shorts and wait for finished recordings in subscription downloads.
+    pub subscription_download: bool,
 }
 
 impl Default for Policy {
@@ -120,7 +120,7 @@ impl Default for Policy {
             debug: false,
             hard_timeout_ms: 0,
             pot_url: None,
-            wait_for_video: false,
+            subscription_download: false,
         }
     }
 }
@@ -191,7 +191,7 @@ impl Policy {
             "debug": self.debug,
             "hard_timeout_ms": self.hard_timeout_ms,
             "pot_url": self.pot_url,
-            "wait_for_video": self.wait_for_video,
+            "subscription_download": self.subscription_download,
         })
     }
 }

@@ -25,7 +25,10 @@ use aulos_store::Store;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::detect::{Classified, TAB_RECURSION_MAX_DEPTH, classify, is_media_entry, media_id_of};
+use crate::detect::{
+    Classified, TAB_RECURSION_MAX_DEPTH, classify, is_media_entry, is_short, is_shorts_url,
+    media_id_of,
+};
 use crate::model::{CheckFailure, CheckReport};
 
 /// The throwaway selection a *metadata-only* resolution borrows.
@@ -188,6 +191,12 @@ impl Checker {
 
     /// Resolve → classify → filter → tab recursion, at most [`TAB_RECURSION_MAX_DEPTH`] deep.
     async fn probe_at(&self, url: &Url, depth: u32) -> Result<Feed, CheckFailure> {
+        if is_shorts_url(url) {
+            return Ok(Feed {
+                name: None,
+                entries: Vec::new(),
+            });
+        }
         let entries = self.resolve_flat(url).await?;
         match classify(entries) {
             Classified::SingleVideo => Err(CheckFailure::VideoOnly),
@@ -206,16 +215,22 @@ impl Checker {
                 if !media.is_empty() {
                     return Ok(Feed {
                         name,
-                        entries: media,
+                        entries: media.into_iter().filter(|entry| !is_short(entry)).collect(),
                     });
                 }
                 if depth < TAB_RECURSION_MAX_DEPTH
-                    && let Some(child) = entries.first()
+                    && let Some(child) = entries.iter().find(|entry| !is_short(entry))
                 {
                     let feed = Box::pin(self.probe_at(&child.url, depth + 1)).await?;
                     return Ok(Feed {
                         name: feed.name.or(name),
                         entries: feed.entries,
+                    });
+                }
+                if !entries.is_empty() && entries.iter().all(is_short) {
+                    return Ok(Feed {
+                        name,
+                        entries: Vec::new(),
                     });
                 }
                 // A container that lists nothing downloadable is the legacy "no longer resolves to
@@ -322,6 +337,9 @@ impl Checker {
 #[async_trait]
 impl FeedChecker for Checker {
     async fn probe(&self, url: &Url) -> Result<Feed, CheckFailure> {
+        if is_shorts_url(url) {
+            return Err(CheckFailure::ShortsExcluded);
+        }
         self.probe_at(url, 0).await
     }
 

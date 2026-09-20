@@ -26,6 +26,78 @@ async fn with_feed(
     (h, provider)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_feeds_exclude_shorts_and_shorts_only_checks_stay_quiet() {
+    let (h, provider) = with_feed("mixed", vec![entry("old")]).await;
+    let view = h.subscribe(&feed_url("mixed")).await.unwrap();
+    let mut short = entry("short");
+    short.url = url::Url::parse("https://www.youtube.com/shorts/abc").unwrap();
+    let mut metadata_short = entry("metadata_short");
+    metadata_short.url = url::Url::parse("https://www.youtube.com/watch?v=def").unwrap();
+    metadata_short.state = serde_json::json!({"media_type": "short"});
+    let mut brief_video = entry("brief");
+    brief_video.hints.duration = Some(10.0);
+    provider.set_feed(
+        &feed_url("mixed"),
+        vec![short.clone(), metadata_short.clone(), brief_video],
+    );
+    h.check(vec![view.id.clone()]).await;
+    h.until(&view.id, "regular video queued", |r| r.seen_count == 2)
+        .await;
+    let items = h.items().await;
+    assert_eq!(items.len(), 1);
+    assert!(items[0].url.as_str().ends_with("/brief"));
+
+    let checked = h.record(&view.id).await.last_checked;
+    provider.set_feed(&feed_url("mixed"), vec![short, metadata_short]);
+    h.check(vec![view.id.clone()]).await;
+    let record = h
+        .until(&view.id, "Shorts ignored", |r| r.last_checked > checked)
+        .await;
+    assert_eq!(record.error, None);
+    assert_eq!(record.consecutive_failures, 0);
+    assert_eq!(h.items().await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shorts_tabs_are_never_selected_or_accepted_as_subscriptions() {
+    let provider = ScriptProvider::new();
+    let root = feed_url("chan");
+    let videos = format!("{root}/videos");
+    let mut short_tab = entry("shorts");
+    short_tab.url = url::Url::parse("https://youtube.com/@channel/shorts").unwrap();
+    let mut video_tab = entry("videos");
+    video_tab.url = url::Url::parse(&videos).unwrap();
+    for tab in [&mut short_tab, &mut video_tab] {
+        tab.kind = aulos_provider::EntryKind::Playlist {
+            title: "Tab".into(),
+            entries: Vec::new(),
+        };
+    }
+    provider.set_feed(&root, vec![short_tab.clone(), video_tab]);
+    provider.set_feed(&videos, vec![entry("old")]);
+    let h = Harness::builder().provider(provider.clone()).build().await;
+    let view = h.subscribe(&root).await.unwrap();
+    assert_eq!(view.seen_count, 1);
+    assert_eq!(provider.resolve_count(), 2);
+    let err = h.subscribe(short_tab.url.as_str()).await.unwrap_err();
+    assert_eq!(err.code(), aulos_core::ErrorCode::ValidationFailed);
+    assert_eq!(
+        err.to_string(),
+        "YouTube Shorts are excluded from subscriptions"
+    );
+    assert_eq!(provider.resolve_count(), 2);
+
+    provider.set_feed(&root, vec![short_tab]);
+    h.check(vec![view.id.clone()]).await;
+    h.until(&view.id, "Shorts-only channel checked", |r| {
+        r.last_checked > view.last_checked
+    })
+    .await;
+    assert!(h.items().await.is_empty());
+    assert!(h.record(&view.id).await.error.is_none());
+}
+
 /// DESIGN §14.3 step 8: subscribing marks everything currently visible seen **without** queueing,
 /// except an upcoming premiere — which stays unseen so it is queued when the stream starts.
 #[tokio::test(flavor = "multi_thread")]
