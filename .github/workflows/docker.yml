@@ -147,3 +147,57 @@ jobs:
           docker logs "$cid" || true
           docker rm -f "$cid" >/dev/null
           test "$s" = healthy || { echo "::error::container never became healthy"; exit 1; }
+
+  version-badge:
+    needs: build
+    if: github.event_name == 'push' || inputs.push == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    concurrency:
+      group: aulos-version-badge
+      cancel-in-progress: false
+    steps:
+      - name: Publish the latest container version badge
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const versions = await github.paginate(
+              github.rest.packages.getAllPackageVersionsForPackageOwnedByUser,
+              { username: context.repo.owner, package_type: 'container', package_name: 'aulos', per_page: 100 },
+            );
+            const latest = versions.find(version => version.metadata.container.tags.includes('latest'));
+            const version = latest?.metadata.container.tags.find(tag => /^\d{4}\.\d{2}\.\d{2}$/.test(tag));
+            if (!version) throw new Error('The latest Aulos container has no date version tag');
+            const content = JSON.stringify({ schemaVersion: 1, label: 'version', message: version, color: 'blue' }) + '\n';
+            const ref = 'heads/badges';
+            let parent;
+            let baseTree;
+            try {
+              const { data } = await github.rest.git.getRef({ ...context.repo, ref });
+              parent = data.object.sha;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (parent) {
+              const { data: commit } = await github.rest.git.getCommit({ ...context.repo, commit_sha: parent });
+              baseTree = commit.tree.sha;
+            }
+            const { data: tree } = await github.rest.git.createTree({
+              ...context.repo,
+              ...(baseTree ? { base_tree: baseTree } : {}),
+              tree: [{ path: 'version.json', mode: '100644', type: 'blob', content }],
+            });
+            if (tree.sha === baseTree) return;
+            const { data: commit } = await github.rest.git.createCommit({
+              ...context.repo,
+              message: `Update container version badge to ${version}`,
+              tree: tree.sha,
+              parents: parent ? [parent] : [],
+            });
+            if (parent) {
+              await github.rest.git.updateRef({ ...context.repo, ref, sha: commit.sha });
+            } else {
+              await github.rest.git.createRef({ ...context.repo, ref: `refs/${ref}`, sha: commit.sha });
+            }
