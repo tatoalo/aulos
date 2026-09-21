@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---------- runtime ----------
 FROM debian:${RUNTIME_DEBIAN}-slim
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.08.30.140045
+ARG YTDLP_VERSION=2026.09.16.074918
 ARG BGUTIL_TAG=v0.8.1
 ARG NM3U8DL_VERSION=v0.5.1-beta
 ARG NM3U8DL_BUILD=20251029
