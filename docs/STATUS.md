@@ -1,6 +1,14 @@
 # Aulos — project status and recovery notes
 
-Last updated: 2026-09-06 (APNs push notifications shipped). Update this file at every checkpoint.
+Last updated: 2026-10-03 (Aulos v2-only retirement).
+
+## Current checkpoint
+
+The v1 API, Socket.IO tombstone, compatibility flags, raw Authorization-token syntax, v1
+store projections and HTTP golden corpus are retired. Normal boot opens Aulos SQLite; MeTube
+JSON migration is explicit. Provider regression fixtures, database migrations, historical source
+values and notification attribution remain supported. The sections below record implementation
+history; current behavior is documented in README and PROTOCOL.
 
 ## What this is
 
@@ -15,7 +23,7 @@ Read in this order when picking the project back up:
 2. `docs/PLAN.md` — the 18 work packages (WP-00…WP-17), interfaces, acceptance tests.
 3. `docs/DESIGN.md` (architecture, ~5k lines) and `docs/PROTOCOL.md` (wire contract for clients).
 4. `docs/INTEGRATION-NOTES.md` — deviations from DESIGN made during implementation, per WP.
-5. `docs/reference/legacy-backend-spec.md` and `docs/reference/ios-client-reference.md` — exhaustive
+5. `docs/reference/legacy-backend-spec.md` and `docs/archive/ios-client-reference.md` — exhaustive
    specs of the systems being replaced/served.
 
 ## Ground rules
@@ -27,7 +35,7 @@ Read in this order when picking the project back up:
 - CI builds `linux/amd64` only for now (`ubuntu-latest`); the Dockerfile stays `TARGETARCH`-aware.
 - Never run a Telegram bot with the production token from a dev machine (polling conflict, 409).
 
-## Work package status
+## Historical work package status
 
 | WP | Title | Status | Commit |
 |---|---|---|---|
@@ -148,7 +156,7 @@ code disagreed with a doc that was already right — PROTOCOL §3.3, DESIGN §6.
   (`docker.yml` pushes `ghcr.io/${GITHUB_REPOSITORY}`); `aulos-server` is the binary inside it, not
   the image. The seven `ghcr.io/tatoalo/aulos-server` references in DESIGN §18.3/§19 — the cutover
   runbook's own `docker pull`, all four rehearsal `docker run`s and both compose snippets — are
-  corrected, as are the seven in the superseded `docs/design-candidates/migration.md`. §18.3 now
+  corrected, as are the seven in the superseded `docs/archive/design-candidates/migration.md`. §18.3 now
   states the rule and why the earlier draft was wrong. New gate
   `packaging::the_operator_docs_name_the_image_the_workflow_actually_publishes` fails if DESIGN.md,
   `docker/compose.example.yml` or README.md ever names the wrong image again, and pins the
@@ -363,7 +371,7 @@ self-contained enough to hand any WP to a fresh engineer/agent.
 - ~~**Documentation debt**: DESIGN.md §18.3/§19 name the published image
   `ghcr.io/tatoalo/aulos-server`, but `docker.yml` publishes `ghcr.io/tatoalo/aulos`.~~
   **RESOLVED** in the round-1 integration pass: the name is `ghcr.io/tatoalo/aulos`, DESIGN and
-  `docs/design-candidates/migration.md` were rewritten to match, and a packaging test now enforces
+  `docs/archive/design-candidates/migration.md` were rewritten to match, and a packaging test now enforces
   it. See "Integration pass" above.
 - Five wave-0 deviations from DESIGN are recorded only in INTEGRATION-NOTES (types hoisted into
   `aulos-core`, `Registry::pick`/`catalog_for` returning `Option`, `OutTmpl` in `aulos-provider`,

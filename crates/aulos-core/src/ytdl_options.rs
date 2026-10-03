@@ -4,6 +4,12 @@
 //! they survive verbatim into the shim's job (DESIGN §9.2) and why `serde_json::Map` is the right
 //! representation all the way through.
 
+/// `cookies.txt` in `STATE_DIR`, registered as the `cookiefile` runtime override (DESIGN §17.2).
+pub const COOKIES_FILE: &str = "cookies.txt";
+
+/// The `kv` key the cookie file is registered under.
+pub const COOKIEFILE_KEY: &str = "cookiefile";
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

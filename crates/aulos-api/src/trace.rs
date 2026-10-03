@@ -64,7 +64,7 @@ fn request_id_for(req: &Request) -> String {
         .map_or_else(new_request_id, ToOwned::to_owned)
 }
 
-/// The middleware. Wraps the whole router, v1 shim included.
+/// The middleware. Wraps the whole router.
 pub async fn headers(State(state): State<ApiState>, mut req: Request, next: Next) -> Response {
     let started = Instant::now();
     let id = request_id_for(&req);

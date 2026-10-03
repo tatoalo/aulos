@@ -129,12 +129,7 @@ impl SubscriptionRecord {
 
 /// `subscription` on the wire (DESIGN §14.1, PROTOCOL §5.9, §9).
 ///
-/// The legacy `to_public_dict()` 13 keys **plus** `next_due`, `consecutive_failures` and
-/// `checking`. Secrets and knobs (`custom_name_prefix`, `ytdl_options_*`, the seen set) stay
-/// unexposed, as in legacy. The v1 shim emits exactly the legacy 13 and nothing more.
-///
-/// `last_checked` and `next_due` are **milliseconds** here; the v1 shim divides `last_checked` by
-/// 1000 and emits a float, matching legacy's `time.time()`.
+/// Secrets, provider options and the seen set stay unexposed. Timestamps are milliseconds.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SubscriptionView {
     /// The subscription id.
@@ -172,8 +167,8 @@ pub struct SubscriptionView {
 }
 
 impl SubscriptionView {
-    /// The legacy 13 keys, in `to_public_dict()` order — what the v1 shim emits.
-    pub const V1_KEYS: [&'static str; 13] = [
+    /// The v2 subscription fields.
+    pub const KEYS: [&'static str; 16] = [
         "id",
         "name",
         "url",
@@ -187,14 +182,13 @@ impl SubscriptionView {
         "last_checked",
         "seen_count",
         "error",
+        "next_due",
+        "consecutive_failures",
+        "checking",
     ];
-
-    /// The three keys v2 adds.
-    pub const V2_ADDITIONAL_KEYS: [&'static str; 3] =
-        ["next_due", "consecutive_failures", "checking"];
 }
 
-/// What can be changed by `POST <p>subscriptions/update`.
+/// What can be changed by `PATCH <p>api/v2/subscriptions/{id}`.
 ///
 /// Legacy accepted only these three fields, and so do we — but a bad `enabled` is a
 /// `400 validation_failed` rather than a leaked 500 (DESIGN §14.3 step 10).
@@ -216,7 +210,7 @@ impl SubChanges {
     }
 }
 
-/// The handle returned by `POST <p>subscriptions/check`, so the route answers immediately while
+/// The handle returned by `POST <p>api/v2/subscriptions/check`, so the route answers immediately while
 /// the checks run in the background (BRIEF §12).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CheckJob {
@@ -431,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_carries_the_legacy_thirteen_plus_three() {
+    fn the_view_carries_the_v2_fields() {
         let mut r = record();
         r.last_checked = Some(1_757_000_100_000);
         r.next_due = Some(1_757_003_700_000);
@@ -439,10 +433,7 @@ mod tests {
         let v = serde_json::to_value(r.to_view(false)).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 16);
-        for k in SubscriptionView::V1_KEYS {
-            assert!(obj.contains_key(k), "{k} missing");
-        }
-        for k in SubscriptionView::V2_ADDITIONAL_KEYS {
+        for k in SubscriptionView::KEYS {
             assert!(obj.contains_key(k), "{k} missing");
         }
         assert_eq!(obj["folder"], "", "legacy emitted the empty string");

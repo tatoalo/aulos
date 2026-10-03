@@ -265,7 +265,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("AULOS_CONFIG_POLL_SECS", "30"),
     ("AULOS_LOG_FORMAT", "text"),
     // --- AULOS_*: API surface ---
-    ("AULOS_V1_ENABLED", "true"),
     ("AULOS_WEB_UI", "true"),
     ("AULOS_API_TOKEN", ""),
     ("AULOS_TRUSTED_PROXY_AUTH_HEADER", ""),
@@ -274,8 +273,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("AULOS_SHUTDOWN_GRACE_SECS", "20"),
     ("AULOS_VERSION", "dev"),
     ("AULOS_IMPORT_ON_ERROR", "fail"),
-    ("AULOS_V1_ADD_RESOLVE_WAIT_MS", "10000"),
-    ("AULOS_V1_HISTORY_MAX", "0"),
 ];
 
 /// Boolean keys: legacy's `_BOOLEAN` tuple plus the new `AULOS_*` booleans (DESIGN §17.1 step 3).
@@ -302,7 +299,6 @@ pub const BOOLEAN_KEYS: &[&str] = &[
     "AULOS_POT_ENABLED",
     "AULOS_NFO_ENABLED",
     "AULOS_TELEGRAM_WATCH_ALL",
-    "AULOS_V1_ENABLED",
     "AULOS_WEB_UI",
     "AULOS_ALLOW_PRIVATE_TARGETS",
     "AULOS_METRICS_ENABLED",
@@ -655,12 +651,8 @@ pub struct Config {
     // --- request and subscription defaults ---
     /// `DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT`.
     pub default_option_playlist_item_limit: u32,
-    /// The raw string, so the v1 shim can echo it as legacy did (a string, never coerced).
-    pub default_option_playlist_item_limit_raw: Box<str>,
     /// `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL`, in minutes.
     pub subscription_default_check_interval: u32,
-    /// The raw string, for the same reason.
-    pub subscription_default_check_interval_raw: Box<str>,
     /// `SUBSCRIPTION_SCAN_PLAYLIST_END`.
     pub subscription_scan_playlist_end: u32,
     /// `SUBSCRIPTION_MAX_SEEN_IDS`.
@@ -917,8 +909,6 @@ pub struct Config {
     pub log_format: LogFormat,
 
     // --- API surface ---
-    /// `AULOS_V1_ENABLED`.
-    pub v1_enabled: bool,
     /// `AULOS_WEB_UI` — serve the embedded web UI at `<prefix>` (and its assets and manifest).
     ///
     /// `false` restores the pre-UI surface exactly: `GET <prefix>` is the identity document for
@@ -940,10 +930,6 @@ pub struct Config {
     pub shutdown_grace_secs: u64,
     /// `AULOS_IMPORT_ON_ERROR`.
     pub import_on_error: ImportOnError,
-    /// `AULOS_V1_ADD_RESOLVE_WAIT_MS`. `0` = fully async v1 add.
-    pub v1_add_resolve_wait_ms: u64,
-    /// `AULOS_V1_HISTORY_MAX`. `0` = unlimited, reproducing legacy exactly.
-    pub v1_history_max: u32,
 }
 
 impl Config {
@@ -1077,11 +1063,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         output_template_channel: g.str("OUTPUT_TEMPLATE_CHANNEL").into(),
 
         default_option_playlist_item_limit: g.u32("DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT"),
-        default_option_playlist_item_limit_raw: g.str("DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT").into(),
         subscription_default_check_interval: g.u32("SUBSCRIPTION_DEFAULT_CHECK_INTERVAL"),
-        subscription_default_check_interval_raw: g
-            .str("SUBSCRIPTION_DEFAULT_CHECK_INTERVAL")
-            .into(),
         subscription_scan_playlist_end: g.u32("SUBSCRIPTION_SCAN_PLAYLIST_END"),
         subscription_max_seen_ids: g.u32("SUBSCRIPTION_MAX_SEEN_IDS"),
         clear_completed_after: g.lenient_u64("CLEAR_COMPLETED_AFTER", 0),
@@ -1221,8 +1203,6 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         config_debounce_ms: g.u64("AULOS_CONFIG_DEBOUNCE_MS"),
         config_poll_secs: g.u64("AULOS_CONFIG_POLL_SECS"),
         log_format: g.choice("AULOS_LOG_FORMAT", LogFormat::parse, LogFormat::Text),
-
-        v1_enabled: g.bool("AULOS_V1_ENABLED"),
         web_ui: g.bool("AULOS_WEB_UI"),
         api_token: Redact::new(g.str("AULOS_API_TOKEN").to_owned()),
         trusted_proxy_auth_header: g.str("AULOS_TRUSTED_PROXY_AUTH_HEADER").into(),
@@ -1234,8 +1214,6 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
             ImportOnError::parse,
             ImportOnError::Fail,
         ),
-        v1_add_resolve_wait_ms: g.u64("AULOS_V1_ADD_RESOLVE_WAIT_MS"),
-        v1_history_max: g.u32("AULOS_V1_HISTORY_MAX"),
     };
 
     let result = if errs.is_empty() { Ok(cfg) } else { Err(errs) };
@@ -1763,9 +1741,6 @@ mod tests {
         assert_eq!(c.log_format, LogFormat::Text);
         assert_eq!(c.db_synchronous, DbSynchronous::Normal);
         assert_eq!(c.version.as_ref(), "dev");
-        assert_eq!(c.v1_history_max, 0);
-        assert_eq!(c.v1_add_resolve_wait_ms, 10_000);
-        assert!(c.v1_enabled);
         assert!(!c.metrics_enabled);
         assert!(c.custom_dirs && c.create_custom_dirs);
         assert!(!c.allow_ytdl_options_overrides);

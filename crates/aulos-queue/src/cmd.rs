@@ -9,8 +9,7 @@
 use std::sync::Arc;
 
 use aulos_core::{
-    DownloadRequest, ErrorCode, FileRef, FileSlot, GroupId, ItemId, Kind, PortError, SourceRef,
-    WireError,
+    DownloadRequest, ErrorCode, FileRef, FileSlot, GroupId, ItemId, PortError, SourceRef, WireError,
 };
 use aulos_provider::{MediaEntry, Outcome, ProviderError, Stage};
 use aulos_store::StoreError;
@@ -47,17 +46,6 @@ pub enum EngineCmd {
         source: SourceRef,
         /// The ids, the duplicates and the add generation.
         ack: oneshot::Sender<Result<AddOutcome, AddError>>,
-    },
-    /// The v1 shim's bounded synchronous pre-resolve (DESIGN §11.2).
-    ///
-    /// Completes when every listed id has left `resolving`; ids already out of `resolving` are
-    /// reported immediately. The **caller** owns the deadline (`tokio::time::timeout`), so a slow
-    /// resolve cannot pin engine state.
-    WaitResolved {
-        /// The ids to wait for.
-        ids: Vec<ItemId>,
-        /// One report per id, in request order.
-        ack: oneshot::Sender<Vec<ResolveReport>>,
     },
     /// `queued(!auto_start)` → `queued(auto_start)`.
     Start {
@@ -232,7 +220,6 @@ impl EngineCmd {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Add { .. } => "add",
-            Self::WaitResolved { .. } => "wait_resolved",
             Self::Start { .. } => "start",
             Self::Pause { .. } => "pause",
             Self::Cancel { .. } => "cancel",
@@ -313,17 +300,6 @@ pub struct Duplicate {
     pub url: Arc<str>,
     /// The live item it matched.
     pub existing_id: ItemId,
-}
-
-/// One entry per id handed to [`EngineCmd::WaitResolved`] (DESIGN §8.1, §11.2).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ResolveReport {
-    /// The id that was waited on.
-    pub id: ItemId,
-    /// What it turned out to be. A playlist reports `Kind::Group`.
-    pub kind: Kind,
-    /// `Ok` when resolution succeeded, otherwise the item's terminal error.
-    pub outcome: Result<(), WireError>,
 }
 
 /// The result of every action command (DESIGN §8.1).
@@ -651,23 +627,6 @@ impl EngineHandle {
             .is_err()
         {
             return ActionsResult::default();
-        }
-        reply.await.unwrap_or_default()
-    }
-
-    /// The v1 shim's bounded pre-resolve (DESIGN §11.2). The **caller** applies the timeout.
-    ///
-    /// Ids already out of `resolving` are reported immediately; the rest are reported as they
-    /// transition. An unreachable engine answers with an empty vector.
-    pub async fn wait_resolved(&self, ids: Vec<ItemId>) -> Vec<ResolveReport> {
-        let (ack, reply) = oneshot::channel();
-        if self
-            .tx
-            .send(EngineCmd::WaitResolved { ids, ack })
-            .await
-            .is_err()
-        {
-            return Vec::new();
         }
         reply.await.unwrap_or_default()
     }

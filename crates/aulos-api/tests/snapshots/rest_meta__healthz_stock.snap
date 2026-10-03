@@ -124,7 +124,6 @@ expression: body
   "status": "degraded",
   "uptime_s": "[n]",
   "url_prefix": "/",
-  "v1_shim": true,
   "version": "2026.09.04",
   "ws": {
     "clients": 0,

@@ -1,3 +1,5 @@
+> Historical implementation notes. The October 2026 v2-only retirement supersedes v1 API and automatic-import behavior described below; see BRIEF and PROTOCOL.
+
 # Integration notes
 
 Cross-package notes the integrator must act on or be aware of. Append a bullet list under a heading
@@ -2358,7 +2360,7 @@ Two things reached outside a single crate and are recorded here.
   bin crate, never the image. DESIGN §18.3/§19 (the compose snippet, the cutover runbook's
   `docker pull`, and all four rehearsal `docker run`s) named `ghcr.io/tatoalo/aulos-server` and
   would have failed to pull on the first step of a real cutover; they and the seven mentions in the
-  superseded `docs/design-candidates/migration.md` are corrected, and §18.3 now states the rule.
+  superseded `docs/archive/design-candidates/migration.md` are corrected, and §18.3 now states the rule.
   New gate `packaging::the_operator_docs_name_the_image_the_workflow_actually_publishes` covers
   DESIGN.md, `docker/compose.example.yml` and README.md, and also asserts that `docker.yml` still
   derives the name from the repository — the assumption the pinned name rests on. The bullet above

@@ -93,8 +93,7 @@ pub mod watchdog;
 pub use aggregator::{Aggregator, DIFF_FIELDS, diff, is_urgent, protocol_block, text_changed};
 pub use cmd::{
     AckActions, Action, ActionsResult, AddError, AddOutcome, CancelScope, Duplicate, EngineCmd,
-    EngineError, EngineHandle, HookWrite, ResolveReport, SHUTDOWN_MSG, ShutdownReport, SkipReason,
-    Skipped,
+    EngineError, EngineHandle, HookWrite, SHUTDOWN_MSG, ShutdownReport, SkipReason, Skipped,
 };
 pub use dedupe::{DedupeKey, canonical_key};
 pub use engine::{Engine, NoPreTerminalHooks, PreTerminalHooks};

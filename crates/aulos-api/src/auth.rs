@@ -57,13 +57,11 @@ fn presented_tokens(req: &Request) -> Vec<String> {
         .and_then(|v| v.to_str().ok())
     {
         let trimmed = raw.trim();
-        // `Bearer` is case-insensitive per RFC 6750; a bare token is accepted too, because the
-        // README bookmarklet and `curl -H "Authorization: <token>"` both exist in the wild.
-        let value = trimmed
-            .split_once(' ')
-            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map_or(trimmed, |(_, rest)| rest.trim());
-        out.push(value.to_owned());
+        if let Some((scheme, value)) = trimmed.split_once(' ')
+            && scheme.eq_ignore_ascii_case("bearer")
+        {
+            out.push(value.trim().to_owned());
+        }
     }
     for offered in subprotocols(req) {
         if let Some(token) = offered.strip_prefix(SUBPROTOCOL_BEARER_PREFIX) {
@@ -129,12 +127,7 @@ pub fn authorized(state: &ApiState, req: &Request) -> bool {
             .is_some_and(|v| !v.trim().is_empty())
 }
 
-/// The middleware, layered on every authenticated subtree: v2, the WebSocket, the file routes and
-/// (when it is mounted) the v1 shim.
-///
-/// `healthz`, `livez`, `robots.txt`, the identity document and the `socket.io` 501 are deliberately
-/// **outside** it: the container's `HEALTHCHECK` holds no token, and a stale Socket.IO client must
-/// get its 501 rather than a 401 it cannot act on.
+/// Authentication for v2, WebSocket and file routes. Public discovery and health stay open.
 pub async fn require(State(state): State<ApiState>, req: Request, next: Next) -> Response {
     if authorized(&state, &req) {
         return next.run(req).await;
@@ -178,10 +171,9 @@ mod tests {
             presented_tokens(&req("/", &[("authorization", "bearer t0k")])),
             ["t0k"]
         );
-        assert_eq!(
-            presented_tokens(&req("/", &[("authorization", "t0k")])),
-            ["t0k"]
-        );
+        for value in ["t0k", "Basic t0k", "Token t0k"] {
+            assert!(presented_tokens(&req("/", &[("authorization", value)])).is_empty());
+        }
         assert_eq!(
             presented_tokens(&req(
                 "/ws",

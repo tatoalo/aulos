@@ -2,14 +2,13 @@
 
 Aulos is a native Rust download server: you hand it a URL, it works out what is behind it, queues
 it, downloads it with `yt-dlp` (or StreamingCommunity, or a plugin you wrote), and tells every
-connected client what is happening while it happens. It is a **drop-in replacement** for the
-[MeTube-POT](https://github.com/tatoalo/metube_pot) Python backend — the same env var names, the
-same volumes, the same v1 HTTP routes, and a one-shot importer for the legacy JSON state — so an
-existing compose deployment can switch images and keep its history. On top of that it serves a
-versioned v2 REST + WebSocket protocol (stable ids, a snapshot plus sequenced deltas, resumable
-after a reconnect) for the Aulos iOS client, supervises the BgUtils POT sidecar, and runs
-post-completion hooks (Jellyfin refresh, NFO writing, audio sync) plus any community hook you drop
-in a directory.
+connected client what is happening while it happens. It serves the Aulos v2 REST and native
+WebSocket APIs for the iOS app and web UI, supervises the BgUtils POT sidecar, and runs
+post-completion hooks (Jellyfin refresh, NFO writing, audio sync) plus community plugins.
+
+Existing Aulos SQLite state and deployment paths continue to work. MeTube clients using the v1
+API are no longer supported. Migrating from MeTube JSON state requires the explicit
+[`import` command](#importing-legacy-metube-state) before starting the server.
 
 ## Quickstart
 
@@ -31,7 +30,7 @@ services:
       UMASK: "022"
       DOWNLOAD_DIR: /downloads
       AUDIO_DOWNLOAD_DIR: /downloads/audio
-      STATE_DIR: /downloads/.metube          # unchanged: the importer reads it on first start
+      STATE_DIR: /downloads/.metube          # stable location for the SQLite database
       TEMP_DIR: /downloads/.aulos-tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       YTDL_OPTIONS_FILE: /config/ytdl-options.json
@@ -215,10 +214,9 @@ build page.
 - **[`docs/PROTOCOL.md`](docs/PROTOCOL.md)** is the wire contract: the v2 REST surface (§4), the
   WebSocket snapshot/delta/resume model (§5), the item and group shapes, the error envelope, and
   the compatibility rules a client can rely on across versions.
-- The **v1 shim** reproduces the legacy routes (`POST add`, `GET history`, `POST delete`,
-  `POST start`, `GET version`, the subscription routes …) byte-for-byte against a captured golden
-  corpus, so an unmodified legacy client keeps working. Socket.IO is *not* emulated: `/socket.io/`
-  answers `501` rather than pretending.
+- Only Aulos v2 is supported. Legacy routes, `/version`, and `/socket.io/` return `404`.
+  Read versions from `GET api/v2/capabilities`; use `Authorization: Bearer <token>` when token
+  authentication is configured (a raw token in the Authorization header is no longer accepted).
 - `GET api/v2/catalog?url=…` tells you which provider would take a URL and what it can do with it,
   before you queue anything.
 
@@ -276,16 +274,17 @@ same one. Two notes for anyone who read the earlier cutover note or the earlier 
 
 ## Importing legacy MeTube state
 
-On a **first** start, if the SQLite database does not exist yet, Aulos imports the legacy JSON
-from `STATE_DIR` automatically (`queue.json`, `pending.json`, `completed.json`,
-`subscriptions.json`, `telegram_bot_config.json`), preserving the legacy ids so existing clients
-keep resolving their history, and writes a `.aulos-imported` marker so the next boot does not
-re-import.
+Stop the old server and back up its state before running the commands below. Normal startup
+opens and migrates Aulos SQLite only; it never imports legacy JSON automatically. If it finds
+legacy JSON beside an empty database, it stops with the explicit import command instead of
+silently presenting an empty queue.
 
-To run it by hand — to rehearse the migration, or to import into a database that already exists:
+The importer reads `queue.json`, `pending.json`, `completed.json`, `subscriptions.json`, and
+`telegram_bot_config.json`. It preserves history and subscription data, records the report in
+SQLite, and writes `.aulos-imported`. Existing Aulos databases need no manual import.
 
 ```sh
-# Rehearse: import into an in-memory DB and print the report, writing nothing.
+# Rehearse in a temporary database; leave the destination and legacy files unchanged.
 docker compose run --rm aulos import \
   --state-dir /downloads/.metube --db /downloads/.metube/aulos.db --dry-run
 
@@ -418,7 +417,7 @@ CI builds the image and smokes it offline instead; the one network check there i
 
 The suite asserts the things only a container can be asked: the `healthz` roll-up with the POT sidecar
 supervised, `202`-before-extraction, the WebSocket sequence, `PUID`/`PGID`/`UMASK` on the produced
-file, `Range` requests on the file routes, the v1 shim, a restart mid-download resuming rather than
+file, `Range` requests on the file routes, retired-route rejection, a restart mid-download resuming rather than
 stranding the item, a clean `docker logs` ERROR sweep, and a second profile that imports a real
 legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `AULOS_E2E_PORT`, `AULOS_E2E_PLATFORM`,
 `AULOS_E2E_KEEP`.
@@ -433,7 +432,7 @@ legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `A
 | `crates/aulos-provider-ytdlp` | yt-dlp provider and its Python shim |
 | `crates/aulos-provider-sc` | StreamingCommunity provider |
 | `crates/aulos-queue` | Scheduler, slots, resolution pool, cancellation, realtime aggregator |
-| `crates/aulos-api` | axum: v2 REST + WebSocket, v1 shim, health, file serving, the embedded web UI |
+| `crates/aulos-api` | axum: v2 REST + WebSocket, health, file serving, the embedded web UI |
 | `crates/aulos-api/web` | The shipped page itself — HTML, CSS, one ES module, two icons, the manifest |
 | `crates/aulos-telegram` | teloxide bot |
 | `crates/aulos-subscriptions` | Subscription manager and scheduler |

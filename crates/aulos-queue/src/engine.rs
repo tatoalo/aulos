@@ -17,14 +17,13 @@ use aulos_core::{
 };
 use aulos_provider::{MediaEntry, Outcome, ProgressSinkFactory, Provider, ProviderId, Registry};
 use aulos_store::{Durability, Store, StoreError, WriteOp};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::cmd::{
-    ENGINE_CHANNEL_CAPACITY, EngineCmd, EngineHandle, HookWrite, ResolveReport, SHUTDOWN_MSG,
-    ShutdownReport,
+    ENGINE_CHANNEL_CAPACITY, EngineCmd, EngineHandle, HookWrite, SHUTDOWN_MSG, ShutdownReport,
 };
 use crate::groups::{DRIFT_RECOMPUTE_MS, GroupAcc};
 use crate::priority::Priority;
@@ -105,13 +104,6 @@ pub(crate) struct Expansion {
     pub(crate) first_batch: bool,
 }
 
-/// One outstanding [`EngineCmd::WaitResolved`] (DESIGN §11.2).
-pub(crate) struct PendingWait {
-    pub(crate) order: Vec<ItemId>,
-    pub(crate) reports: HashMap<ItemId, ResolveReport>,
-    pub(crate) ack: oneshot::Sender<Vec<ResolveReport>>,
-}
-
 /// An item whose terminal write is waiting on its pre-terminal hooks (DESIGN §13).
 pub(crate) struct PendingHooks {
     pub(crate) outcome: Box<Outcome>,
@@ -163,7 +155,6 @@ pub struct Engine {
     /// Bumped by [`crate::CancelScope::All`] only, and compared against the epoch a resolution or
     /// an expansion was started under to drop work a blanket cancel has already condemned.
     pub(crate) cancel_epoch: u64,
-    pub(crate) waits: Vec<PendingWait>,
     pub(crate) pending_hooks: HashMap<ItemId, PendingHooks>,
     /// Items whose `size` a hook has rewritten through the port, so the terminal write keeps the
     /// hook's value instead of the provider's (DESIGN §13.3).
@@ -235,7 +226,6 @@ impl Engine {
             dedupe: HashMap::new(),
             add_generation: 0,
             cancel_epoch: 0,
-            waits: Vec::new(),
             pending_hooks: HashMap::new(),
             hook_sized: std::collections::HashSet::new(),
             retries: Vec::new(),
@@ -441,7 +431,6 @@ impl Engine {
                 source,
                 ack,
             } => self.handle_add(requests, source, ack).await,
-            EngineCmd::WaitResolved { ids, ack } => self.handle_wait_resolved(ids, ack),
             EngineCmd::Start { ids, ack } => {
                 let r = self.handle_start(ids).await;
                 let _ = ack.send(r);
@@ -1184,9 +1173,7 @@ impl Engine {
     ///
     /// `error` and `canceled` clear it too, and for the same reason: `"MoveFiles…"` is no more a
     /// reason for a failure than it is for a success. The reason lives in `error`, which is
-    /// structured on v2 and which the v1 shim projects back into `msg` for legacy clients
-    /// (`aulos_api::v1::history`'s `(Status::Error, _, Some(text))` arm), so nothing that ever
-    /// showed a human a failure message loses one.
+    /// structured on the v2 wire.
     ///
     /// A terminal *note* that is not a live line — the importer's "unknown legacy status", which
     /// bypasses this path entirely — is still allowed on `error` and `canceled`. `finished` is the
@@ -1232,94 +1219,6 @@ impl Engine {
         }
         self.patch(id, |i| i.clear_after = Some(at));
         self.next_clear_at = Some(self.next_clear_at.map_or(at, |cur| cur.min(at)));
-    }
-
-    // -----------------------------------------------------------------------
-    // WaitResolved
-    // -----------------------------------------------------------------------
-
-    /// Answers immediately for every id already out of `resolving`, and parks the rest
-    /// (DESIGN §11.2).
-    fn handle_wait_resolved(&mut self, ids: Vec<ItemId>, ack: oneshot::Sender<Vec<ResolveReport>>) {
-        let mut wait = PendingWait {
-            order: ids,
-            reports: HashMap::new(),
-            ack,
-        };
-        for id in wait.order.clone() {
-            if let Some(report) = self.settled_report(id) {
-                wait.reports.insert(id, report);
-            }
-        }
-        if wait.reports.len() == wait.order.len() {
-            let reports = collect_reports(&wait);
-            let _ = wait.ack.send(reports);
-            return;
-        }
-        self.waits.push(wait);
-    }
-
-    /// The report for an id that is no longer resolving, or `None` while it still is.
-    fn settled_report(&self, id: ItemId) -> Option<ResolveReport> {
-        if self.resolving.contains_key(&id) {
-            return None;
-        }
-        let Some(item) = self.items.get(&id) else {
-            // Unknown ids are reported as gone rather than waited on forever.
-            return Some(ResolveReport {
-                id,
-                kind: Kind::Item,
-                outcome: Err(aulos_core::WireError::new(
-                    aulos_core::ErrorCode::NotFound,
-                    "item not found",
-                )),
-            });
-        };
-        if item.status == Status::Resolving {
-            return None;
-        }
-        Some(ResolveReport {
-            id,
-            kind: item.kind,
-            outcome: match (item.status, item.error.clone()) {
-                (Status::Error, Some(e)) => Err(e),
-                (Status::Error, None) => Err(aulos_core::WireError::new(
-                    aulos_core::ErrorCode::Internal,
-                    "resolution failed",
-                )),
-                _ => Ok(()),
-            },
-        })
-    }
-
-    /// Notifies every waiter that `id` has left `resolving` (DESIGN §11.2).
-    ///
-    /// A caller that dropped its receiver is pruned here, so a waiter cannot leak.
-    pub(crate) fn notify_resolved(&mut self, id: ItemId) {
-        let Some(report) = self.settled_report(id) else {
-            return;
-        };
-        let mut done = Vec::new();
-        for (i, wait) in self.waits.iter_mut().enumerate() {
-            if wait.ack.is_closed() {
-                done.push(i);
-                continue;
-            }
-            if !wait.order.contains(&id) {
-                continue;
-            }
-            wait.reports.insert(id, report.clone());
-            if wait.reports.len() == wait.order.len() {
-                done.push(i);
-            }
-        }
-        for i in done.into_iter().rev() {
-            let wait = self.waits.swap_remove(i);
-            if !wait.ack.is_closed() {
-                let reports = collect_reports(&wait);
-                let _ = wait.ack.send(reports);
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -1379,14 +1278,6 @@ pub(crate) struct SelectedProvider {
     pub(crate) own_slots: Option<usize>,
     /// `Some(reason)` when the provider is in `ProviderState::Degraded`.
     pub(crate) degraded: Option<Box<str>>,
-}
-
-/// One waiter's reports, in the order the ids were requested.
-fn collect_reports(wait: &PendingWait) -> Vec<ResolveReport> {
-    wait.order
-        .iter()
-        .filter_map(|id| wait.reports.get(id).cloned())
-        .collect()
 }
 
 /// The hops one status write has to take to be legal at every step (DESIGN §4.2).

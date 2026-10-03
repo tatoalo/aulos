@@ -4,16 +4,22 @@ This is the ground truth the design and implementation agents must work within. 
 brief is silent, the design docs decide. Where the design docs conflict with this brief, this
 brief wins.
 
-## Goal
+## October 2026 retirement decision
+
+Aulos serves v2 clients only. The v1 cutover and automatic-import requirements in historical
+design and work-package notes are superseded by decisions 2 and 8 below. Existing Aulos data
+and deployment identities remain compatible. `PROTOCOL.md` describes the current wire surface.
+
+## Original goal
 
 Re-implement the MeTube-POT fork's backend (queue, subscriptions, Telegram bot, Jellyfin sync,
 StreamingCommunity support, BgUtils POT support) as a native Rust service that is a drop-in
 replacement on the existing VPS docker-compose (same env var names, same volumes), while
 feeling dramatically snappier for the iOS client (`~/Development/metube_ios`, app "Aulos").
 
-Reference material (read these first):
+Historical reference material:
 - `docs/reference/legacy-backend-spec.md` — exhaustive spec of the Python backend being replaced.
-- `docs/reference/ios-client-reference.md` — exhaustive spec of the iOS client, its protocol use,
+- `docs/archive/ios-client-reference.md` — exhaustive spec of the iOS client, its protocol use,
   and the list of backend changes that would make it snappy (section 7).
 - The legacy source lives at `/Users/apogliaghi/Development/metube_pot` (read-only reference).
 
@@ -25,7 +31,7 @@ Reference material (read these first):
    actor/handle. No whole-file JSON rewrites. Transient progress fields live only in memory.
    Provide a one-shot importer for the legacy `queue.json` / `pending.json` / `completed.json`
    / `subscriptions.json` / `telegram_bot_config.json` (schema_version 2) files found in
-   `STATE_DIR`, run automatically on first start when the SQLite DB does not exist yet.
+   `STATE_DIR`, available only through the explicit `aulos-server import` command.
 3. **Realtime protocol v2**: native WebSocket (axum `ws`) at `<URL_PREFIX>ws`. JSON envelope
    `{ "t": "<type>", "seq": <u64>, ... }`. On connect: one `snapshot` (same item shape as REST).
    Then `delta` frames batched at a fixed cadence (default 250 ms, configurable) carrying only
@@ -46,13 +52,9 @@ Reference material (read these first):
 7. **Honest HTTP**: JSON error envelope `{"error": {"code": "...", "message": "..."}}`, 4xx for
    client errors, 401 for auth failures (never a redirect), 202/200/204 for success.
    `Content-Type: application/json` everywhere.
-8. **v1 compatibility shim** (so the existing iOS build, the README bookmarklet and the iOS
-   Shortcut keep working during cutover): `POST <prefix>add`, `GET <prefix>history`,
-   `POST <prefix>delete`, `POST <prefix>start`, `GET <prefix>version`, `POST <prefix>subscribe`,
-   `GET <prefix>subscriptions`, `POST <prefix>subscriptions/{update,delete,check}` with the legacy
-   request/response shapes and the legacy status names (`pending`/`downloading`/`finished`/`error`).
-   The v1 shim is a thin translation layer over the v2 core. Socket.IO is *not* provided; the
-   Angular UI is not a target.
+8. **Aulos v2 only**: retire the MeTube v1 HTTP routes, `/version`, Socket.IO tombstone,
+   compatibility flags, and raw Authorization-token syntax. Preserve existing SQLite data,
+   stable deployment paths, and the explicit legacy JSON importer.
 9. **Provider (plugin) system**: a `Provider` trait in a `aulos-provider` crate:
    `id()`, `matches(&Url) -> Match` (score), `resolve(url, opts) -> Vec<MediaEntry>`,
    `download(entry, request, ProgressSink, CancellationToken) -> Result<Outcome>`.
@@ -176,7 +178,7 @@ aulos_server/
     aulos-provider-ytdlp/    # yt-dlp provider (+ python/ytdlp_runner.py)
     aulos-provider-sc/       # StreamingCommunity provider
     aulos-queue/             # scheduler, slots, resolution pool, cancellation, hooks dispatch
-    aulos-api/               # axum: v2 REST + WS, v1 shim, healthz, static file serving of downloads
+    aulos-api/               # axum: v2 REST + WS, healthz, static file serving of downloads
     aulos-telegram/          # teloxide bot
     aulos-subscriptions/     # subscription manager + scheduler
     aulos-hooks/             # jellyfin, nfo, audio-sync

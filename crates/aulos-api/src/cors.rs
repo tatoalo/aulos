@@ -1,12 +1,9 @@
-//! CORS: legacy origin reflection, and the methods v2 needs (DESIGN §11.6, §16.6).
+//! CORS for the v2 API (DESIGN §16.6).
 //!
 //! `CORS_ALLOWED_ORIGINS` keeps its legacy meaning — empty sends no header at all, `*` reflects
 //! any origin, otherwise only the listed origins are reflected. Credentials are **never** granted,
 //! which together with "every mutating v2 route requires `Content-Type: application/json`" is what
 //! keeps a cross-origin form POST out of the queue (DESIGN §16.6).
-//!
-//! The one difference between the two surfaces is the method list: v1 answered `OPTIONS` with the
-//! two verbs legacy used, while v2 has `PATCH` and `DELETE` routes and must advertise them.
 
 use aulos_core::CorsOrigins;
 use axum::http::{HeaderName, HeaderValue, Method, header};
@@ -42,9 +39,6 @@ const V2_METHODS: [Method; 6] = [
     Method::OPTIONS,
 ];
 
-/// The legacy method set: v1 is `GET` and `POST` only.
-const V1_METHODS: [Method; 4] = [Method::GET, Method::HEAD, Method::POST, Method::OPTIONS];
-
 /// How the configured origins map onto `Access-Control-Allow-Origin`.
 fn allow_origin(origins: &CorsOrigins) -> Option<AllowOrigin> {
     match origins {
@@ -72,18 +66,6 @@ pub fn v2(origins: &CorsOrigins) -> Option<CorsLayer> {
     )
 }
 
-/// The legacy CORS layer, for the v1 shim's routes (WP-15 layers it on its own router).
-#[must_use]
-pub fn v1(origins: &CorsOrigins) -> Option<CorsLayer> {
-    Some(
-        CorsLayer::new()
-            .allow_origin(allow_origin(origins)?)
-            .allow_methods(V1_METHODS)
-            .allow_headers(ALLOWED_HEADERS)
-            .expose_headers(EXPOSED_HEADERS),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,7 +73,6 @@ mod tests {
     #[test]
     fn an_empty_setting_installs_no_layer() {
         assert!(v2(&CorsOrigins::None).is_none());
-        assert!(v1(&CorsOrigins::None).is_none());
     }
 
     #[test]
@@ -115,6 +96,5 @@ mod tests {
         // a client that talks to `api/v2/subscriptions/{id}` from a browser needs them.
         assert!(V2_METHODS.contains(&Method::PATCH));
         assert!(V2_METHODS.contains(&Method::DELETE));
-        assert!(!V1_METHODS.contains(&Method::PATCH));
     }
 }

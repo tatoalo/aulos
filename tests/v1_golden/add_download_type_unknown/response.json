@@ -1,3 +1,0 @@
-{
-  "__text__": "400: download_type must be one of ['audio', 'captions', 'thumbnail', 'video']"
-}

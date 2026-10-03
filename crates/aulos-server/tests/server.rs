@@ -519,38 +519,39 @@ async fn a_shutdown_mid_download_exits_zero_and_the_next_boot_resumes_the_item()
     second.stop().await.unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// v1 and the removed Socket.IO
-// ---------------------------------------------------------------------------
-
-/// The v1 shim is mounted by the same wiring, and `socket.io` is honestly gone.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_v1_shim_and_the_socket_io_501_are_both_mounted() {
+async fn the_server_only_mounts_the_v2_api() {
     let root = tempfile::tempdir().unwrap();
     let rig = Rig::start(root.path(), &[], Vec::new()).await;
-
-    let added = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let added = client
         .post(rig.url("add"))
-        .header("content-type", "application/json")
-        .body(r#"{"url":"https://fake.test/watch?v=v1","quality":"best"}"#)
+        .json(&serde_json::json!({"url":"https://fake.test/watch?v=v1","quality":"best"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(added.status().as_u16(), 200, "{:?}", added.text().await);
-
-    let history = rig.get_json("history").await;
-    for key in ["queue", "pending", "done"] {
-        assert!(
-            history[key].is_array(),
-            "history.{key} must be an array: {history}"
+    assert_eq!(added.status().as_u16(), 404);
+    for route in ["history", "version", "socket.io/"] {
+        assert_eq!(
+            client
+                .get(rig.url(route))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            404
         );
     }
-
-    let socketio = reqwest::get(rig.url("socket.io/")).await.unwrap();
     assert_eq!(
-        socketio.status().as_u16(),
-        501,
-        "Socket.IO must be honestly removed, not silently broken"
+        client
+            .get(rig.url("api/v2/state"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
     );
     rig.stop().await.unwrap();
 }

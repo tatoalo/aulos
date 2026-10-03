@@ -1,6 +1,9 @@
 # Aulos Server — Definitive Architecture (DESIGN.md)
 
-Status: **binding**. This document supersedes everything in `docs/design-candidates/`.
+Status: **binding**, subject to the October 2026 retirement decisions in BRIEF.
+V1 API sections and automatic first-start import describe the completed cutover and are now
+historical; use PROTOCOL for current endpoints and README for explicit migration.
+ This document supersedes everything in `docs/archive/design-candidates/`.
 Base skeleton: the `migration` candidate. Grafted: the bounded-snapshot / durable-`seq` /
 in-place-expansion machinery from `realtime`, and the per-URL catalog / plugin-manifest /
 error-taxonomy / `last_sent`-diff machinery from `extensibility`.
@@ -3038,7 +3041,7 @@ long as it points at Aulos**, cycles `connectionStatus` `.testing` → `.error`/
 ("Connection timed out"), burns its three auto-retries and parks on the "Retry Connection" row in
 Settings — i.e. it is indistinguishable from "the server is down". `SettingsViewModel` fetches the
 version only on `connectionStatus == .connected`, so the version row goes stale as well. This is
-recorded independently in `docs/reference/ios-client-reference.md` (the `.connect` handler
+recorded independently in `docs/archive/ios-client-reference.md` (the `.connect` handler
 "then **`await fetchInitialState()`** (HTTP `GET /history`)").
 
 So the mitigation is **purely a scheduling one, and the ordering is load-bearing**: the v2 iOS

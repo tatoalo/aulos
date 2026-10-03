@@ -258,7 +258,6 @@ impl Engine {
         // then the process still has the rest of the `killpg` grace to recreate this directory and
         // write another fragment into it (DESIGN §8.7 orders the removal after the kill).
         self.cleanup_partials(id, true);
-        self.notify_resolved(id);
     }
 
     /// [`crate::EngineCmd::Retry`] (DESIGN §8.8).

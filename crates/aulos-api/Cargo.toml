@@ -35,7 +35,6 @@ arc-swap = { workspace = true }
 bytes = { workspace = true }
 mime_guess = { workspace = true, features = ["default"] }
 percent-encoding = { workspace = true }
-serde_with = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }

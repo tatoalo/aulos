@@ -142,9 +142,7 @@ const TABLE: [(&str, Option<&[&str]>); 13] = [
             // fewer, so both stay listed for the day §16.7 comes back.
             "metrics",
             "metrics-exporter-prometheus",
-            // Amendment (WP-01): `serde_with` serialises the v1 shim's legacy field shapes.
             // §18.6 budgets for it; the §3 row omits it. See docs/INTEGRATION-NOTES.md, WP-03.
-            "serde_with",
         ]),
     ),
     (

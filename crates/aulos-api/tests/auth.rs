@@ -41,6 +41,15 @@ async fn a_configured_token_is_required_and_compared_exactly() {
             .unwrap();
         assert_eq!(response.status().as_u16(), 200);
 
+        let raw = rig
+            .http
+            .get(rig.url("api/v2/state"))
+            .header("authorization", "s3cret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(raw.status().as_u16(), 401);
+
         let response = rig
             .http
             .get(rig.url("api/v2/state"))

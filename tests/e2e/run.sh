@@ -9,11 +9,11 @@
 #   3. the WebSocket carries `added -> delta -> completed` for that id
 #   4. the produced file is in the volume with the entrypoint's PUID/PGID/UMASK applied, and
 #      `GET download/<name>` honours `Range`
-#   5. the v1 shim's `POST add` works and `GET history` has all three keys
-#   6. `socket.io` answers 501 rather than pretending
+#   5. retired v1 routes return 404
+#   6. `socket.io` returns 404
 #   7. a restart mid-download resumes rather than stranding the item
 #   8. `docker logs` contains no ERROR
-#   9. a second profile seeds a legacy STATE_DIR and asserts the import report has zero errors,
+#   9. a second profile explicitly imports a legacy STATE_DIR and asserts zero errors,
 #      does not re-import on the next boot, runs with CHOWN_DIRS=false and UMASK=077, and hands
 #      every root it created (including a split AUDIO_DOWNLOAD_DIR) to PUID:PGID
 #
@@ -313,10 +313,6 @@ term_msg="$(printf '%s' "$item" | jget msg)"
 [ -z "$term_msg" ] \
   && ok "the finished row carries msg=null" \
   || fail "the finished row still carries msg=${term_msg}"
-v1_msg="$(req "${BASE}/history" | jget done.0.msg)"
-[ -z "$v1_msg" ] \
-  && ok "v1 history: done[0].msg is null" \
-  || fail "v1 history: done[0].msg=${v1_msg}"
 # `healthz` is rate-limited and answers a cached component set when polled again too soon (the
 # suite called it a moment ago), and the hooks run after the terminal write — so poll for a while.
 nfo_runs=0
@@ -348,25 +344,15 @@ printf '%s' "$range_head" | grep -qi '^content-range: bytes 0-99/' \
   && ok "Content-Range is present" \
   || fail "Content-Range is missing"
 
-# --- 5. the v1 shim ---------------------------------------------------------------------------
+# --- 5. retired routes -----------------------------------------------------------------------
 
-log "the v1 shim"
-v1_code="$(code -X POST "${BASE}/add" -H 'content-type: application/json' \
-  -d "{\"url\":\"${VIDEO}\",\"quality\":\"worst\",\"format\":\"mp4\"}")"
-[ "$v1_code" = "200" ] && ok "POST add → 200" || fail "POST add → $v1_code"
-
-history="$(req "${BASE}/history")"
-for key in queue pending "done"; do
-  printf '%s' "$history" | python3 -c "
-import json,sys
-doc = json.load(sys.stdin)
-assert '$key' in doc, 'history has no $key'
-assert isinstance(doc['$key'], list), '$key is not an array'
-" || fail "history.$key"
+log "retired routes"
+[ "$(code -X POST "${BASE}/add" -H 'content-type: application/json' -d '{}')" = "404" ] \
+  && ok "POST add → 404" || fail "POST add is still mounted"
+for route in history version; do
+  [ "$(code "${BASE}/${route}")" = "404" ] \
+    && ok "GET ${route} → 404" || fail "GET ${route} is still mounted"
 done
-ok "GET history carries queue, pending and done"
-
-[ "$(code "${BASE}/version")" = "200" ] && ok "GET version → 200" || fail "GET version"
 
 # The web UI (DESIGN §24): a browser gets the page, everything else keeps the identity document.
 ui_hdrs="$(curl -sS -D - -o /dev/null --max-time 30 -H 'Accept: text/html' "${BASE}/")"
@@ -386,7 +372,7 @@ printf '%s' "$ui_hdrs" | grep -qi '^content-security-policy: ' \
 
 log "socket.io"
 sio="$(code "${BASE}/socket.io/")"
-[ "$sio" = "501" ] && ok "socket.io/ → 501" || fail "socket.io/ → $sio (want 501)"
+[ "$sio" = "404" ] && ok "socket.io/ → 404" || fail "socket.io/ → $sio (want 404)"
 
 # --- 7. a restart mid-download resumes ---------------------------------------------------------
 
@@ -468,6 +454,13 @@ FIXTURE="${ROOT}/crates/aulos-store/tests/fixtures/state/v2"
 cp "${FIXTURE}"/*.json "${SEED}/.metube/"
 ok "seeded $(ls "${SEED}/.metube" | tr '\n' ' ')"
 
+docker run --rm ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
+  -v "${SEED}:/downloads" \
+  -e PUID="$(id -u)" -e PGID="$(id -g)" -e CHOWN_DIRS=false -e UMASK=077 \
+  -e AUDIO_DOWNLOAD_DIR=/downloads/audio \
+  "$IMAGE" import --state-dir /downloads/.metube --db /downloads/.metube/aulos.db \
+  || die "explicit legacy import failed"
+
 docker run -d --name "$NAME" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
   -p "127.0.0.1:${PORT}:8081" \
   -v "${SEED}:/downloads" \
@@ -492,18 +485,11 @@ else
   fail "the import report has errors: $errors"
 fi
 
-# The v1 `id` of an imported row is the provider's `media_id`, which is what the legacy client
-# keys its list by (DESIGN §11.4). These two come straight out of the fixture.
-seeded="$(req "${BASE}/history" | python3 -c '
-import json,sys
-doc = json.load(sys.stdin)
-ids = [row.get("id") for key in ("queue","pending","done") for row in doc.get(key, [])]
-print(",".join(str(i) for i in ids))
-')"
+seeded="$(req "${BASE}/api/v2/state")"
 for want in dQw4w9WgXcQ aBcDeF12345; do
   printf '%s' "$seeded" | grep -q "$want" \
-    && ok "the legacy row ${want} was imported with its id preserved" \
-    || fail "${want} is missing from history: $seeded"
+    && ok "the imported row ${want} is visible through v2" \
+    || fail "${want} is missing from v2 state"
 done
 
 [ -f "${SEED}/.metube/.aulos-imported" ] \

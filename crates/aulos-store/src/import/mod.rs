@@ -26,8 +26,7 @@
 //! collection empty**, and refusing to boot forever where the old server kept serving would be a
 //! strictly worse operational property (DESIGN §7.6.1, §19.4).
 
-pub(crate) mod canonical;
-mod chats;
+pub(crate) mod chats;
 mod items;
 pub(crate) mod legacy_model;
 mod report;
@@ -48,7 +47,7 @@ use crate::import::subs::SubOpts;
 use crate::ops::{Durability, WriteOp};
 use crate::{Store, meta};
 
-pub use crate::import::canonical::{canonical_key, normalize_url};
+pub use crate::canonical::{canonical_key, normalize_url};
 pub use crate::import::report::{
     FileReport, ImportError, ImportErrorCode, ImportReport, REPORTED_STATUSES, Warning, WarningCode,
 };
@@ -59,11 +58,7 @@ pub use crate::import::report::{
 /// re-import stale JSON. `--force` overrides it.
 pub const MARKER_FILE: &str = ".aulos-imported";
 
-/// `cookies.txt` in `STATE_DIR`, registered as the `cookiefile` runtime override (DESIGN §17.2).
-pub const COOKIES_FILE: &str = "cookies.txt";
-
-/// The `kv` key the cookie file is registered under.
-pub const COOKIEFILE_KEY: &str = "cookiefile";
+pub use aulos_core::ytdl_options::{COOKIEFILE_KEY, COOKIES_FILE};
 
 /// What a **file** error does (`AULOS_IMPORT_ON_ERROR`, DESIGN §7.6.1).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]

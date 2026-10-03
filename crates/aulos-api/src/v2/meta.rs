@@ -1,7 +1,6 @@
 //! Discovery, options and the small top-level routes: `capabilities`, `catalog`, `presets`,
 //! `providers`, `plugins/reload`, `resolve-preview`, `custom-dirs`, `import-report`,
-//! `ytdl-options[/reload]`, `debug/options`, plus `GET <p>`, `version`, `robots.txt`, the
-//! `socket.io` 501 and the CUT `metrics` route (PROTOCOL §4.5–§4.7, §1.6).
+//! `ytdl-options[/reload]`, `debug/options`, plus `GET <p>` and `robots.txt` (PROTOCOL §4.5–§4.7).
 //!
 //! Everything here is a projection of state something else owns — the registry, the config, the
 //! live `YTDL_OPTIONS` snapshot, the health registry — which is why the two ETag-able payloads can
@@ -13,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use aulos_core::{
-    Choice, ComponentStatus, Config, DownloadType, ErrorCode, FormatCatalog, NamingPolicy,
-    OptionSpec, ProviderId, ReloadReport, YtdlOptions,
+    Choice, ComponentStatus, Config, ErrorCode, NamingPolicy, OptionSpec, ProviderId, ReloadReport,
+    YtdlOptions,
 };
 use aulos_provider::{Match, MatchReason, ProviderState, Registry};
 use aulos_queue::{Action, FrameKind};
@@ -89,16 +88,6 @@ pub async fn identity(State(state): State<ApiState>) -> Json<Value> {
     }))
 }
 
-/// `GET <p>version` — the legacy shape plus two additive keys (PROTOCOL §4.7, §10.1).
-pub async fn version(State(state): State<ApiState>) -> Json<Value> {
-    Json(json!({
-        "version": state.info.version,
-        "yt-dlp": state.info.yt_dlp,
-        "url_prefix": state.cfg.url_prefix,
-        "protocol": "v2",
-    }))
-}
-
 /// `GET <p>robots.txt` — the configured file, or the default that disallows everything.
 pub async fn robots(State(state): State<ApiState>) -> Response {
     let body = match &state.cfg.robots_txt {
@@ -111,24 +100,8 @@ pub async fn robots(State(state): State<ApiState>) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }
 
-/// What `robots.txt` says with nothing configured.
-///
-/// DESIGN §11.7 pins this body to the byte — three `\n`-terminated lines, no trailing blank one —
-/// and it is defined once, in [`crate::v1::legacy::ROBOTS_TXT`], because the shim's golden replay
-/// compares against it (WP-15).
 fn default_robots() -> String {
-    crate::v1::legacy::ROBOTS_TXT.to_owned()
-}
-
-/// `GET <p>socket.io/*` — the one 501 in the taxonomy (DESIGN §11.1).
-pub async fn socketio_removed(State(state): State<ApiState>) -> ApiError {
-    let prefix = state.cfg.url_prefix.as_str();
-    ApiError::of(
-        ErrorCode::SocketioRemoved,
-        format!(
-            "Socket.IO is not supported; use {prefix}ws (protocol v2) or GET {prefix}api/v2/state"
-        ),
-    )
+    "User-agent: *\nDisallow: /download/\nDisallow: /audio_download/\n".to_owned()
 }
 
 /// `GET <p>metrics` — **v1.0: not implemented, see BRIEF.**
@@ -187,8 +160,6 @@ pub fn capabilities_body(state: &ApiState) -> Value {
         "boot_id": state.hub.boot_id(),
         "protocol": {
             "v2": true,
-            "v1_shim": state.cfg.v1_enabled,
-            "socketio": false,
             "ws_path": "ws",
             "ws_subprotocol": crate::WS_SUBPROTOCOL,
             "batch_ms": state.cfg.ws_batch_ms,
@@ -899,28 +870,10 @@ pub async fn probe_providers(
     out
 }
 
-/// The catalog of the provider that would be selected for `url`, for the v1 shim and the bot.
-#[must_use]
-pub fn catalog_for(state: &ApiState, url: &url::Url) -> Option<Arc<FormatCatalog>> {
-    let registry = read_registry(state);
-    registry.catalog_for(url).map(|(_, catalog, _)| catalog)
-}
-
-/// The download type ids a catalog advertises, for a caller that wants to validate one.
-#[must_use]
-pub fn download_type_ids(catalog: &FormatCatalog) -> Vec<&str> {
-    catalog.download_types.iter().map(|d| &*d.id).collect()
-}
-
-/// `DownloadType` from a wire string, for the v1 shim.
-#[must_use]
-pub fn download_type(raw: &str) -> Option<DownloadType> {
-    DownloadType::from_str_exact(raw)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aulos_core::DownloadType;
 
     #[test]
     fn the_advertised_vocabularies_are_the_protocol_order() {
