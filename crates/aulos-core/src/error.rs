@@ -216,7 +216,7 @@ impl fmt::Display for ErrorCode {
 /// PROTOCOL §1.5, §2.3). That is why `field` is a member here and not of the envelope alone: one
 /// Rust struct and one Swift struct decode both surfaces.
 ///
-/// No `skip_serializing_if` anywhere: all five keys are always present, `None` as `null`.
+/// The five base keys are always present, `None` as `null`; retry timing is additive.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct WireError {
     /// The closed taxonomy code.
@@ -229,6 +229,9 @@ pub struct WireError {
     pub provider: Option<Arc<str>>,
     /// The provider's own error class, e.g. `"ExtractorError"`.
     pub provider_code: Option<Arc<str>>,
+    /// Earliest automatic recheck, in Unix milliseconds, when the source is not ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<crate::UnixMs>,
 }
 
 impl WireError {
@@ -241,6 +244,7 @@ impl WireError {
             field: None,
             provider: None,
             provider_code: None,
+            retry_at: None,
         }
     }
 
@@ -257,6 +261,7 @@ impl WireError {
             field: Some(field.into()),
             provider: None,
             provider_code: None,
+            retry_at: None,
         }
     }
 
@@ -269,6 +274,13 @@ impl WireError {
     ) -> Self {
         self.provider = Some(provider.into());
         self.provider_code = provider_code;
+        self
+    }
+
+    /// Attaches the earliest automatic recheck time.
+    #[must_use]
+    pub fn with_retry_at(mut self, at: Option<crate::UnixMs>) -> Self {
+        self.retry_at = at;
         self
     }
 

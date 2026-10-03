@@ -162,6 +162,7 @@ Every non-2xx response, without exception, has this exact shape:
 | `field` | string \| null | the offending request field, when there is one |
 | `provider` | string \| null | e.g. `"ytdlp"`, when a provider produced the error |
 | `provider_code` | string \| null | the provider's own code, e.g. `"ExtractorError"`, for diagnostics only |
+| `retry_at` | integer, optional | earliest automatic recheck in Unix milliseconds for `not_yet_live`; omitted when unknown |
 | `request_id` | string | matches the `X-Request-Id` header |
 
 The **same object** appears as an `Item`'s `error` field, minus `request_id`, so you need only one
@@ -203,7 +204,7 @@ Item-terminal errors (these appear in `Item.error`, never as an HTTP status):
 | `bot_check` | YouTube bot check; the POT sidecar is probably unhealthy | no — check `healthz` |
 | `geo_restricted` | not available in this region | no |
 | `unavailable` | removed, deleted, or the account was terminated — including a plain `404`/`410` on the media or its page | no |
-| `not_yet_live` | an upcoming stream. Usually you meet this code on a **`queued`** item rather than a failed one (§2.3) — the server keeps such an item parked and unscheduled, and its subscription re-queues it when the stream starts | later, and the server may do it for you |
+| `not_yet_live` | an upcoming or unfinished stream. Subscription items remain **`queued`** (§2.3): a known future release waits until its announced time; live, processing, overdue, or unknown-time releases recheck every 15 minutes without spending failure retries. `retry_at` persists the next check across restarts | later, and the server may do it for you |
 | `no_format` | the requested format is not available for this item | change the selection |
 | `network` | transport error, HTTP 5xx, or a timeout — a page or API fetch that failed for any reason other than one of the codes above it in this table lands here | **yes**, and the server already retried |
 | `throttled` | HTTP 429 | **yes**, later |
@@ -413,7 +414,7 @@ present and may be `null`. **No key is ever absent.**
 | `phase` | `string \| null` | a finer-grained, purely cosmetic label: `"video"`, `"audio"`, `"fragment"`, `"remux"`, `"audio_sync"`, or a provider-specific string. Do not switch on it. |
 | `phase_percent` | `number \| null` | progress **of the current postprocessing phase**, `0.0…100.0`. Independent of `percent`. When `status == "postprocessing"` and this is non-null, render it as a secondary bar. |
 | `msg` | `string \| null` | a short **live** status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`, `"Paused"`, `"Retrying in 30s"`. Already cleaned. It describes what is happening *now*, so **no terminal status ever carries a live line**: the server clears it at the terminal write. It is **always `null` when `status == "finished"`**, on every writer — the engine, a group's roll-up, the legacy importer and the schema migration that backfilled the rows an older build wrote. On `error` and `canceled` it is `null` too, unless something set an explicit terminal *note* that was never a progress line (the legacy importer writes one for a record whose status it could not map); the reason itself is in `error`, and the v1 shim projects `error.message` back into v1's overloaded `msg`. The clear arrives as an explicit `null` in the `delta`/`completed` frame, per §5.4. |
-| `error` | `WireError \| null` | `{ code, message, field, provider, provider_code }` — the §1.5 object without `request_id`. Non-null when `status == "error"`, optionally when `canceled`, **and also on a `queued` item that has a pre-download problem** — an upcoming livestream, where `error.code == "not_yet_live"` and `error.message` is the scheduled-start text. That last case is not a failure: the item exists, is not scheduled, and starts when the user presses start (or when its subscription notices the stream went live). Render it as a queued row with an explanatory subtitle, not as a failure. |
+| `error` | `WireError \| null` | `{ code, message, field, provider, provider_code }`, plus optional `retry_at` — the §1.5 object without `request_id`. Non-null when `status == "error"`, optionally when `canceled`, **and also on a `queued` item that has a pre-download problem** — an upcoming livestream, where `error.code == "not_yet_live"` and `error.message` is the scheduled-start text. That last case is not a failure. Subscription items with `auto_start: true` wait until the optional `retry_at` deadline; `auto_start: false` remains paused. The WebUI puts automatic waits in Scheduled and shows the next check in the browser's local time. |
 | `filename` | `string \| null` | the produced file, **relative** to its download root. `null` until known. The key always exists. |
 | `size` | `integer \| null` | bytes on disk |
 | `download_url` | `string \| null` | a ready-to-open, percent-encoded URL. `null` until the file exists. Audio items use the audio root automatically. **It is usually relative to `<p>` (e.g. `"download/My%20Video.mp4"`) but may be absolute** (e.g. `"https://cdn.example/My%20Video.mp4"`), because the operator can point the server's public file prefix at a CDN. The resolution rule is one line and covers both: **if the value parses as an absolute URL — it has a scheme — open it as-is; otherwise resolve it against your base URL plus `<p>`.** Never concatenate unconditionally. |
@@ -523,7 +524,7 @@ Exactly these eight strings ever appear in `status`, on items and on groups alik
 
 | Value | Meaning |
 |---|---|
-| `queued` | accepted, not started. `auto_start == true` ⇒ waiting for a slot. `auto_start == false` ⇒ waiting for the user: either it was added with `auto_start: false`, or it was **paused**, or it has a pre-download problem (`error.code == "not_yet_live"`). |
+| `queued` | accepted, not started. `auto_start == true` ⇒ waiting for a slot or a `not_yet_live` recheck deadline. `auto_start == false` ⇒ waiting for the user: either it was added with `auto_start: false`, or it was **paused**, or it has a pre-download problem (`error.code == "not_yet_live"`). |
 | `resolving` | metadata extraction is running. The item may become a group. |
 | `preparing` | the download process has been spawned but has produced no progress yet |
 | `downloading` | bytes are moving |

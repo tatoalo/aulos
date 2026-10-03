@@ -797,7 +797,7 @@ def test_premieres_wait_for_the_recording():
         media = os.path.join(tmp, "clip.mp4")
         for status in ("is_upcoming", "is_live", "post_live", "was_live", "not_live"):
             scenario = scenario_file(tmp, {
-                "extract": {"id": "premiere", "title": "Premiere", "live_status": status},
+                "extract": {"id": "premiere", "title": "Premiere", "live_status": status, "release_timestamp": 1791036000},
                 "write_files": [media],
             })
             code, frames, _, _ = run_job({
@@ -809,6 +809,8 @@ def test_premieres_wait_for_the_recording():
             check(os.path.exists(media) != waiting, f"{status}: no broadcast was downloaded")
             if waiting:
                 check(frames[-2].get("code") == "not_yet_live", f"{status}: classified as waiting")
+                expected = 1791036000000 if status == "is_upcoming" else None
+                check(frames[-2].get("retry_at") == expected, f"{status}: only upcoming releases carry a deadline")
             if os.path.exists(media):
                 os.remove(media)
 

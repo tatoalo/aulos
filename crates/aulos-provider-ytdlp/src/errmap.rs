@@ -57,7 +57,10 @@ pub fn to_provider_error(code: &str, message: &str) -> ProviderError {
         "auth_required" => ProviderError::AuthRequired(owned()),
         "geo_restricted" => ProviderError::GeoRestricted(owned()),
         "unavailable" => ProviderError::Unavailable(owned()),
-        "not_yet_live" => ProviderError::NotYetLive(owned()),
+        "not_yet_live" => ProviderError::NotYetLive {
+            message: owned(),
+            retry_at: None,
+        },
         "no_format" => ProviderError::NoFormat(owned()),
         "bot_check" => ProviderError::BotCheck(owned()),
         "network" => ProviderError::Network(owned()),
@@ -84,7 +87,11 @@ pub fn from_frame(frame: &ErrorFrame) -> ProviderError {
     } else {
         frame.message.clone()
     };
-    to_provider_error(&frame.code, &message)
+    let mut error = to_provider_error(&frame.code, &message);
+    if let ProviderError::NotYetLive { retry_at, .. } = &mut error {
+        *retry_at = frame.retry_at;
+    }
+    error
 }
 
 #[cfg(test)]
@@ -164,6 +171,7 @@ mod tests {
     #[test]
     fn a_message_less_frame_falls_back_to_its_code() {
         let frame = ErrorFrame {
+            retry_at: None,
             code: "canceled".to_owned(),
             message: "   ".to_owned(),
             retryable: false,
@@ -176,6 +184,7 @@ mod tests {
         assert!(matches!(e, ProviderError::Canceled));
 
         let frame = ErrorFrame {
+            retry_at: None,
             code: "unavailable".to_owned(),
             message: String::new(),
             retryable: false,
@@ -191,5 +200,24 @@ mod tests {
     fn a_message_the_shim_already_cleaned_is_not_mangled_again() {
         let e = to_provider_error("bot_check", "Sign in to confirm you're not a bot");
         assert_eq!(e.message(), "Sign in to confirm you're not a bot");
+    }
+
+    #[test]
+    fn an_upcoming_release_deadline_reaches_the_persisted_wire_error() {
+        let frame: ErrorFrame = serde_json::from_value(serde_json::json!({
+            "code": "not_yet_live", "message": "Premieres soon", "retry_at": 1791036000000_i64
+        }))
+        .unwrap();
+        let provider = aulos_core::ProviderId::parse("ytdlp").unwrap();
+        let wire = from_frame(&frame).to_wire(&provider, None);
+        assert_eq!(wire.retry_at, Some(1791036000000));
+        let stored = serde_json::to_value(&wire).unwrap();
+        let restored: aulos_core::WireError = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored, wire);
+        let legacy: ErrorFrame = serde_json::from_value(serde_json::json!({
+            "code": "not_yet_live", "message": "Premieres soon"
+        }))
+        .unwrap();
+        assert_eq!(from_frame(&legacy).to_wire(&provider, None).retry_at, None);
     }
 }

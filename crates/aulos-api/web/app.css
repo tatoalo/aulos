@@ -444,6 +444,11 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 .sheet-hd { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .sheet-hd h2 { font-size: 20px; line-height: 25px; }
 .note { font-size: 13px; line-height: 18px; color: var(--text2); }
+.sheet.confirmsheet { inset: 50% auto auto 50%; width: 400px; max-width: calc(100vw - 32px); margin: 0; padding: 24px; border-radius: 20px; transform: translate(-50%, -50%); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2); }
+.confirm-actions { display: flex; justify-content: flex-end; align-items: center; gap: 24px; }
+.confirm-actions button { min-height: 44px; }
+.confirm-actions .btn-sm { background: var(--err); }
+.confirm-actions .btn-sm:hover { opacity: 0.85; }
 .grp { display: flex; flex-direction: column; gap: 8px; }
 .pair { display: flex; gap: 12px; }
 .pair .grp { flex: 1; min-width: 0; }

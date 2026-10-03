@@ -404,6 +404,9 @@ pub struct ByeFrame {
 /// The `error` frame (DESIGN §9.6).
 #[derive(Clone, Debug, Deserialize)]
 pub struct ErrorFrame {
+    /// Announced release time in Unix milliseconds, when this is an upcoming video.
+    #[serde(default)]
+    pub retry_at: Option<aulos_core::UnixMs>,
     /// One of the §9.6 codes. An unknown code becomes `contract` (see [`crate::errmap`]).
     #[serde(default)]
     pub code: String,

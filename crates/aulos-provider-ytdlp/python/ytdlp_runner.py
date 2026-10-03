@@ -849,13 +849,14 @@ def _root_info(info):
 class _EntryError(Exception):
     """An extraction outcome that is an error with a *pre-classified* code."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, retry_at=None):
         super().__init__(message)
         self.code = code
+        self.retry_at = retry_at
 
 
-def _entry_error(code, message):
-    return _EntryError(code, message)
+def _entry_error(code, message, retry_at=None):
+    return _EntryError(code, message, retry_at)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1271,7 +1272,13 @@ def subscription_filter(existing, url):
         ):
             raise _entry_error("canceled", "YouTube Shorts are excluded from subscriptions")
         if info.get("is_live") or info.get("live_status") in ("is_upcoming", "is_live", "post_live"):
-            raise _entry_error("not_yet_live", "Waiting for the premiere or live stream to finish processing")
+            release = info.get("release_timestamp") if info.get("live_status") == "is_upcoming" else None
+            retry_at = None
+            if isinstance(release, (int, float)) and not isinstance(release, bool) and 0 < release < 253402300800:
+                retry_at = int(release * 1000)
+            raise _entry_error(
+                "not_yet_live", "Waiting for the premiere or live stream to finish processing", retry_at
+            )
         if existing is not None:
             return existing(info, incomplete=incomplete)
         return None
@@ -1489,6 +1496,7 @@ def main(argv):
             "error",
             code=exc.code,
             message=clean_message(exc),
+            retry_at=exc.retry_at,
             retryable=False,
             extractor=None,
             fatal=True,

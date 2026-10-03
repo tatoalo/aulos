@@ -172,8 +172,13 @@ pub enum ProviderError {
     #[error("{0}")]
     Unavailable(String),
     /// A scheduled live stream that has not started.
-    #[error("{0}")]
-    NotYetLive(String),
+    #[error("{message}")]
+    NotYetLive {
+        /// The source's waiting message.
+        message: String,
+        /// Announced release time in Unix milliseconds, if known.
+        retry_at: Option<aulos_core::UnixMs>,
+    },
     /// The requested format is not available.
     #[error("{0}")]
     NoFormat(String),
@@ -222,7 +227,7 @@ impl ProviderError {
             Self::BotCheck(_) => ErrorCode::BotCheck,
             Self::GeoRestricted(_) => ErrorCode::GeoRestricted,
             Self::Unavailable(_) => ErrorCode::Unavailable,
-            Self::NotYetLive(_) => ErrorCode::NotYetLive,
+            Self::NotYetLive { .. } => ErrorCode::NotYetLive,
             Self::NoFormat(_) => ErrorCode::NoFormat,
             Self::Network(_) => ErrorCode::Network,
             Self::Throttled(_) => ErrorCode::Throttled,
@@ -273,7 +278,10 @@ impl ProviderError {
             ErrorCode::BotCheck => Self::BotCheck(m),
             ErrorCode::GeoRestricted => Self::GeoRestricted(m),
             ErrorCode::Unavailable => Self::Unavailable(m),
-            ErrorCode::NotYetLive => Self::NotYetLive(m),
+            ErrorCode::NotYetLive => Self::NotYetLive {
+                message: m,
+                retry_at: None,
+            },
             ErrorCode::NoFormat => Self::NoFormat(m),
             ErrorCode::Network => Self::Network(m),
             ErrorCode::Throttled => Self::Throttled(m),
@@ -297,6 +305,10 @@ impl ProviderError {
     pub fn to_wire(&self, provider: &ProviderId, provider_code: Option<&str>) -> WireError {
         WireError::new(self.code(), self.message())
             .with_provider(provider.as_arc(), provider_code.map(Arc::from))
+            .with_retry_at(match self {
+                Self::NotYetLive { retry_at, .. } => *retry_at,
+                _ => None,
+            })
     }
 }
 
@@ -666,7 +678,10 @@ mod tests {
             ProviderError::BotCheck("b".into()),
             ProviderError::GeoRestricted("g".into()),
             ProviderError::Unavailable("v".into()),
-            ProviderError::NotYetLive("l".into()),
+            ProviderError::NotYetLive {
+                message: "l".into(),
+                retry_at: None,
+            },
             ProviderError::NoFormat("f".into()),
             ProviderError::Network("n".into()),
             ProviderError::Throttled("t".into()),

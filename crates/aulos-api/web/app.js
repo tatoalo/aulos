@@ -352,7 +352,8 @@ function flush() {
   const top = all.filter((i) => !i.group_id);
 
   // §3.1: an unknown status renders inert, not nowhere — `subFor`'s default branch labels it.
-  const active = top.filter((i) => ACTIVE.has(i.status) || (i.status === 'queued' && i.auto_start) || !KNOWN.has(i.status));
+  const scheduled = top.filter((i) => i.status === 'queued' && i.auto_start && i.error?.code === 'not_yet_live');
+  const active = top.filter((i) => ACTIVE.has(i.status) || (i.status === 'queued' && i.auto_start && i.error?.code !== 'not_yet_live') || !KNOWN.has(i.status));
   const waiting = top.filter((i) => i.status === 'queued' && !i.auto_start);
   // ord-ascending, so the tail is newest: render a window of the completed history and evict the
   // rest — which `Show older` pages back — or the DOM and the maps grow without bound.
@@ -361,10 +362,13 @@ function flush() {
   for (let i = 0; i < allDone.length - done.length; i++) { state.items.delete(allDone[i].id); state.hasOlder = true; }
 
   reconcile($('rows-active'), active);
+  reconcile($('rows-scheduled'), scheduled);
   reconcile($('rows-waiting'), waiting);
   reconcile($('rows-done'), done);
 
   $('sec-active').hidden = active.length === 0;
+  $('sec-scheduled').hidden = scheduled.length === 0;
+  $('scheduled-meta').textContent = `${scheduled.length} item${scheduled.length === 1 ? '' : 's'}`;
   $('sec-waiting').hidden = waiting.length === 0;
   $('sec-done').hidden = done.length === 0;
   $('empty').hidden = all.length > 0;
@@ -379,6 +383,7 @@ function flush() {
   const nActive = top.filter((i) => ACTIVE.has(i.status)).length;
   const nDone = Math.max(done.length, state.doneTotal);
   const bits = [`${nActive} active`];
+  if (scheduled.length) bits.push(`${scheduled.length} scheduled`);
   if (waiting.length) bits.push(`${waiting.length} waiting`);
   bits.push(`${nDone} done`);
   $('summary').textContent = bits.join(' · ');
@@ -564,7 +569,12 @@ function subFor(it) {
       return { ...none, word: 'Resolving', rest: it.title === it.url ? '' : it.url || '' };
     case 'queued': {
       const nyl = it.error && it.error.code === 'not_yet_live';
-      return { ...none, word: nyl ? 'Scheduled' : it.auto_start ? 'Waiting' : 'Paused', rest: nyl ? it.error.message : selText(it) };
+      let rest = nyl ? it.error.message : selText(it);
+      if (nyl && it.auto_start && it.error.retry_at) {
+        const when = new Date(it.error.retry_at);
+        if (Number.isFinite(when.getTime())) rest = `Next check ${when.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`;
+      } else if (nyl && !it.auto_start) rest = 'Automatic start is paused';
+      return { ...none, word: nyl ? 'Scheduled' : it.auto_start ? 'Waiting' : 'Paused', rest };
     }
     case 'preparing':
       return { word: 'Preparing', cls: 'dl', rest: [selText(it), it.msg].filter(Boolean).join(' · '), restErr: false };
@@ -1181,7 +1191,7 @@ async function subCheckAll() {
 async function subDelete(id) {
   const s = state.subs.get(id);
   if (!s) return;
-  if (!window.confirm(`Stop watching “${s.name || subHost(s.url)}”? Downloads already made are kept.`)) return;
+  if (!await confirmAction('Stop watching?', `Stop watching “${s.name || subHost(s.url)}”? Downloads already made are kept.`, 'Stop watching')) return;
   const r = await subCall(subPath(id), { method: 'DELETE' });
   if (!r.ok) return;
   state.subs.delete(id);
@@ -1387,7 +1397,27 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
 let sheetReturn = null;
 
 /** The sheet on top (the token sheet stacks over the add sheet), or null. */
-const topSheet = () => (!$('token-sheet').hidden ? $('token-sheet') : $('sheet').hidden ? null : $('sheet'));
+const topSheet = () => ['token-sheet', 'confirm-sheet', 'sheet'].map($).find((el) => !el.hidden);
+
+let confirmResolve = null;
+
+function confirmAction(title, message, label) {
+  if (confirmResolve) return Promise.resolve(false);
+  $('confirm-title').textContent = title;
+  $('confirm-message').textContent = message;
+  $('confirm-accept').textContent = label;
+  closeMenu();
+  openOverlay($('confirm-sheet'), $('confirm-cancel'));
+  return new Promise((resolve) => { confirmResolve = resolve; });
+}
+
+function closeConfirm(accepted = false) {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  closeOverlay($('confirm-sheet'));
+  resolve(accepted);
+}
 
 function inertBg(on) {
   for (const bg of [$('hdr'), $('wrap')]) {
@@ -1487,7 +1517,9 @@ function wire() {
   $('add-btn').addEventListener('click', () => { if (isPhone()) openSheet(); else submitAdd(); });
   $('sheet-add').addEventListener('click', submitAdd);
   $('sheet-cancel').addEventListener('click', closeSheet);
-  $('scrim').addEventListener('click', () => { closeSheet(); closeToken(); });
+  $('scrim').addEventListener('click', () => { closeConfirm(); closeSheet(); closeToken(); });
+  $('confirm-cancel').addEventListener('click', () => closeConfirm());
+  $('confirm-accept').addEventListener('click', () => closeConfirm(true));
 
   $('type').addEventListener('change', (e) => { add.download_type = e.target.value; add.format = ''; syncPicker(); refreshDirs(); });
   $('quality').addEventListener('change', (e) => { add.quality = e.target.value; renderPicker(); });
@@ -1524,7 +1556,7 @@ function wire() {
   $('clear').addEventListener('click', async () => {
     const n = [...state.items.values()].filter((i) => !i.group_id && TERMINAL.has(i.status)).length;
     if (!n) return;
-    if (!window.confirm(`Remove ${n} completed item${n === 1 ? '' : 's'} from the list?`)) return;
+    if (!await confirmAction('Clear completed items?', 'Remove completed items from the list? Downloaded files are kept.', 'Clear completed')) return;
     try { await api('api/v2/items/clear', { method: 'POST', body: { where: 'done', delete_file: false } }); }
     catch (e) { if (e.code !== 'unauthorized') toast('error', e.message); }
   });
@@ -1580,11 +1612,13 @@ function wire() {
     if (e.key !== 'Escape') return;
     closeMenu();
     if (!$('token-sheet').hidden) closeToken();
+    else if (!$('confirm-sheet').hidden) closeConfirm();
     else if (!$('sheet').hidden) closeSheet();
   });
 
   // Paste anywhere outside a field → focus the URL field and fill it.
   document.addEventListener('paste', (e) => {
+    if (topSheet()) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     const text = ((e.clipboardData && e.clipboardData.getData('text')) || '').trim();

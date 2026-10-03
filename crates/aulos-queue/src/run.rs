@@ -344,22 +344,28 @@ impl Engine {
         self.schedule().await;
     }
 
-    pub(crate) async fn wait_for_video(&mut self, id: ItemId, error: WireError) {
+    pub(crate) async fn wait_for_video(&mut self, id: ItemId, mut error: WireError) {
         let Some(item) = self.cached(id) else {
             return;
         };
         let auto_start = item.auto_start;
-        let msg = if auto_start {
-            "Waiting for the full-quality video; checking again in 15 minutes"
+        let now = self.clock.now_ms();
+        let release_at = error.retry_at.filter(|at| *at > now);
+        let at_ms = release_at.unwrap_or_else(|| now.saturating_add(15 * 60 * 1_000));
+        error.retry_at = Some(at_ms);
+        let msg = if !auto_start {
+            "Waiting for the full-quality video; automatic start is paused".to_owned()
+        } else if let Some(at) = release_at.and_then(aulos_core::clock::format_utc) {
+            format!("Scheduled release; checking on {at}")
         } else {
-            "Waiting for the full-quality video; automatic start is paused"
+            "Waiting for the full-quality video; checking again in 15 minutes".to_owned()
         };
         if !self
             .apply(
                 vec![WriteOp::SetStatus {
                     id,
                     status: Status::Queued,
-                    msg: FieldUpdate::Set(msg.into()),
+                    msg: FieldUpdate::Set(msg.clone().into()),
                     error: FieldUpdate::Set(error.clone()),
                     auto_start: None,
                     at: self.clock.now_ms(),
@@ -379,13 +385,25 @@ impl Engine {
         });
         if auto_start {
             self.retries.retain(|r| r.id != id);
-            self.retries.push(crate::engine::PendingRetry {
-                id,
-                at_ms: self.clock.now_ms() + 15 * 60 * 1_000,
-            });
+            self.retries.push(crate::engine::PendingRetry { id, at_ms });
         }
         self.on_child_status(id, from, Status::Queued).await;
         self.publish_changed(id, from, Status::Queued).await;
+    }
+
+    pub(crate) fn restore_video_wait(&mut self, id: ItemId) -> bool {
+        let Some(at_ms) = self.cached(id).and_then(|item| {
+            item.error
+                .as_ref()
+                .filter(|error| error.code == aulos_core::ErrorCode::NotYetLive)
+                .and_then(|error| error.retry_at)
+                .filter(|at| *at > self.clock.now_ms())
+        }) else {
+            return false;
+        };
+        self.retries.retain(|r| r.id != id);
+        self.retries.push(crate::engine::PendingRetry { id, at_ms });
+        true
     }
 
     /// Schedules an automatic retry with the DESIGN §8.8 backoff.
