@@ -73,6 +73,11 @@
     <div class="rows" id="rows-active"></div>
   </section>
 
+  <section class="sec" id="sec-scheduled" hidden>
+    <div class="sec-hd"><h2>Scheduled</h2><span class="sec-meta" id="scheduled-meta"></span></div>
+    <div class="rows" id="rows-scheduled"></div>
+  </section>
+
   <section class="sec" id="sec-waiting" hidden>
     <div class="sec-hd"><h2>Waiting for you</h2><button class="link" id="start-all" type="button">Start all</button></div>
     <div class="rows" id="rows-waiting"></div>
@@ -160,6 +165,15 @@
   <p class="note">This server asked for an API token. It is stored in this browser only.</p>
   <label class="grp"><span class="label">API token</span><span class="field"><input id="token-input" type="password" autocomplete="current-password" aria-label="API token"></span></label>
   <button class="btn-block" id="token-save" type="button">Save and connect</button>
+</div>
+
+<div class="sheet confirmsheet" id="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" hidden>
+  <div class="sheet-hd"><h2 id="confirm-title"></h2></div>
+  <p class="note" id="confirm-message"></p>
+  <div class="confirm-actions">
+    <button class="text-btn" id="confirm-cancel" type="button">Cancel</button>
+    <button class="btn-sm" id="confirm-accept" type="button"></button>
+  </div>
 </div>
 
 <div class="menu" id="menu" role="menu" hidden></div>

@@ -232,8 +232,11 @@ test('every action button posts the action PROTOCOL §4.2 names', withMock({}, a
 
 test('Clear posts §4.7 items/clear with delete_file: false, after a confirm', withMock({}, async ({ page, mock, request }) => {
   await open(page, mock);
-  page.once('dialog', (d) => d.accept());
   await page.click('#clear');
+  await expect(page.getByRole('dialog', { name: 'Clear completed items?' })).toBeVisible();
+  await expect(page.locator('#confirm-message')).toContainText('Downloaded files are kept');
+  expect(await mock.log(request)).toEqual([]);
+  await page.click('#confirm-accept');
 
   await expect.poll(async () => (await mock.log(request)).length).toBe(1);
   const [entry] = await mock.log(request);
@@ -245,9 +248,15 @@ test('Clear posts §4.7 items/clear with delete_file: false, after a confirm', w
 
 test('Clear asks first, and a dismissed confirm sends nothing', withMock({}, async ({ page, mock, request }) => {
   await open(page, mock);
-  page.once('dialog', (d) => d.dismiss());
   await page.click('#clear');
-  await page.waitForTimeout(300);
+  await expect(page.locator('#confirm-cancel')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.locator('#confirm-accept')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#confirm-cancel')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#confirm-sheet')).toBeHidden();
+  await expect(page.locator('#clear')).toBeFocused();
   expect(await mock.log(request)).toEqual([]);
   await expect(page.locator('#sec-done')).toBeVisible();
 }));
@@ -698,11 +707,56 @@ test('a queued not_yet_live item reads as scheduled, not as a failure', withMock
   const row = page.locator(`.row[data-id="${id}"]`);
   await expect(row).toBeVisible();
   await expect(row.locator('.st')).toHaveText('Scheduled');
-  await expect(row.locator('.rest')).toHaveText('Premieres in 2 hours');
+  await expect(row.locator('.rest')).toHaveText('Automatic start is paused');
   await expect(row.locator('.rest')).not.toHaveClass(/err/);
   await expect(page.locator(`#rows-waiting .row[data-id="${id}"]`)).toBeVisible();
   await expect(row.locator('.disc')).not.toHaveClass(/err/);
 }));
+
+test('scheduled releases have their own section and move to progress when downloading', withMock({ freeze: true }, async ({ page, mock }) => {
+  await open(page, mock);
+  await page.evaluate((id) => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'delta', seq: A.state.seq + 1, items: [{
+      id, status: 'queued', auto_start: true, percent: 0, speed: null,
+      error: { code: 'not_yet_live', message: 'Premieres soon', retry_at: Date.now() + 21600000 },
+    }] });
+  }, IDS.dl);
+  const row = page.locator(`.row[data-id="${IDS.dl}"]`);
+  await expect(page.locator(`#rows-scheduled .row[data-id="${IDS.dl}"]`)).toBeVisible();
+  await expect(page.locator('#sec-scheduled h2')).toHaveText('Scheduled');
+  await expect(page.locator('#scheduled-meta')).toHaveText('1 item');
+  await expect(page.locator('#summary')).toContainText('1 scheduled');
+  await expect(row.locator('.rest')).toContainText('Next check');
+  await expect(row.locator('.rest')).not.toHaveClass(/err/);
+  await page.screenshot({ path: join(SHOTS, 'scheduled-desktop.png'), fullPage: true });
+  await page.evaluate((id) => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'delta', seq: A.state.seq + 1, items: [{ id, status: 'downloading', error: null }] });
+  }, IDS.dl);
+  await expect(page.locator(`#rows-active .row[data-id="${IDS.dl}"]`)).toBeVisible();
+  await expect(page.locator('#sec-scheduled')).toBeHidden();
+}));
+
+for (const width of [1440, 390]) {
+  test(`confirmation uses Aulos UI at ${width}px and backdrop cancels`, withMock({ freeze: true }, async ({ page, mock, request }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(() => { window.confirm = () => { throw new Error('Browser confirmation is forbidden'); }; });
+    await open(page, mock);
+    await page.click('#clear');
+    const dialog = page.getByRole('dialog', { name: 'Clear completed items?' });
+    await expect(dialog).toBeVisible();
+    expect(await page.locator('#wrap').evaluate((el) => el.inert)).toBe(true);
+    const box = await dialog.boundingBox();
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: join(SHOTS, `clear-${width}.png`), fullPage: true });
+    await page.locator('#scrim').click({ position: { x: 4, y: 4 } });
+    await expect(dialog).toBeHidden();
+    expect(await page.locator('#wrap').evaluate((el) => el.inert)).toBe(false);
+    expect(await mock.log(request)).toEqual([]);
+  }));
+}
 
 test('a collapsed group fetches its children on expand', withMock({ 'big-group': true }, async ({ page, mock }) => {
   await open(page, mock);
@@ -958,8 +1012,9 @@ test('the toggle, the inline editor and delete use PATCH and DELETE', withMock({
   await expect(a.locator('.row-title')).toHaveText('Veritasium (renamed)');
   await expect(a.locator('.rest')).toContainText('every 90 min');
 
-  page.once('dialog', (d) => d.accept());
   await a.locator('[data-sact="delete"]').click();
+  await expect(page.getByRole('dialog', { name: 'Stop watching?' })).toBeVisible();
+  await page.click('#confirm-accept');
   await expect(a).toHaveCount(0);
   await expect(page.locator('#rows-subs > .row')).toHaveCount(2);
 
@@ -975,9 +1030,8 @@ test('the toggle, the inline editor and delete use PATCH and DELETE', withMock({
 
 test('a dismissed delete confirm leaves the subscription alone', withMock({ freeze: true }, async ({ page, mock, request }) => {
   await open(page, mock);
-  page.once('dialog', (d) => d.dismiss());
   await page.click(`.row[data-sub="${SUBS.a}"] [data-sact="delete"]`);
-  await page.waitForTimeout(300);
+  await page.click('#confirm-cancel');
   expect(await mock.log(request)).toEqual([]);
   await expect(page.locator(`.row[data-sub="${SUBS.a}"]`)).toBeVisible();
 }));

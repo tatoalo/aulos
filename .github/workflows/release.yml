@@ -6,6 +6,9 @@ name: release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    branches: [main]
+    types: [closed]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,12 +24,29 @@ permissions:
   contents: write
 
 jobs:
+  tag:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - name: Tag the merged release
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.AULOS_REPO_PAT }}
+          script: |
+            await require('./.github/scripts/tag-release.cjs')({ github, context, core });
+
   release:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@master
         with:

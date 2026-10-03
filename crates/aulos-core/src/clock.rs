@@ -8,6 +8,20 @@ use tokio::time::Instant;
 
 use crate::id::UnixMs;
 
+/// Formats a Unix millisecond timestamp as a UTC date and time, to the minute.
+#[must_use]
+pub fn format_utc(at: UnixMs) -> Option<String> {
+    let at = time::OffsetDateTime::from_unix_timestamp(at.div_euclid(1_000)).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02} at {:02}:{:02} UTC",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute()
+    ))
+}
+
 /// Wall-clock and monotonic time.
 ///
 /// [`Self::instant`] returns a [`tokio::time::Instant`] rather than a [`std::time::Instant`] so

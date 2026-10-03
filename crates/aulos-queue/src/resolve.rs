@@ -274,7 +274,11 @@ impl Engine {
                         "Waiting for the premiere or live stream to finish",
                         |error| &error.message,
                     ),
-                ),
+                )
+                .with_retry_at(match entry.live {
+                    aulos_provider::LiveStatus::IsUpcoming { at } => at,
+                    _ => None,
+                }),
             )
             .await;
             return;

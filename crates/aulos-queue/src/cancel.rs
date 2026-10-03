@@ -89,15 +89,17 @@ impl Engine {
                     // scheduler drops a provider-less row from its deque — so starting it means
                     // resolving it first. That is the state a restart leaves an interrupted add
                     // in (DESIGN §8.9), and acking `applied` without this would be a lie.
-                    if item.provider.is_none() && item.kind == Kind::Item {
-                        self.restart_resolution(id).await;
-                    } else {
-                        // Already on its way: `start` is idempotent. It still re-enqueues, because
-                        // "queued with `auto_start`" and "on a ready deque" are two different facts
-                        // — a start pressed while a paused job was still being killed leaves the
-                        // first without the second until its slot is released
-                        // (`Engine::release_job`).
-                        self.enqueue(id);
+                    if !self.restore_video_wait(id) {
+                        if item.provider.is_none() && item.kind == Kind::Item {
+                            self.restart_resolution(id).await;
+                        } else {
+                            // Already on its way: `start` is idempotent. It still re-enqueues, because
+                            // "queued with `auto_start`" and "on a ready deque" are two different facts
+                            // — a start pressed while a paused job was still being killed leaves the
+                            // first without the second until its slot is released
+                            // (`Engine::release_job`).
+                            self.enqueue(id);
+                        }
                     }
                     if !item.auto_start {
                         self.publish_changed(id, Status::Queued, Status::Queued)

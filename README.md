@@ -456,6 +456,17 @@ The subcommand is optional and defaults to `serve`, because the entrypoint ends 
 config as `serve`, so `URL_PREFIX` normalisation applies, and it exits non-zero against a server
 that is not running — which is the point.
 
+## Releases
+
+Add the `release` label before merging a PR into `main` to publish a release. The merge is
+tagged `vYYYY.MM.DD` using its UTC date, with `.1`, `.2`, etc. for additional releases that day.
+The tag triggers the existing GitHub release (binary, checksums and generated notes) and GHCR
+image workflows. Rerunning the tag job reuses the existing tag for that merge.
+
+This requires the repository's `AULOS_REPO_PAT` secret with permission to create tags: tags
+created with `GITHUB_TOKEN` do not trigger the downstream workflows. Ordinary merges keep
+publishing the usual dated and `latest` container images without a GitHub release.
+
 ## Documentation
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture, and the env var table (§17.3).

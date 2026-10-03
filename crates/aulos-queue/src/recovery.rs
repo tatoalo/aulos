@@ -175,7 +175,9 @@ impl Engine {
             .collect();
         queued.sort_unstable();
         for (_, id) in queued {
-            self.enqueue(id);
+            if !self.restore_video_wait(id) {
+                self.enqueue(id);
+            }
         }
 
         // 6. Stale temp files: logged, not deleted, unless `AULOS_CLEAN_ORPHAN_TEMP`.
@@ -227,6 +229,7 @@ impl Engine {
                         && i.status == Status::Queued
                         && i.auto_start
                         && i.provider.is_none()
+                        && !self.retries.iter().any(|retry| retry.id == i.id)
                 })
                 .map(|i| (i.ord, i.id))
                 .collect();
