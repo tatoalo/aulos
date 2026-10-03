@@ -1372,12 +1372,8 @@ async fn one_item_and_its_file_redirect() {
     .await;
 }
 
-/// DESIGN §16.6 (SSRF row) and §17.3: "the v1/v2 API adds run the same validator with
-/// `allow_private = AULOS_ALLOW_PRIVATE_TARGETS`". The knob defaults to `true`, so the LAN adds a
-/// home deployment relies on keep working; `false` is the operator locking the deployment down,
-/// and it must actually reach both add paths.
 #[tokio::test]
-async fn allow_private_targets_gates_the_ssrf_guard_on_both_add_paths() {
+async fn allow_private_targets_gates_the_ssrf_guard() {
     for_each_prefix(|prefix| async move {
         const METADATA: &str = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
 
@@ -1405,18 +1401,6 @@ async fn allow_private_targets_gates_the_ssrf_guard_on_both_add_paths() {
             assert_eq!(body["error"]["code"], "validation_failed", "{url}");
             assert_eq!(body["error"]["field"], "url", "{url}");
         }
-
-        // The v1 shim is a surface too.
-        let response = locked
-            .http
-            .post(locked.url("add"))
-            .json(&json!({ "url": METADATA, "quality": "best", "format": "any" }))
-            .send()
-            .await
-            .unwrap();
-        let (status, body) = support::status_and_body(response).await;
-        assert_eq!(status, 400, "{body}");
-        assert_eq!(body["error"]["code"], "validation_failed", "{body}");
 
         // A public URL is untouched by the guard.
         let (status, body) = locked.post("api/v2/downloads", &json!({ "url": YT })).await;

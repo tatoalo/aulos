@@ -53,27 +53,6 @@ impl Status {
         )
     }
 
-    /// The legacy v1 status name this maps to (DESIGN §11.5).
-    ///
-    /// `Queued` collapses onto `pending` for both flag values — the v1 shim splits the
-    /// `queue[]`/`pending[]` arrays by `auto_start`, not by this string. `Postprocessing` maps to
-    /// `downloading` because legacy showed a frozen `downloading` during ffmpeg and carried the
-    /// phase in `msg`.
-    ///
-    /// `Canceled` has **no** legacy name: DESIGN §11.4 omits cancelled items from `GET history`
-    /// entirely. `"error"` is returned as a defensive fallback so a caller that projects one
-    /// anyway still emits a value from the closed legacy set.
-    #[must_use]
-    pub const fn v1(self) -> &'static str {
-        match self {
-            Self::Queued | Self::Resolving => "pending",
-            Self::Preparing => "preparing",
-            Self::Downloading | Self::Postprocessing => "downloading",
-            Self::Finished => "finished",
-            Self::Error | Self::Canceled => "error",
-        }
-    }
-
     /// The status as its wire string, without going through serde.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -334,18 +313,6 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", s.as_str()));
             assert_eq!(serde_json::from_str::<Status>(&json).unwrap(), s);
         }
-    }
-
-    #[test]
-    fn v1_projection_matches_the_legacy_vocabulary() {
-        assert_eq!(Queued.v1(), "pending");
-        assert_eq!(Resolving.v1(), "pending");
-        assert_eq!(Preparing.v1(), "preparing");
-        assert_eq!(Downloading.v1(), "downloading");
-        assert_eq!(Postprocessing.v1(), "downloading");
-        assert_eq!(Finished.v1(), "finished");
-        assert_eq!(Error.v1(), "error");
-        assert_eq!(Canceled.v1(), "error");
     }
 
     #[test]

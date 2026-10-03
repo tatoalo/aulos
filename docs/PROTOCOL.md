@@ -40,7 +40,7 @@ ends with `/`; the default is `/`. So with the default prefix the add endpoint i
 `/api/v2/downloads`, and with `URL_PREFIX=/metube/` it is `/metube/api/v2/downloads`.
 
 Do not guess the prefix. `GET <p>api/v2/capabilities` echoes it as `url_prefix`, and so does
-`GET <p>version` and `GET <p>healthz`. Construct your paths by appending to the configured base
+`GET <p>healthz`. Construct your paths by appending to the configured base
 URL, then verify once against `capabilities.url_prefix`.
 
 **`GET <p>` is content-negotiated, and it is the only route in the server that is.** When the
@@ -56,7 +56,7 @@ identity document it always has, unchanged:
 `*/*` alone does **not** count as a vote for HTML, precisely so that a client that never thought
 about the header keeps getting JSON. `HEAD` behaves the same. Both representations carry
 `Vary: Accept`. If your HTTP library sets `Accept: text/html` for you — some do — send
-`Accept: application/json` explicitly on this one route, or read `<p>version` instead, which is
+`Accept: application/json` explicitly on this one route, or read `<p>api/v2/capabilities` instead, which is
 never negotiated. When the operator sets `AULOS_WEB_UI=false` the negotiation disappears and every
 `Accept` gets the identity document.
 
@@ -193,7 +193,6 @@ HTTP errors:
 | `conflict` | 409 | duplicate subscription URL, or a strict-mode duplicate add |
 | `payload_too_large` | 413 | cookie upload over **1 000 000 bytes** (decimal, not 1 MiB — the legacy cap, preserved byte-for-byte along with its message `Cookie file too large (max 1MB)`), a batch add over the server's cap, or **any** request body over the server's `1 065 536`-byte ceiling (that cookie cap plus room for the multipart part headers). The last one is refused before the handler runs — from `Content-Length` where there is one — and its `message` names the limit in bytes. |
 | `internal` | 500 | a bug. `message` is a request id; details are in the server logs. |
-| `socketio_removed` | 501 | you hit `<p>socket.io/*`. Socket.IO is not provided; use `<p>ws` or `GET api/v2/state`. This is the only 501 the server emits. |
 | `state_unavailable` | 503 | the database is busy; retry after `Retry-After` seconds |
 
 Item-terminal errors (these appear in `Item.error`, never as an HTTP status):
@@ -413,7 +412,7 @@ present and may be `null`. **No key is ever absent.**
 | `fragment_count` | `integer \| null` | |
 | `phase` | `string \| null` | a finer-grained, purely cosmetic label: `"video"`, `"audio"`, `"fragment"`, `"remux"`, `"audio_sync"`, or a provider-specific string. Do not switch on it. |
 | `phase_percent` | `number \| null` | progress **of the current postprocessing phase**, `0.0…100.0`. Independent of `percent`. When `status == "postprocessing"` and this is non-null, render it as a secondary bar. |
-| `msg` | `string \| null` | a short **live** status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`, `"Paused"`, `"Retrying in 30s"`. Already cleaned. It describes what is happening *now*, so **no terminal status ever carries a live line**: the server clears it at the terminal write. It is **always `null` when `status == "finished"`**, on every writer — the engine, a group's roll-up, the legacy importer and the schema migration that backfilled the rows an older build wrote. On `error` and `canceled` it is `null` too, unless something set an explicit terminal *note* that was never a progress line (the legacy importer writes one for a record whose status it could not map); the reason itself is in `error`, and the v1 shim projects `error.message` back into v1's overloaded `msg`. The clear arrives as an explicit `null` in the `delta`/`completed` frame, per §5.4. |
+| `msg` | `string \| null` | a short **live** status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`, `"Paused"`, `"Retrying in 30s"`. Already cleaned. It describes what is happening *now*, so **no terminal status ever carries a live line**: the server clears it at the terminal write. It is **always `null` when `status == "finished"`**, on every writer — the engine, a group's roll-up, the legacy importer and the schema migration that backfilled the rows an older build wrote. On `error` and `canceled` it is `null` too, unless something set an explicit terminal *note* that was never a progress line (the legacy importer writes one for a record whose status it could not map); the reason itself is in `error`. The clear arrives as an explicit `null` in the `delta`/`completed` frame, per §5.4. |
 | `error` | `WireError \| null` | `{ code, message, field, provider, provider_code }`, plus optional `retry_at` — the §1.5 object without `request_id`. Non-null when `status == "error"`, optionally when `canceled`, **and also on a `queued` item that has a pre-download problem** — an upcoming livestream, where `error.code == "not_yet_live"` and `error.message` is the scheduled-start text. That last case is not a failure. Subscription items with `auto_start: true` wait until the optional `retry_at` deadline; `auto_start: false` remains paused. The WebUI puts automatic waits in Scheduled and shows the next check in the browser's local time. |
 | `filename` | `string \| null` | the produced file, **relative** to its download root. `null` until known. The key always exists. |
 | `size` | `integer \| null` | bytes on disk |
@@ -885,7 +884,7 @@ fetching `/version` on every reconnect and replaces any hard-coded format list.
   "yt_dlp": "2026.8.30.232658.dev0",
   "url_prefix": "/",
   "boot_id": "01JBQ8YQ2E0000000000000000",
-  "protocol": { "v2": true, "v1_shim": true, "socketio": false,
+  "protocol": { "v2": true,
                 "ws_path": "ws", "ws_subprotocol": "aulos.v2",
                 "batch_ms": 250, "urgent_ms": 25,
                 "delta_semantics": "absent-key-means-unchanged" },
@@ -1127,7 +1126,6 @@ always correct because every option has a server-side default.
 |---|---|---|---|---|
 | GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down`, and each `components.<name>.status` additionally may be `starting` or `disabled`; `items` is the §5.3 `counts` object and is windowed the same way | `503` when the store is unusable |
 | GET | `livez` | — | `200 {"ok":true}` | — |
-| GET | `version` | — | `200 {"version":…,"yt-dlp":…,"url_prefix":…,"protocol":"v2"}` | — |
 | GET | `api/v2/subscriptions` | — | `200 {"subscriptions":[Subscription]}` | — |
 | POST | `api/v2/subscriptions` | an add body plus `check_interval_minutes` and an optional `name` (blank or absent means "name it after the channel") | `201 Subscription` | 400, 409 `conflict` |
 | PATCH | `api/v2/subscriptions/{id}` | `{name?, enabled?, check_interval_minutes?}` | `200 Subscription` | 400, 404 |
@@ -1649,7 +1647,7 @@ this text".
 |---|---|---|
 | `t` | `"subscription_removed"` | |
 | `seq` | `integer` | |
-| `ids` | `[string]` | always an array, even for a single deletion — the v1 delete route takes a list, so one call can remove several. Legacy emitted one bare id string per deletion; this is the one shape. Remove by id; an unknown id is not an error. |
+| `ids` | `[string]` | always an array, even for a single deletion. Remove by id; an unknown id is not an error. |
 
 ```json
 { "t": "ytdl_options", "seq": 10280, "ok": false,
@@ -1939,87 +1937,23 @@ history.
 
 ---
 
-## 10. The v1 compatibility shim
+## 10. Retired v1 surface
 
-The v1 routes exist so the previously shipped client, the README bookmarklet and the iOS Shortcut
-keep working during cutover. **Do not build anything new against them.** They are mounted only
-while `AULOS_V1_ENABLED=true` and are a thin translation layer over v2.
+As of the October 2026 retirement release, only Aulos v2 is supported. These legacy paths
+return `404 not_found`: `add`, `history`, `delete`, `start`, `cancel-add`, `presets`, `subscribe`,
+`subscriptions`, `subscriptions/update`, `subscriptions/delete`, `subscriptions/check`,
+`upload-cookies`, `delete-cookies`, `cookie-status`, `version`, and `socket.io/` (including children).
+The `AULOS_V1_ENABLED`, `AULOS_V1_ADD_RESOLVE_WAIT_MS`, and `AULOS_V1_HISTORY_MAX` settings
+have been removed. Capabilities and health no longer advertise `v1_shim` or `socketio` flags.
 
-### 10.1 Route mapping
+Use `api/v2/downloads`, `api/v2/state`, `api/v2/items/actions`, the v2 subscription/cookie routes,
+and `api/v2/capabilities`. Token authentication requires the `Bearer` scheme; the documented
+WebSocket token mechanisms remain supported.
 
-| v1 route | Behaviour | Notes |
-|---|---|---|
-| `POST <p>add` | `{"status":"ok"}` or `{"status":"error","msg":…}`, **HTTP 200 either way** | now `application/json` (was `text/plain`); response gains an additive `"ids":[…]`; validation failures are a real `400` carrying the legacy reason string as `error.message`. Unlike `POST api/v2/downloads`, this route **waits** for resolution (up to `AULOS_V1_ADD_RESOLVE_WAIT_MS`, default 10 s) so a resolution failure — an unsupported URL, `Invalid/empty data was given.`, a geo-block, `Unsupported resource "…"` — is still reported in the body, joined with `", "` for a multi-URL add, exactly as the Python server did. If the wait expires first the answer is `{"status":"ok"}` and the item's real outcome shows up in `history` (DESIGN §11.2). New clients must not rely on any of this: use `POST api/v2/downloads` and watch the item. |
-| `GET <p>history` | `{"queue":[…],"pending":[…],"done":[…]}` | all three keys always present, §10.2 |
-| `POST <p>delete` | `{"ids":[…],"where":"queue"\|"done"}` → `{"status":"ok"}` | `ids` may be URLs, legacy media ids, **or** ULIDs, §10.3 |
-| `POST <p>start` | `{"ids":[…]}` → `{"status":"ok"}` | also **retries** terminal items, which legacy could not do; `ids: null` is a 400, not a 500 |
-| `GET <p>version` | `{"yt-dlp":"…","version":"…","url_prefix":"/","protocol":"v2"}` | the two extra keys are additive |
-| `GET <p>presets` | `{"presets":["a","b"]}` | unchanged |
-| `POST <p>cancel-add` | `{"status":"ok"}` | now actually aborts in-flight resolution |
-| `POST <p>subscribe` | `{"status":"ok","subscription":{…13 keys…}}` | the exact legacy projection |
-| `GET <p>subscriptions` | an array of the same 13-key objects | |
-| `POST <p>subscriptions/update` | `{"status":"ok","subscription":{…}}` | a bad `enabled` is a `400`, not a leaked 500 |
-| `POST <p>subscriptions/delete` | `{"status":"ok"}` | `[]` is still a 400 |
-| `POST <p>subscriptions/check` | `{"status":"ok","job_id":"…"}` **immediately** | no longer blocks for minutes |
-| `POST <p>upload-cookies` / `POST <p>delete-cookies` / `GET <p>cookie-status` | the legacy shapes and messages | the cap is preserved exactly: **1 000 000 bytes**, decimal, message `Cookie file too large (max 1MB)` |
-| `GET <p>robots.txt` | as legacy | |
-| `GET /` when the prefix is not `/` | `302` to the prefix | |
-| `GET <p>download/*`, `<p>audio_download/*` | the file, now with `Range` support | |
-| `GET <p>socket.io/*` | **`501`** with `{"error":{"code":"socketio_removed","message":"Socket.IO is not supported; use <prefix>ws (protocol v2) or GET <prefix>api/v2/state"}}` | deliberate: a stale client fails loudly instead of hanging on a handshake |
-| `GET <p>` | a small JSON identity document | no HTML, no `metube_theme` cookie |
-
-### 10.2 v1 `history` contents
-
-| Array | v2 statuses it contains |
-|---|---|
-| `queue` | `resolving`, `preparing`, `downloading`, `postprocessing`, and `queued` with `auto_start == true` |
-| `pending` | `queued` with `auto_start == false` — which covers items added with `auto_start: false`, paused items, and upcoming-livestream items (whose legacy `error` string is projected as-is, exactly as the Python server did) |
-| `done` | `finished`, `error` |
-
-- Groups (`kind == "group"`) are **omitted entirely**; only their children appear. A parent row
-  that never progresses is worse than nothing in a client that has no group concept.
-- `canceled` items are **omitted entirely** from all three arrays, because the previously shipped
-  client has no `canceled` case and maps unknown statuses to `pending`, which would leave the row
-  stuck in "In Progress" forever. Legacy made cancels vanish; this is faithful. v2 clients see
-  them.
-- Each array is ordered by `ord` ascending.
-- `entry` (the full yt-dlp metadata dict) is **not** included. It was the largest payload
-  contributor and nothing read it.
-- `done[]` is the **whole** completed set, not a window — the same thing legacy returned. v1 has no
-  `truncated`, no `done_total` and no cursor, so windowing it would silently drop history out of
-  the client. (An operator can cap it with `AULOS_V1_HISTORY_MAX`, which keeps the most recent
-  records; the default is uncapped.) This is the one respect in which v1 is more expensive than v2,
-  and it is why anything new should use `GET api/v2/state` plus paged `api/v2/items`.
-
-### 10.3 v1 id resolution
-
-Each token in a v1 `ids` array is resolved in this order: a ULID that exists → an exact `url`
-match → an exact legacy `media_id` match. A token matching nothing is silently skipped, as legacy
-did. So `url ?? id` from the old client, and url-only `clearCompleted`, both keep working.
-
-The v1 `id` field itself is the legacy extractor media id when there is one (with the
-`"<prefix>.<id>"` prefixing reproduced), else the ULID.
-
-### 10.4 Status mapping v2 → v1
-
-| v2 | v1 | Where it appears |
-|---|---|---|
-| `queued` (`auto_start=false`) | `pending` | `pending[]` |
-| `queued` (`auto_start=true`) | `pending` | `queue[]` |
-| `resolving` | `pending` | `queue[]` |
-| `preparing` | `preparing` | `queue[]` |
-| `downloading` | `downloading` | `queue[]` |
-| `postprocessing` | `downloading` | `queue[]` — `msg` carries the phase |
-| `finished` | `finished` | `done[]` |
-| `error` | `error` | `done[]` |
-| `canceled` | — | omitted |
-
-### 10.5 v1 type quirks preserved on purpose
-
-`DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT` and `SUBSCRIPTION_DEFAULT_CHECK_INTERVAL` are emitted as
-**strings** by v1 (legacy never coerced them) and as **numbers** by v2. `last_checked` is float
-seconds in v1 and integer milliseconds in v2. `percent` may be `null` in v1 for an item that has
-not started; in v2 it is always a number.
+The embedded web UI, prefix redirects, `robots.txt`, and authenticated download file routes
+remain available. Existing SQLite rows retain their stored source and error values. MeTube
+JSON data can still be migrated with the explicit `aulos-server import` command; ordinary server
+startup no longer performs that import. See [the migration instructions](../README.md#importing-legacy-metube-state).
 
 ---
 

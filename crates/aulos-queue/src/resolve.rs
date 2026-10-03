@@ -83,7 +83,6 @@ impl Engine {
                 ),
             )
             .await;
-            self.notify_resolved(id);
             return;
         };
 
@@ -150,14 +149,12 @@ impl Engine {
         };
         if item.status != Status::Resolving {
             // Cancelled, deleted or already settled while the task was running.
-            self.notify_resolved(id);
             return;
         }
         if self.cancel_epoch > meta.epoch {
             // A `CancelScope::All` landed while this was in flight. Note the epoch, not the
             // generation: a *later add* must not condemn this one's resolution.
             self.cancel_one(id).await;
-            self.notify_resolved(id);
             return;
         }
 
@@ -165,7 +162,6 @@ impl Engine {
             Ok(entries) => self.on_entries(id, entries, meta).await,
             Err(e) => self.on_resolve_error(id, e, meta).await,
         }
-        self.notify_resolved(id);
         self.schedule().await;
     }
 

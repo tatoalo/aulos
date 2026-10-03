@@ -126,8 +126,6 @@ jobs:
           if-no-files-found: warn
 
   python:
-    # DESIGN §18.4. Present from day one so the required check exists; each step no-ops until the
-    # file it needs lands (the shim in WP-07, the capture tooling in WP-00).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -138,9 +136,6 @@ jobs:
         run: |
           set -eu
           shim=crates/aulos-provider-ytdlp/python/ytdlp_runner.py
-          if [ ! -f "$shim" ]; then
-            echo "::notice::$shim does not exist yet (WP-07); skipping"; exit 0
-          fi
           pip install --quiet ruff
           ruff check "$shim"
           python -m py_compile "$shim"
@@ -148,14 +143,8 @@ jobs:
         run: |
           set -eu
           t=crates/aulos-provider-ytdlp/tests/shim_contract.py
-          if [ ! -f "$t" ]; then
-            echo "::notice::$t does not exist yet (WP-07); skipping"; exit 0
-          fi
           python "$t"
       - name: verify the golden corpora
         run: |
           set -eu
-          if [ ! -f tools/capture/verify.py ]; then
-            echo "::notice::tools/capture/verify.py does not exist yet (WP-00); skipping"; exit 0
-          fi
           python tools/capture/verify.py

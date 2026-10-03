@@ -65,7 +65,6 @@ hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
 
 # --- serialisation helpers ---
-serde_with = { version = "3", default-features = false, features = ["macros", "std"] }
 toml = "0.9"
 quick-xml = "0.38"
 base64 = "0.22"
@@ -125,11 +124,6 @@ tracing-subscriber = { version = "0.3", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 
-# --- v1.0: not implemented, see BRIEF (Prometheus `metrics` endpoint is CUT). Pinned
-# --- so re-enabling §16.7 later is a one-line change in `aulos-api`.
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
-
 # --- dev ---
 insta = "1"
 wiremock = "0.6"
@@ -140,8 +134,6 @@ tokio-test = "0.4"
 tokio-tungstenite = "0.27"
 assert_cmd = "2"
 predicates = "3"
-# v1.0: not implemented, see BRIEF (criterion benchmarks are CUT).
-criterion = "0.7"
 
 # --- internal ---
 aulos-core = { path = "crates/aulos-core" }

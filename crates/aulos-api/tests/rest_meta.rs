@@ -88,7 +88,7 @@ async fn capabilities_carries_the_whole_legacy_format_matrix() {
                 .contains(&json!("cancel_resolve"))
         );
         assert_eq!(body["protocol"]["ws_subprotocol"], "aulos.v2");
-        assert_eq!(body["protocol"]["socketio"], false);
+        assert!(body["protocol"].get("socketio").is_none());
         assert_eq!(body["url_prefix"], prefix);
         assert_eq!(body["config"]["default_format"], "mp4");
         assert_eq!(body["config"]["default_quality"], "best");
@@ -945,11 +945,9 @@ async fn every_http_error_code_answers_with_the_same_envelope() {
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"]["code"], "bad_request");
 
-    // `socketio_removed` is the only 501 the server emits.
     let (status, body) = rig.get("socket.io/?EIO=4&transport=polling").await;
-    assert_eq!(status, 501, "{body}");
-    assert_eq!(body["error"]["code"], "socketio_removed");
-    assert!(body["error"]["message"].as_str().unwrap().contains("ws"));
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
 }
 
 /// POSTs a body the server will refuse on sight.
@@ -1019,12 +1017,6 @@ async fn a_body_over_the_size_limit_answers_the_envelope_not_axums_plain_text() 
                 "{route}"
             );
         }
-
-        // The v1 shim shares the ceiling and must answer the same way.
-        let response = post_oversized(&rig, "add", &huge).await;
-        let (status, answer) = support::status_and_body(response).await;
-        assert_eq!(status, 413, "{answer}");
-        assert_eq!(answer["error"]["code"], "payload_too_large");
     })
     .await;
 }
@@ -1109,7 +1101,6 @@ async fn healthz_and_livez_answer_without_auth() {
             "yt_dlp",
             "boot_id",
             "uptime_s",
-            "v1_shim",
             "seq",
             "components",
             "providers",
@@ -1307,13 +1298,6 @@ async fn the_small_top_level_routes_answer() {
         assert_eq!(body["url_prefix"], prefix);
         assert_eq!(body["protocol"], "v2");
 
-        let (status, body) = rig.get("version").await;
-        assert_eq!(status, 200);
-        assert_eq!(body["version"], "2026.09.04");
-        assert_eq!(body["yt-dlp"], "2026.8.30.232658.dev0");
-        assert_eq!(body["protocol"], "v2");
-        assert_eq!(body["url_prefix"], prefix);
-
         let response = rig.get_raw("robots.txt").await;
         assert_eq!(response.status().as_u16(), 200);
         assert!(
@@ -1369,7 +1353,7 @@ async fn an_unknown_path_and_a_wrong_method_both_carry_the_error_envelope() {
         assert_eq!(response.status().as_u16(), 404);
         assert_envelope(response, "not_found").await;
 
-        // `api/v2/state` is GET-only; `<p>add` (v1) is POST-only.
+        // `api/v2/state` is GET-only; `api/v2/downloads` is POST-only.
         let response = rig
             .http
             .post(rig.url("api/v2/state"))
@@ -1385,7 +1369,7 @@ async fn an_unknown_path_and_a_wrong_method_both_carry_the_error_envelope() {
         );
         assert_envelope(response, "method_not_allowed").await;
 
-        let response = rig.get_raw("add").await;
+        let response = rig.get_raw("api/v2/downloads").await;
         assert_eq!(response.status().as_u16(), 405);
         assert_envelope(response, "method_not_allowed").await;
     })

@@ -359,9 +359,7 @@ expression: body
   "protocol": {
     "batch_ms": 50,
     "delta_semantics": "absent-key-means-unchanged",
-    "socketio": false,
     "urgent_ms": 5,
-    "v1_shim": true,
     "v2": true,
     "ws_path": "ws",
     "ws_subprotocol": "aulos.v2"

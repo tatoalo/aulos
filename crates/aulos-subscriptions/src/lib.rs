@@ -54,5 +54,5 @@ pub use check::{Checker, Feed, FeedChecker, OptionsSource, StaticOptions};
 pub use detect::{Classified, classify, is_media_entry, media_id_of};
 pub use manager::{Manager, SubDeps};
 pub use model::{CheckFailure, CheckReport, FixedJitter, Jitter, RandJitter, Timing};
-pub use public::{parse_enabled, to_v1_dict, v2_frame, v2_removed_frame};
+pub use public::{v2_frame, v2_removed_frame};
 pub use scheduler::{CheckMsg, SubTask, TaskParams};

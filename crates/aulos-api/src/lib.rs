@@ -1,55 +1,4 @@
-//! The HTTP surface: the v2 REST routes, the WebSocket at `<prefix>ws` with its snapshot/delta
-//! protocol, the v1 compatibility shim translating the legacy request and response shapes over the
-//! same v2 core, static serving of completed downloads, `healthz`/`livez`, CORS, request tracing
-//! and auth.
-//!
-//! The API is a leaf: only `aulos-server` may depend on it, and it never sees SQL (DESIGN §3 rules
-//! A3/A4, §11, §14, §16.3).
-//!
-//! # Shape
-//!
-//! ```text
-//!                  ┌──────────── trace: X-Request-Id, X-Aulos-Seq, the access log
-//!   request ──────►│
-//!                  ├── open:  GET <p>, healthz, livez, robots.txt, socket.io/* (501),
-//!                  │          the web UI: <p>assets/*, <p>manifest.webmanifest
-//!                  └── auth ──┬── <p>api/v2/*      v2::router
-//!                             ├── <p>ws            ws::router
-//!                             ├── <p>download/*    files::router
-//!                             └── <p>add, history, … v1::router (legacy CORS)
-//! ```
-//!
-//! Every read of queue state goes through [`aulos_queue::StateView`] — one atomic load, no
-//! database round trip (DESIGN §15.2) — and every mutation goes through
-//! [`aulos_queue::EngineHandle`], so an HTTP handler owns no queue state and takes no lock.
-//!
-//! # Where to look
-//!
-//! | Concern | Module |
-//! |---|---|
-//! | the error envelope, the `Json` responder | [`error`] |
-//! | request ids, the two headers, the access log | [`trace`] |
-//! | cookie passthrough, the proxy header, the bearer token | [`auth`] |
-//! | CORS for v1 and v2 | [`cors`] |
-//! | `download_url` — the one derived wire field | [`view`] |
-//! | `POST downloads`, actions, `state`, `items`, `capabilities`, `catalog`, … | [`v2`] |
-//! | the WebSocket session | [`ws`] |
-//! | `add`, `history`, `delete`, `start`, the legacy subscription and cookie routes | [`v1`] |
-//! | the embedded web UI, its assets and its manifest | [`web`] |
-//! | `download/*`, `audio_download/*`, `Range`, the JSON listing | [`files`] |
-//! | `healthz`, `livez` | [`health`] |
-//!
-//! # BRIEF scope trims applied here
-//!
-//! - `GET <p>metrics` is **CUT**: the route exists and answers `404 not_found` so an operator's
-//!   scrape config fails visibly rather than hanging, and no `metrics` crate is linked.
-//! - The client → server `hello` **topic narrowing**, `ack`, `watch` and `unwatch` frames are
-//!   **CUT** along with `ConnId` and the engine watch registry. `hello`, `ack`, `watch` and
-//!   `unwatch` are still *accepted* (and answered with nothing) so a client written from
-//!   PROTOCOL §5.11 is never disconnected for sending one; `ping`/`pong`, the `Lagged` resync,
-//!   the lag budget, the frame-size cap and the client cap are all implemented.
-//! - Because the snapshot carries every non-terminal record, children included,
-//!   `truncated.groups` is always `[]` and `children_inline` is always `true` on a group.
+//! Aulos v2 HTTP and WebSocket API.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -59,7 +8,6 @@ pub mod error;
 pub mod files;
 pub mod health;
 pub mod trace;
-pub mod v1;
 pub mod v2;
 pub mod view;
 pub mod web;
@@ -83,7 +31,7 @@ pub use error::{ApiError, Json};
 /// The `Sec-WebSocket-Protocol` value every v2 client offers (PROTOCOL §5.1).
 pub const WS_SUBPROTOCOL: &str = auth::SUBPROTOCOL;
 
-/// Build and runtime identity, for `capabilities`, `version` and `healthz`.
+/// Build and runtime identity, for `capabilities` and `healthz`.
 ///
 /// `yt_dlp` is `None` until the binary fills it in: the version comes from the Python shim's
 /// identity handshake (`aulos_provider_ytdlp::RunnerHandle::identity`), and `aulos-api` may not
@@ -293,23 +241,7 @@ impl ApiState {
     }
 }
 
-/// The whole HTTP surface.
-///
-/// # The v1 seam
-///
-/// The v1 compatibility shim is WP-15's package (`src/v1/`). It mounts here, in exactly one place:
-///
-/// ```text
-/// if state.cfg.v1_enabled {
-///     router = router.merge(v1::router(state.clone()));
-/// }
-/// ```
-///
-/// Its routes are all disjoint from the ones below — v1 owns `<p>add`, `<p>history`, `<p>delete`,
-/// `<p>start`, `<p>presets`, `<p>cancel-add`, `<p>subscribe`, `<p>subscriptions*`, the three cookie
-/// routes and the `GET /` redirect, while `<p>version`, `<p>robots.txt`, `<p>`, `<p>socket.io/*`
-/// and the file routes are served here for **both** protocol versions (PROTOCOL §10.1 lists them
-/// under v1 because a v1 client uses them, not because the shim re-implements them).
+/// The HTTP surface.
 pub fn router(state: ApiState) -> Router {
     let p = state.cfg.url_prefix.clone();
     // `GET <p>` is content-negotiated: an `Accept` list containing `text/html` gets the embedded
@@ -317,18 +249,40 @@ pub fn router(state: ApiState) -> Router {
     // `Accept` at all — gets the identity document byte for byte, which is what the iOS app and
     // every existing script depend on. With `AULOS_WEB_UI=false` it is the identity document for
     // every `Accept`.
-    let open: Router = Router::new()
+    let mut open: Router = Router::new()
         .route(&p.route(""), get(web::root))
-        .route(&p.route("version"), get(v2::meta::version))
         .route(&p.route("robots.txt"), get(v2::meta::robots))
         .route(&p.route("healthz"), get(health::healthz))
         .route(&p.route("livez"), get(health::livez))
         // v1.0: not implemented, see BRIEF — the Prometheus endpoint is CUT. The route stays so a
         // scrape config gets an honest 404 with the error envelope.
         .route(&p.route("metrics"), get(v2::meta::metrics_cut))
-        .route(&p.route("socket.io/"), socketio_any())
-        .route(&p.route("socket.io/{*rest}"), socketio_any())
         .with_state(state.clone());
+
+    if !p.is_root() {
+        let to = p.as_str().to_owned();
+        let trimmed = to.trim_end_matches('/').to_owned();
+        let root_target = to.clone();
+        open = open
+            .route(
+                "/",
+                get(move || async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, root_target)],
+                    )
+                }),
+            )
+            .route(
+                &trimmed,
+                get(move || async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, to)],
+                    )
+                }),
+            );
+    }
 
     let guarded: Router = v2_router(state.clone())
         .merge(ws_router(state.clone()))
@@ -353,12 +307,6 @@ pub fn router(state: ApiState) -> Router {
     let mut router = open.merge(guarded);
     if let Some(layer) = cors::v2(&state.cfg.cors_allowed_origins) {
         router = router.layer(layer);
-    }
-    // WP-15's seam. Merged **after** the v2 CORS layer on purpose: `Router::layer` wraps only the
-    // routes registered so far, so the v1 shim keeps legacy's own two-header CORS
-    // (DESIGN §11.6) instead of inheriting v2's method/`Vary`/`Max-Age` set.
-    if state.cfg.v1_enabled {
-        router = router.merge(v1::router(state.clone()));
     }
     // PROTOCOL §1.5: "every non-2xx response, without exception" is the error envelope, and §1.2
     // types every body as JSON. Without these two, axum answers a typo'd path and a wrong method
@@ -385,11 +333,6 @@ async fn wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> error
         aulos_core::ErrorCode::MethodNotAllowed,
         format!("{method} is not allowed on {}", uri.path()),
     )
-}
-
-/// Every method on `socket.io/*` answers the same 501 (DESIGN §11.1).
-fn socketio_any() -> axum::routing::MethodRouter<ApiState> {
-    axum::routing::any(v2::meta::socketio_removed)
 }
 
 /// The `<p>api/v2/*` routes (PROTOCOL §4).

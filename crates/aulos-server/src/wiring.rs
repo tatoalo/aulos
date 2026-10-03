@@ -575,16 +575,12 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
             version = %cfg.version,
             %addr,
             prefix = %cfg.url_prefix,
-            v1_shim = cfg.v1_enabled,
             "aulos-server listening"
         );
         // --- 16. the announce line, on stdout so a supervisor can read it ---------------------
         println!(
-            "aulos-server {} listening on {}{} (v1 shim: {})",
-            cfg.version,
-            addr,
-            cfg.url_prefix,
-            if cfg.v1_enabled { "on" } else { "off" }
+            "aulos-server {} listening on {}{}",
+            cfg.version, addr, cfg.url_prefix
         );
         if let Some(tx) = ready {
             let _ = tx.send(addr);

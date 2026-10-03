@@ -28,9 +28,6 @@ pub struct StoreOptions {
     /// `AULOS_MEM_DONE_ITEMS` — how many terminal rows [`crate::BootState`] loads into the
     /// engine's done window (DESIGN §8.9).
     pub done_window: u32,
-    /// `AULOS_V1_HISTORY_MAX` — the hard cap the v1 shim's `done[]` is served under
-    /// (DESIGN §11.4). `0` means unlimited, which is the default and full legacy fidelity.
-    pub v1_history_max: u32,
 }
 
 impl StoreOptions {
@@ -45,7 +42,6 @@ impl StoreOptions {
             busy_timeout_ms: 5_000,
             entry_max_bytes: 262_144,
             done_window: 500,
-            v1_history_max: 0,
         }
     }
 
@@ -60,7 +56,6 @@ impl StoreOptions {
             busy_timeout_ms: 5_000,
             entry_max_bytes: cfg.entry_max_bytes,
             done_window: cfg.mem_done_items,
-            v1_history_max: cfg.v1_history_max,
         }
     }
 
@@ -99,36 +94,11 @@ impl StoreOptions {
             DbSynchronous::Full => "FULL",
         }
     }
-
-    /// The effective `v1_done` limit: the caller's request, capped by `AULOS_V1_HISTORY_MAX`.
-    ///
-    /// `0` and `None` both mean unlimited on either side, so the cap can only ever tighten.
-    #[must_use]
-    pub fn v1_limit(&self, requested: Option<u32>) -> Option<u32> {
-        let cap = (self.v1_history_max > 0).then_some(self.v1_history_max);
-        match (requested.filter(|n| *n > 0), cap) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, cap) => cap,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn v1_limit_lets_the_cap_only_tighten() {
-        let mut o = StoreOptions::new("x.db");
-        assert_eq!(o.v1_limit(None), None, "0 = unlimited on both sides");
-        assert_eq!(o.v1_limit(Some(10)), Some(10));
-        assert_eq!(o.v1_limit(Some(0)), None);
-        o.v1_history_max = 100;
-        assert_eq!(o.v1_limit(None), Some(100));
-        assert_eq!(o.v1_limit(Some(10)), Some(10));
-        assert_eq!(o.v1_limit(Some(1_000)), Some(100));
-    }
 
     #[test]
     fn the_read_pool_is_never_empty() {

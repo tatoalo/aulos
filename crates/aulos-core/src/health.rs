@@ -102,7 +102,7 @@ impl ComponentHealth {
 
 /// The `healthz` payload minus the fields only `aulos-api` can fill in.
 ///
-/// `version`, `yt_dlp`, `uptime_s`, `url_prefix`, `v1_shim`, `providers` and `ws` are assembled by
+/// `version`, `yt_dlp`, `uptime_s`, `url_prefix`, `providers` and `ws` are assembled by
 /// the API handler from its own state (DESIGN §16.3); what lives here is the part the registry
 /// owns and the part `DomainEvent::HealthChanged` carries.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

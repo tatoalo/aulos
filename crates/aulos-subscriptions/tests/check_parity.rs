@@ -350,7 +350,7 @@ async fn an_in_flight_duplicate_is_also_rejected() {
 /// the wave-2 note in `docs/INTEGRATION-NOTES.md`). It was already unreachable over HTTP:
 /// `tests/v1_golden/MANIFEST.json` records that `parse_download_options` rejects a falsy `url`
 /// with `missing 'url', 'download_type', or 'quality'` before the manager ever sees it. The
-/// string itself is still pinned, in `aulos_api::v1::legacy`.
+/// string remains part of the subscription error.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_padded_url_is_normalised_and_is_its_own_uniqueness_key() {
     let (h, _p) = with_feed("chan", vec![entry("a")]).await;
@@ -540,10 +540,9 @@ async fn update_accepts_only_the_three_legacy_fields() {
     assert_eq!(err.code(), aulos_core::ErrorCode::NotFound);
 }
 
-/// The v2 object is 16 keys and the v1 projection is exactly the legacy 13 with float-second
-/// `last_checked` (DESIGN §14.1).
+/// The v2 subscription field set (PROTOCOL §9).
 #[tokio::test(flavor = "multi_thread")]
-async fn both_projections_have_their_documented_key_sets() {
+async fn the_v2_projection_has_its_documented_key_set() {
     let (h, _p) = with_feed("chan", vec![entry("a")]).await;
     let view = h.subscribe(&feed_url("chan")).await.expect("subscribed");
 
@@ -552,22 +551,9 @@ async fn both_projections_have_their_documented_key_sets() {
     assert_eq!(obj.len(), 16);
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    let mut expected: Vec<&str> = SubscriptionView::V1_KEYS
-        .iter()
-        .chain(SubscriptionView::V2_ADDITIONAL_KEYS.iter())
-        .copied()
-        .collect();
+    let mut expected: Vec<&str> = SubscriptionView::KEYS.to_vec();
     expected.sort_unstable();
     assert_eq!(keys, expected);
-
-    let v1 = aulos_subscriptions::to_v1_dict(&view);
-    let v1obj = v1.as_object().expect("object");
-    assert_eq!(v1obj.len(), 13);
-    let ms = view.last_checked.expect("last_checked");
-    assert_eq!(
-        v1obj["last_checked"].as_f64().expect("float seconds"),
-        ms as f64 / 1_000.0
-    );
 }
 
 /// The two PROTOCOL §5.9 envelopes, as this crate's producers see them.

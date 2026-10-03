@@ -57,8 +57,6 @@ mod subscriptions;
 mod telegram;
 /// The v1 compatibility shim's one extra read (DESIGN §11.4). Added additively for WP-15; see
 /// `docs/INTEGRATION-NOTES.md`.
-pub mod v1;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -76,7 +74,8 @@ use crate::actor::{StoreMetrics, WriteJob, WriteMsg};
 
 pub use crate::alloc::{IdWarning, ORD_BLOCK, SEQ_BLOCK};
 pub use crate::error::StoreError;
-pub use crate::import::canonical_key;
+mod canonical;
+pub use crate::canonical::canonical_key;
 pub use crate::meta::{IMPORT_KEYS, IMPORT_REPORT, IMPORTED_AT, IMPORTED_FROM};
 pub use crate::ops::{Durability, WriteOp, retry_ops};
 pub use crate::options::StoreOptions;
@@ -297,32 +296,6 @@ impl Store {
     pub async fn boot_state(&self) -> Result<BootState, StoreError> {
         let window = self.opts.done_window;
         self.read(move |c| reads::boot_state(c, window)).await
-    }
-
-    /// The v1 shim's `delete`/`start` id resolution ladder (DESIGN §11.3).
-    ///
-    /// A ULID that exists wins outright; otherwise every exact `url` match; otherwise every exact
-    /// `media_id` match; otherwise the empty vector, which the shim records in `skipped`.
-    ///
-    /// # Errors
-    /// [`StoreError`] on a decode failure or an unreachable pool.
-    pub async fn resolve_v1_token(&self, tok: &str) -> Result<Vec<ItemId>, StoreError> {
-        let tok = tok.to_owned();
-        self.read(move |c| reads::resolve_v1_token(c, &tok)).await
-    }
-
-    /// The v1 shim's `done[]` source (DESIGN §11.4).
-    ///
-    /// `finished` and `error` only — `canceled` is omitted, because the shipped iOS client maps an
-    /// unknown status to `.pending` and a cancelled row would sit in "In Progress" forever.
-    /// `limit` is tightened by `AULOS_V1_HISTORY_MAX`; `None` and `0` both mean unlimited, which is
-    /// the default and full legacy fidelity. A cap keeps the **most recent** rows.
-    ///
-    /// # Errors
-    /// [`StoreError`] on a decode failure or an unreachable pool.
-    pub async fn v1_done(&self, limit: Option<u32>) -> Result<Vec<Item>, StoreError> {
-        let effective = self.opts.v1_limit(limit);
-        self.read(move |c| reads::v1_done(c, effective)).await
     }
 
     /// Every subscription, oldest first.

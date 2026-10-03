@@ -321,85 +321,8 @@ pub(crate) fn entry_blob(
 }
 
 // ---------------------------------------------------------------------------
-// v1_done / resolve_v1_token / due_clears
+// due_clears
 // ---------------------------------------------------------------------------
-
-/// [`crate::Store::v1_done`] — the v1 shim's `done[]` source (DESIGN §11.4).
-///
-/// `status IN ('finished','error')`, `ORDER BY ord ASC, id ASC`, served off the `(status, ord)`
-/// index. `canceled` is excluded even though it is terminal: the shipped iOS `DownloadStatus` has
-/// no `canceled` case and maps unknown to `.pending`, so a cancelled row would sit in the client's
-/// "In Progress" section forever. Legacy made cancels vanish and this is faithful to that.
-///
-/// A `limit` keeps the **most recent** rows — the oldest are the ones an operator with a
-/// 4 000-row history can afford to lose — but the returned order is still oldest-first.
-pub(crate) fn v1_done(conn: &Connection, limit: Option<u32>) -> Result<Vec<Item>, StoreError> {
-    let mut out = match limit {
-        None => {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM items WHERE status IN ('finished','error') \
-                 ORDER BY ord ASC, id ASC"
-            ))?;
-            let mut rows = stmt.query([])?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                out.push(row_to_item(row)?);
-            }
-            out
-        }
-        Some(n) => {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM items WHERE status IN ('finished','error') \
-                 ORDER BY ord DESC, id DESC LIMIT ?1"
-            ))?;
-            let mut rows = stmt.query([i64::from(n)])?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                out.push(row_to_item(row)?);
-            }
-            out.reverse();
-            out
-        }
-    };
-    out.shrink_to_fit();
-    Ok(out)
-}
-
-/// [`crate::Store::resolve_v1_token`] — the DESIGN §11.3 resolution ladder.
-///
-/// One query, then the ladder is applied to its rows: a ULID that exists wins outright; otherwise
-/// every exact `url` match; otherwise every exact `media_id` match; otherwise nothing. Ties resolve
-/// to **all** matches, which is what a legacy user expects from a URL-keyed API — the shipped iOS
-/// client's `clearCompleted` sends only urls.
-pub(crate) fn resolve_v1_token(conn: &Connection, token: &str) -> Result<Vec<ItemId>, StoreError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, id = ?1 AS by_id, url = ?1 AS by_url, \
-                COALESCE(media_id = ?1, 0) AS by_media \
-         FROM items WHERE id = ?1 OR url = ?1 OR media_id = ?1 ORDER BY ord ASC, id ASC",
-    )?;
-    let mut rows = stmt.query([token])?;
-    let mut by_id = Vec::new();
-    let mut by_url = Vec::new();
-    let mut by_media = Vec::new();
-    while let Some(row) = rows.next()? {
-        let raw: String = row.get(0)?;
-        let id = ItemId::from_str(&raw).map_err(|e| StoreError::decode("items.id", e))?;
-        if row.get::<_, i64>(1)? != 0 {
-            by_id.push(id);
-        } else if row.get::<_, i64>(2)? != 0 {
-            by_url.push(id);
-        } else if row.get::<_, i64>(3)? != 0 {
-            by_media.push(id);
-        }
-    }
-    if !by_id.is_empty() {
-        return Ok(by_id);
-    }
-    if !by_url.is_empty() {
-        return Ok(by_url);
-    }
-    Ok(by_media)
-}
 
 /// [`crate::Store::due_clears`] — the rows `CLEAR_COMPLETED_AFTER` has come due for
 /// (DESIGN §8.10).

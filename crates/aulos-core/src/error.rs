@@ -67,8 +67,7 @@ pub enum ErrorCode {
     Canceled,
     /// Item-terminal — shim or plugin protocol violation.
     Contract,
-    /// 501 — `GET <p>socket.io/*`. The only 501 in the taxonomy: it exists so a stale Socket.IO
-    /// client fails loudly instead of hanging on a handshake (DESIGN §11.1).
+    /// Historical Socket.IO rejection code retained for serialized data compatibility.
     SocketioRemoved,
     /// 503 — SQLite busy or locked; served with `Retry-After: 1`.
     StateUnavailable,

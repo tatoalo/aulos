@@ -1,10 +1,6 @@
 //! `GET`/`POST`/`DELETE api/v2/cookies` (PROTOCOL §4.7, DESIGN §16.6).
 //!
-//! The upload cap is the legacy one, preserved to the byte: **1 000 000 bytes, decimal**, not
-//! 1 MiB, with the message `Cookie file too large (max 1MB)`. A 1 020 000-byte file the Python
-//! server rejected must still be rejected, and a client that shows the message must see the same
-//! string — which is why the three legacy strings are `pub const`s here rather than literals: the
-//! v1 shim (WP-15) emits the same three from `<p>upload-cookies` / `<p>delete-cookies`.
+//! The upload cap is 1 000 000 bytes (decimal), reported as `Cookie file too large (max 1MB)`.
 //!
 //! The file is written atomically (`cookies.txt.tmp`, then a rename) with mode `0600`, and then
 //! registered as the `cookiefile` runtime override so every job spawned afterwards picks it up

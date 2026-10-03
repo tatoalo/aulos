@@ -91,7 +91,6 @@ pub async fn healthz(State(state): State<ApiState>, Q(query): Q<HealthQuery>) ->
         "boot_id": state.hub.boot_id(),
         "uptime_s": uptime_s(&state),
         "url_prefix": state.cfg.url_prefix,
-        "v1_shim": state.cfg.v1_enabled,
         "seq": state.hub.head().0,
         "probe": probe_label,
         "components": components,

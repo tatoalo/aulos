@@ -123,11 +123,6 @@ fn assert_serve_runs_and_stops_on_sigterm(args: &[&str]) {
         "unexpected announce line: {line:?}; stderr was:\n{}",
         log()
     );
-    assert!(
-        line.contains("(v1 shim: on)"),
-        "the announce line must state the shim (DESIGN §16.1 step 16): {line:?}"
-    );
-
     // Still running: a process that exited would make the image permanently unhealthy.
     assert!(
         matches!(child.try_wait(), Ok(None)),

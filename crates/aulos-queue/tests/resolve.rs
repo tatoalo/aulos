@@ -1,5 +1,5 @@
 //! Resolution, in-place group promotion, the runner-up fall-through, `pre_error` children,
-//! `cancel-resolve` and `WaitResolved` (DESIGN §8.4, §6.4, §11.2).
+//! `cancel-resolve` (DESIGN §8.4, §6.4).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
@@ -580,121 +580,6 @@ async fn cancel_resolve_all_stops_an_expansion_mid_flight() {
         group.status,
         Status::Canceled,
         "the header follows its surviving children"
-    );
-}
-
-#[tokio::test]
-async fn wait_resolved_answers_immediately_for_a_settled_id() {
-    let h = Harness::new().await;
-    let id = h.add("https://fake.test/watch/quick").await;
-    h.until_resolved(id).await;
-    let reports = h.handle.wait_resolved(vec![id]).await;
-    assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0].id, id);
-    assert_eq!(reports[0].kind, Kind::Item);
-    assert!(reports[0].outcome.is_ok());
-}
-
-#[tokio::test]
-async fn wait_resolved_answers_on_the_transition_and_serves_two_callers() {
-    let slow = FakeProvider::from_toml(
-        r#"
-        id = "fake"
-        score = 200
-        hosts = ["fake.test"]
-
-        [[timeline]]
-        resolve = [{ kind = "wait", ms = 30 }]
-    "#,
-    )
-    .unwrap();
-    let h = Harness::builder().provider(Arc::new(slow)).build().await;
-    let id = h.add("https://fake.test/watch/wait").await;
-
-    let one = h.handle.clone();
-    let two = h.handle.clone();
-    let (a, b) = tokio::join!(one.wait_resolved(vec![id]), two.wait_resolved(vec![id]));
-    assert_eq!(a.len(), 1, "both callers get an answer");
-    assert_eq!(b.len(), 1);
-    assert!(a[0].outcome.is_ok());
-    assert_eq!(a[0], b[0]);
-}
-
-#[tokio::test]
-async fn wait_resolved_reports_a_failure_as_the_wire_error() {
-    let failing = FakeProvider::from_toml(
-        r#"
-        id = "fake"
-        score = 200
-        hosts = ["fake.test"]
-
-        [[timeline]]
-        resolve = [{ kind = "wait", ms = 20 }, { kind = "fail", code = "geo_restricted" }]
-    "#,
-    )
-    .unwrap();
-    let h = Harness::builder().provider(Arc::new(failing)).build().await;
-    let id = h.add("https://fake.test/watch/geo").await;
-    let reports = h.handle.wait_resolved(vec![id]).await;
-    assert_eq!(reports.len(), 1);
-    let err = reports[0].outcome.clone().expect_err("a failure");
-    assert_eq!(err.code, ErrorCode::GeoRestricted);
-}
-
-#[tokio::test]
-async fn wait_resolved_reports_a_group_as_a_group() {
-    let h = Harness::builder()
-        .provider(Arc::new(expanding(2)))
-        .build()
-        .await;
-    let id = h.add("https://fake.test/playlist/two").await;
-    let reports = h.handle.wait_resolved(vec![id]).await;
-    assert_eq!(reports[0].kind, Kind::Group);
-    assert!(reports[0].outcome.is_ok());
-}
-
-#[tokio::test]
-async fn a_dropped_wait_resolved_receiver_does_not_leak_a_waiter() {
-    let slow = FakeProvider::from_toml(
-        r#"
-        id = "fake"
-        score = 200
-        hosts = ["fake.test"]
-
-        [[timeline]]
-        resolve = [{ kind = "wait", ms = 40 }]
-    "#,
-    )
-    .unwrap();
-    let h = Harness::builder().provider(Arc::new(slow)).build().await;
-    let id = h.add("https://fake.test/watch/gone").await;
-
-    // Abandon the wait, then let the resolution complete. The engine must prune the waiter rather
-    // than keep it forever, which the following successful wait proves: a leaked waiter would
-    // still be holding a `oneshot` for an id that never transitions again.
-    let waiting = tokio::spawn({
-        let handle = h.handle.clone();
-        async move { handle.wait_resolved(vec![id]).await }
-    });
-    waiting.abort();
-    h.until_resolved(id).await;
-
-    let again = h.handle.wait_resolved(vec![id]).await;
-    assert_eq!(again.len(), 1);
-    assert!(again[0].outcome.is_ok());
-}
-
-#[tokio::test]
-async fn an_unknown_id_is_reported_rather_than_waited_on() {
-    let h = Harness::new().await;
-    let reports = h
-        .handle
-        .wait_resolved(vec![aulos_core::ItemId::new()])
-        .await;
-    assert_eq!(reports.len(), 1);
-    assert_eq!(
-        reports[0].outcome.clone().expect_err("gone").code,
-        ErrorCode::NotFound
     );
 }
 

@@ -1,5 +1,5 @@
 //! Boot steps 1–9 of DESIGN §16.1: configuration, tracing, directories, the database, the
-//! importer, `YTDL_OPTIONS`, the plugin scan and the tool probes.
+//! stored import report, `YTDL_OPTIONS`, the plugin scan and the tool probes.
 //!
 //! Every one of these completes **before** the listener binds (step 15), so the first request
 //! already sees a consistent snapshot. Splitting them out of [`crate::wiring`] keeps the task
@@ -17,7 +17,7 @@ use aulos_provider::Registry;
 use aulos_provider::command::provider::{CommandPluginLoader, PluginEnv};
 use aulos_provider_sc::ScProvider;
 use aulos_provider_ytdlp::YtdlpProvider;
-use aulos_store::import::{self, ImportErrorCode, ImportOpts, ImportReport, OnError};
+use aulos_store::import::{self, ImportReport};
 use aulos_store::{Store, StoreOptions};
 
 /// The exit code for invalid configuration (BRIEF §15, DESIGN §16.1 step 1).
@@ -48,7 +48,7 @@ pub const THIRD_PARTY_DAMPENING: &[&str] = &[
 pub struct Booted {
     /// The effective configuration.
     pub cfg: Arc<Config>,
-    /// The store, already migrated and (if this was a first start) imported.
+    /// The store, with SQLite schema migrations applied.
     pub store: Store,
     /// The live `YTDL_OPTIONS` snapshot.
     pub ytdl: Arc<ArcSwap<YtdlOptions>>,
@@ -187,89 +187,41 @@ pub fn make_dirs(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Opens the database and runs the legacy importer (DESIGN §16.1 steps 5–6, §7.6).
-///
-/// The importer is called on **every** boot and decides for itself whether there is anything to
-/// do: [`import::import`] answers `already_imported` when the marker file exists, when
-/// `meta.imported_at` is set, or when the items table is non-empty, and that answer is treated
-/// here as a non-fatal skip. Gating on "the database file did not exist" instead — which is what
-/// this used to do — loses the import permanently the first time a boot is interrupted between
-/// `Store::open` (which creates `aulos.db`) and the importer's single transaction: the next boot
-/// sees a file, never calls the importer, and `healthz.components.importer` reports `disabled`
-/// while the whole legacy queue still sits unread in `STATE_DIR`. The three-way check is exactly
-/// as strong a guard against resurrecting rows the operator deleted.
-///
-/// On a fatal import the error is returned, and the database is deleted **only when this boot is
-/// the one that created it**, so the next boot retries from a clean slate rather than serving half
-/// a queue. That last qualification is not optional: [`ImportFatal::should_delete_db`] was written
-/// when the importer only ever ran against a file this boot had just created, and it is true for
-/// every fatal class except `AlreadyImported` — including the `DbWriteFailed` that the importer's
-/// own "have we already imported?" probe raises when it merely *reads* badly. Without the `fresh`
-/// gate a transient `SQLITE_IOERR` or an expired busy timeout on a flaky volume would delete an
-/// installation's whole queue, history, subscriptions and Telegram config. A database we could
-/// not read is never a database we should remove; leaving it costs nothing, because a
-/// never-imported database is picked up again by the next boot (see the half-created-database
-/// test below).
+/// Opens and upgrades the SQLite database without importing JSON state.
 ///
 /// # Errors
-/// A store that cannot be opened, or a fatal import.
+/// The database is unavailable, or an unmigrated JSON installation needs an explicit import.
 pub async fn open_store(cfg: &Config, health: &HealthRegistry) -> anyhow::Result<Store> {
-    // Before `Store::open`, which creates the file: afterwards the answer is always "it exists".
-    let fresh = !cfg.db_path.exists();
     let store = Store::open(StoreOptions::from_config(cfg))
         .map_err(|e| anyhow::anyhow!("could not open {}: {e}", cfg.db_path.display()))?;
     for warning in store.id_warnings() {
-        // BRIEF scope trims: `repair-ids` is CUT, so the boot consistency check WARNs and
-        // continues rather than refusing to start.
         tracing::warn!(target: "aulos_store::alloc", "{warning}");
     }
-
-    tracing::debug!(
-        state_dir = %cfg.paths.state.display(),
-        "looking for legacy state to import"
-    );
-    match import::import(&cfg.paths.state, &store, import_opts(cfg)).await {
-        Ok(report) => {
-            tracing::info!("\n{}", report.render_table());
-            health.set(IMPORTER_COMPONENT, importer_component(Some(&report)));
-        }
-        // Not a failure and not even a surprise: it is what every boot after the first says. The
-        // component is then filled from the report the first import stored, so `healthz` keeps
-        // reporting the same `imported_at` for the life of the installation.
-        Err(fatal) if fatal.code == ImportErrorCode::AlreadyImported => {
-            tracing::debug!(reason = %fatal, "the legacy state was already imported");
-            let stored = import::stored_report(&store).await.ok().flatten();
-            health.set(IMPORTER_COMPONENT, importer_component(stored.as_ref()));
-        }
-        Err(fatal) => {
-            tracing::error!("\n{}", fatal.report.render_table());
-            let _ = store.close().await;
-            if !fresh {
-                tracing::warn!(
-                    db = %cfg.db_path.display(),
-                    "keeping the existing database: this boot did not create it"
-                );
-            } else if fatal.should_delete_db()
-                && let Err(e) = import::delete_db_files(&cfg.db_path)
-            {
-                tracing::warn!("could not remove {}: {e}", cfg.db_path.display());
-            }
-            anyhow::bail!("the legacy import failed: {fatal}");
-        }
+    let report = import::stored_report(&store).await?;
+    let has_json = [
+        "queue.json",
+        "pending.json",
+        "completed.json",
+        "subscriptions.json",
+        "telegram_bot_config.json",
+    ]
+    .iter()
+    .any(|name| cfg.paths.state.join(name).is_file());
+    if report.is_none()
+        && has_json
+        && !cfg.paths.state.join(import::MARKER_FILE).exists()
+        && store.boot_state().await?.items_total == 0
+        && store.subscriptions().await?.is_empty()
+    {
+        store.close().await?;
+        anyhow::bail!(
+            "legacy JSON state needs explicit migration: run aulos-server import --state-dir '{}' --db '{}' (use --dry-run first)",
+            cfg.paths.state.display(),
+            cfg.db_path.display()
+        );
     }
+    health.set(IMPORTER_COMPONENT, importer_component(report.as_ref()));
     Ok(store)
-}
-
-/// The importer options a `serve` run uses.
-#[must_use]
-pub fn import_opts(cfg: &Config) -> ImportOpts {
-    ImportOpts {
-        dry_run: false,
-        force: false,
-        on_error: OnError::from(cfg.import_on_error),
-        clear_completed_after_s: cfg.clear_completed_after,
-        max_seen_ids: cfg.subscription_max_seen_ids,
-    }
 }
 
 /// `healthz.components.importer` (DESIGN §16.3, §7.6.1).
@@ -318,11 +270,11 @@ pub fn load_ytdl_options(cfg: &Config) -> anyhow::Result<Arc<ArcSwap<YtdlOptions
 
     // Legacy did this only inside its `__main__` block, so an imported cookie jar was invisible
     // to a subscription check (DESIGN §17.2).
-    let cookies = cfg.paths.state.join(import::COOKIES_FILE);
+    let cookies = cfg.paths.state.join(aulos_core::ytdl_options::COOKIES_FILE);
     if cookies.is_file() {
         tracing::info!(path = %cookies.display(), "adopting the existing cookie jar");
         options.set_runtime_override(
-            import::COOKIEFILE_KEY,
+            aulos_core::ytdl_options::COOKIEFILE_KEY,
             serde_json::Value::String(cookies.display().to_string()),
         );
     }
@@ -570,13 +522,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
-        let jar = state.join(import::COOKIES_FILE);
+        let jar = state.join(aulos_core::ytdl_options::COOKIES_FILE);
         std::fs::write(&jar, "# Netscape HTTP Cookie File\n").unwrap();
         let cfg = config::load(&env(&[("STATE_DIR", &state.display().to_string())])).unwrap();
 
         let ytdl = load_ytdl_options(&cfg).unwrap();
         assert_eq!(
-            ytdl.load().overrides[import::COOKIEFILE_KEY],
+            ytdl.load().overrides[aulos_core::ytdl_options::COOKIEFILE_KEY],
             serde_json::Value::String(jar.display().to_string()),
             "legacy adopted the jar only in __main__; we always do"
         );
@@ -647,7 +599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_first_start_imports_and_a_second_does_not() {
+    async fn json_migration_is_explicit_and_normal_boot_preserves_the_database() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
@@ -657,161 +609,51 @@ mod tests {
             ("DOWNLOAD_DIR", &root.path().display().to_string()),
         ]))
         .unwrap();
-
+        for _ in 0..2 {
+            let error = open_store(&cfg, &HealthRegistry::new()).await.unwrap_err();
+            assert!(error.to_string().contains("aulos-server import"));
+            assert!(cfg.db_path.is_file());
+            assert!(!state.join(import::MARKER_FILE).exists());
+        }
+        let args = crate::import_cmd::Args {
+            state_dir: state.clone(),
+            db: cfg.db_path.clone(),
+            dry_run: false,
+            force: false,
+            skip_corrupt: false,
+        };
+        assert_eq!(crate::import_cmd::execute(&args, &cfg).await, 0);
         let health = HealthRegistry::new();
         let store = open_store(&cfg, &health).await.unwrap();
-        let imported = import::stored_report(&store).await.unwrap();
-        assert!(imported.is_some(), "the first start must import");
-        assert!(
-            state.join(import::MARKER_FILE).is_file(),
-            "the marker must be written"
-        );
+        let before = store.boot_state().await.unwrap().items_total;
+        assert!(before > 0);
         assert_eq!(
             health.snapshot().components[IMPORTER_COMPONENT].status,
             ComponentStatus::Ok
         );
         store.close().await.unwrap();
-
-        // The second start finds a database and must not re-import — which is what stops it
-        // resurrecting rows the operator deleted.
         std::fs::remove_file(state.join(import::MARKER_FILE)).unwrap();
-        let health2 = HealthRegistry::new();
-        let store2 = open_store(&cfg, &health2).await.unwrap();
-        assert!(
-            !state.join(import::MARKER_FILE).exists(),
-            "an existing database must not trigger a second import"
-        );
-        assert_eq!(
-            health2.snapshot().components[IMPORTER_COMPONENT].status,
-            ComponentStatus::Ok,
-            "the stored report is read back on a later boot"
-        );
-        store2.close().await.unwrap();
-    }
-
-    /// The cutover regression: a boot killed between `Store::open` (which *creates* `aulos.db`)
-    /// and the importer's single transaction used to lose the legacy state for good, because the
-    /// next boot only asked "does the file exist?". The importer's own three-way check is what
-    /// decides now, so a half-created database still gets imported.
-    #[tokio::test]
-    async fn a_half_created_database_is_still_imported_on_the_next_boot() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        std::fs::create_dir_all(&state).unwrap();
-        copy_fixture("v2", &state);
-        let cfg = config::load(&env(&[
-            ("STATE_DIR", &state.display().to_string()),
-            ("DOWNLOAD_DIR", &root.path().display().to_string()),
-        ]))
-        .unwrap();
-
-        // Exactly what a `docker compose down` during the import leaves behind: the schema, no
-        // `meta.imported_at`, no marker file, no rows.
-        let half = Store::open(StoreOptions::from_config(&cfg)).unwrap();
-        assert!(
-            import::stored_report(&half).await.unwrap().is_none(),
-            "the interrupted boot must not have recorded an import"
-        );
-        half.close().await.unwrap();
-        assert!(cfg.db_path.exists(), "the database file survives the kill");
+        std::fs::write(state.join("queue.json"), "invalid leftover JSON").unwrap();
+        let store = open_store(&cfg, &HealthRegistry::new()).await.unwrap();
+        assert_eq!(store.boot_state().await.unwrap().items_total, before);
         assert!(!state.join(import::MARKER_FILE).exists());
-
-        let health = HealthRegistry::new();
-        let store = open_store(&cfg, &health).await.unwrap();
-        assert!(
-            import::stored_report(&store).await.unwrap().is_some(),
-            "an existing but never-imported database must still be imported"
-        );
-        assert!(
-            state.join(import::MARKER_FILE).is_file(),
-            "the marker is written by the recovered import"
-        );
-        assert_eq!(
-            health.snapshot().components[IMPORTER_COMPONENT].status,
-            ComponentStatus::Ok,
-            "healthz must not report `disabled` after a recovered import"
-        );
         store.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn a_fatal_import_deletes_the_database_and_fails_the_boot() {
+    async fn fresh_aulos_boot_does_not_create_import_state() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
-        copy_fixture("corrupt", &state);
         let cfg = config::load(&env(&[
             ("STATE_DIR", &state.display().to_string()),
             ("DOWNLOAD_DIR", &root.path().display().to_string()),
         ]))
         .unwrap();
-
-        let health = HealthRegistry::new();
-        let err = open_store(&cfg, &health)
-            .await
-            .expect_err("a corrupt state dir is fatal under AULOS_IMPORT_ON_ERROR=fail");
-        assert!(err.to_string().contains("import failed"), "{err}");
-        assert!(
-            !cfg.db_path.exists(),
-            "the half-imported database must be gone so the next boot retries cleanly"
-        );
-    }
-
-    /// The regression the "import on every boot" change opened: the importer is now called against
-    /// databases that hold an installation's whole life, and several of its fatal classes are
-    /// raised by conditions that wrote nothing — an unreadable `STATE_DIR` here, a transient
-    /// SQLite read error inside its own idempotence probe in production. `should_delete_db()` is
-    /// true for all of them, so without the `fresh` gate a bind mount that failed to come up would
-    /// delete the queue, the history, the subscriptions and the Telegram config.
-    #[tokio::test]
-    async fn a_fatal_import_never_deletes_a_database_this_boot_did_not_create() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        std::fs::create_dir_all(&state).unwrap();
-        copy_fixture("v2", &state);
-        let db = root.path().join("aulos.db");
-        let cfg = config::load(&env(&[
-            ("STATE_DIR", &state.display().to_string()),
-            ("DOWNLOAD_DIR", &root.path().display().to_string()),
-            ("AULOS_DB_PATH", &db.display().to_string()),
-        ]))
-        .unwrap();
-
-        // An established installation: one good import, then a clean shutdown.
         let health = HealthRegistry::new();
         let store = open_store(&cfg, &health).await.unwrap();
-        assert!(import::stored_report(&store).await.unwrap().is_some());
+        assert!(import::stored_report(&store).await.unwrap().is_none());
+        assert!(!state.join(import::MARKER_FILE).exists());
         store.close().await.unwrap();
-        assert!(db.is_file(), "the established database");
-
-        // The next boot finds no `STATE_DIR` at all — the volume did not mount, or the operator
-        // cleared the legacy directory once the migration was done. `import` answers
-        // `StateDirUnreadable` before it ever looks at the database, and that fatal reports
-        // `should_delete_db() == true`.
-        let vanished = root.path().join("not-mounted");
-        let cfg2 = config::load(&env(&[
-            ("STATE_DIR", &vanished.display().to_string()),
-            ("DOWNLOAD_DIR", &root.path().display().to_string()),
-            ("AULOS_DB_PATH", &db.display().to_string()),
-        ]))
-        .unwrap();
-        assert_eq!(cfg2.db_path, db, "both boots address the same database");
-
-        let health2 = HealthRegistry::new();
-        let err = open_store(&cfg2, &health2)
-            .await
-            .expect_err("an unreadable STATE_DIR is fatal");
-        assert!(err.to_string().contains("import failed"), "{err}");
-        assert!(
-            db.is_file(),
-            "a database this boot did not create must survive a fatal import"
-        );
-        // And it still holds what the first boot imported.
-        let store2 = Store::open(StoreOptions::from_config(&cfg)).unwrap();
-        assert!(
-            import::stored_report(&store2).await.unwrap().is_some(),
-            "the imported state is intact"
-        );
-        store2.close().await.unwrap();
     }
 }

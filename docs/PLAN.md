@@ -1,3 +1,5 @@
+> Historical implementation plan. The v1 cutover requirements and automatic-import steps are superseded by the October 2026 retirement decisions in BRIEF; see PROTOCOL and README for current behavior.
+
 # Aulos Server — Implementation Plan (PLAN.md)
 
 Status: **binding**. Derived from `docs/DESIGN.md`; the wire contract is `docs/PROTOCOL.md`.

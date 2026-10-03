@@ -1,7 +1,7 @@
 //! The one HTTP error envelope (PROTOCOL §1.5, §1.6, DESIGN §5).
 //!
-//! Every non-2xx response the server produces — a validation failure, a 401, a 404, the
-//! `socket.io` 501, a store timeout — is this object, and nothing else:
+//! Every non-2xx response the server produces — a validation failure, a 401, a 404,
+//! a store timeout — is this object, and nothing else:
 //!
 //! ```json
 //! { "error": { "code": "validation_failed", "message": "…", "field": "quality",
