@@ -24,12 +24,12 @@ pub const EXIT_MISSING: i32 = 1;
 pub async fn check(cfg: &Config) -> (String, i32) {
     let report = tools::probe_everything(cfg, &tools::doctor_tools()).await;
     let mut out = report.render();
-    let missing = report.missing_optional();
-    if !missing.is_empty() {
+    let degraded = report.degraded_optional();
+    if !degraded.is_empty() {
         out.push_str(&format!(
-            "\n{} optional tool(s) missing: {} — the matching healthz component is degraded\n",
-            missing.len(),
-            missing.join(", ")
+            "\n{} optional tool check(s) failed: {} — the matching healthz component is degraded\n",
+            degraded.len(),
+            degraded.join(", ")
         ));
     }
     if report.required_ok() {

@@ -65,6 +65,13 @@ docker compose run --rm aulos check-config   # the effective config, secrets red
 docker compose run --rm aulos doctor         # ffmpeg, ffprobe, N_m3u8DL-RE, deno, python3, yt-dlp, bgutil-pot
 ```
 
+Optional tool version checks allow 30 seconds. At startup, timeouts are reported as `SLOW`
+and other transient failures as `FAILED`; both leave the component degraded and retry in the
+background after 5, 15, 30 and 60 seconds, then every 5 minutes. Recovery updates health and
+connected web clients automatically. `MISSING` means the executable was not found or could not
+be executed due to permissions; those failures remain degraded until restart. `doctor` runs
+one check per tool without background retries.
+
 ## Configuration
 
 Every setting is an environment variable, and every legacy MeTube-POT variable keeps its name,

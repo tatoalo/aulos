@@ -373,7 +373,7 @@ pub fn build_registry(
     (Arc::new(RwLock::new(registry)), hooks)
 }
 
-/// Runs the DESIGN §16.1 step 9 probes, publishes them, and returns the yt-dlp version.
+/// Runs the DESIGN §16.1 step 9 probes and publishes their initial health.
 ///
 /// # Errors
 /// When the Python shim cannot run. `ytdlp` is the fallback provider for every URL, so a server
@@ -382,15 +382,15 @@ pub fn build_registry(
 pub async fn probe_tools(
     cfg: &Config,
     health: &HealthRegistry,
-) -> anyhow::Result<Option<Box<str>>> {
+) -> anyhow::Result<crate::tools::Report> {
     let report = crate::tools::probe_everything(cfg, crate::tools::OPTIONAL_TOOLS).await;
     crate::tools::publish(&report, health);
     tracing::info!("external tools:\n{}", report.render());
-    let missing = report.missing_optional();
-    if !missing.is_empty() {
+    let degraded = report.degraded_optional();
+    if !degraded.is_empty() {
         tracing::warn!(
-            missing = missing.join(", "),
-            "optional tools are missing; the matching healthz components are degraded"
+            degraded = degraded.join(", "),
+            "optional tool checks failed; transient failures will be retried in the background"
         );
     }
     if !report.required_ok() {
@@ -402,7 +402,7 @@ pub async fn probe_tools(
             }
         );
     }
-    Ok(report.shim.yt_dlp().map(Box::from))
+    Ok(report)
 }
 
 /// Whether `path` is inside a directory that exists and is writable.

@@ -398,6 +398,7 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "futures-util",
  "nix 0.30.1",
  "notify",
  "predicates",
