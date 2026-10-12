@@ -791,6 +791,32 @@ test('starting health stays neutral while real failures warn', withMock({}, asyn
   await expect(page.locator('.toast')).toHaveCount(1);
 }));
 
+test('tool health recovers live without repeating the warning on a fresh snapshot', withMock({}, async ({ page, mock }) => {
+  await open(page, mock);
+  await page.evaluate(() => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'health', seq: A.state.seq + 1, status: 'degraded',
+      changed: ['ffmpeg', 'ffprobe'].map((component) => ({ component, from: 'disabled', to: 'degraded',
+        detail: '-version timed out after 30s; retrying in the background' })) });
+  });
+  await expect(page.locator('.toast')).toHaveCount(2);
+  await expect(page.locator('.toast').first()).toContainText('retrying in the background');
+  await page.evaluate(() => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'health', seq: A.state.seq + 1, status: 'ok',
+      changed: ['ffmpeg', 'ffprobe'].map((component) => ({ component, from: 'degraded', to: 'ok' })) });
+  });
+  expect(await page.evaluate(() => ['ffmpeg', 'ffprobe'].map((name) => window.__aulos.state.health.get(name)))).toEqual(['ok', 'ok']);
+  await page.locator('.toast button').first().click();
+  await page.locator('.toast button').first().click();
+  await page.evaluate(() => {
+    const A = window.__aulos;
+    A.applyFrame({ t: 'snapshot', seq: A.state.seq + 1, boot_id: A.state.bootId,
+      health: { status: 'ok', components: { ffmpeg: 'ok', ffprobe: 'ok' } } });
+  });
+  await expect(page.locator('.toast')).toHaveCount(0);
+}));
+
 test('health snapshots stay quiet for startup but expose an active failure', withMock({}, async ({ page, mock }) => {
   await open(page, mock);
   const snapshot = async (pot) => page.evaluate((pot) => {

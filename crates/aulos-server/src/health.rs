@@ -1,8 +1,8 @@
 //! The `healthz` component publisher (DESIGN §16.3).
 //!
 //! [`aulos_core::HealthRegistry`] is a map of `name → ComponentHealth` that `aulos-api` serves
-//! verbatim. Most entries are written once, by a boot probe (`ytdlp_runner`, `ffmpeg`, `deno`,
-//! `importer`) or by the component that owns the fact (`pot` by the supervisor, `ytdl_options` by
+//! verbatim. Entries are written by tool probes (with retries for transient boot failures),
+//! or by the component that owns the fact (`pot` by the supervisor, `ytdl_options` by
 //! the config watcher). This module owns the ones that **move**: the store's latency and WAL, the
 //! queue's composition and slots, each hook's counters, the event-router drop counters and the
 //! subscription schedule.

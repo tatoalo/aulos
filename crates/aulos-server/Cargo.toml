@@ -50,6 +50,7 @@ clap = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
+futures-util = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json", "ansi"] }
 reqwest = { workspace = true }
 nix = { workspace = true, features = ["signal", "process"] }
@@ -61,6 +62,7 @@ axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
 rustls = { workspace = true, features = ["ring"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }

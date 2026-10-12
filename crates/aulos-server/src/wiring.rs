@@ -209,11 +209,15 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     let (registry, hook_specs) = bootstrap::build_registry(&cfg, extra_providers);
 
     // --- 9. the tool probes ----------------------------------------------------------------
-    let yt_dlp = if skip_tool_probes {
+    let tool_report = if skip_tool_probes {
         None
     } else {
-        bootstrap::probe_tools(&cfg, &health).await?
+        Some(bootstrap::probe_tools(&cfg, &health).await?)
     };
+    let yt_dlp = tool_report
+        .as_ref()
+        .and_then(|report| report.shim.yt_dlp())
+        .map(Box::<str>::from);
     if http_token.is_cancelled() {
         return boot_cancelled("tool probes", Some(&store), &tracker).await;
     }
@@ -489,6 +493,17 @@ pub async fn run_with(opts: RunOptions) -> anyhow::Result<()> {
     };
     // One pass before the bind, so the very first `healthz` is complete.
     health::publish_once(&health_probes, &health).await;
+
+    if let Some(report) = tool_report {
+        for spec in report.retryable_tools() {
+            tracker.spawn(crate::tools::retry_tool(
+                *spec,
+                Arc::clone(&health),
+                events.clone(),
+                http_token.clone(),
+            ));
+        }
+    }
 
     // DESIGN §7.1's six-hourly `wal_checkpoint(TRUNCATE)`. The shutdown half is `Store::close`.
     {

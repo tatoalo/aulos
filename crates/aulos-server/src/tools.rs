@@ -19,15 +19,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aulos_core::config::Config;
-use aulos_core::health::{ComponentHealth, ComponentStatus};
+use aulos_core::event::{DomainEvent, EventSender};
+use aulos_core::health::{ComponentHealth, ComponentStatus, HealthRegistry};
 use aulos_provider::sink::ProgressSinkFactory;
 use aulos_provider_ytdlp::runner::{DEFAULT_PYTHON, DEFAULT_RUNNER_PATH};
 use aulos_provider_ytdlp::{Job, RunnerHandle, RunnerOutcome, ShimIdentity};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-/// How long a `--version` probe is given before it is treated as missing.
-pub const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a `--version` probe is given before it is treated as slow.
+pub const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the shim handshake is given.
 pub const SHIM_TIMEOUT: Duration = Duration::from_secs(60);
@@ -88,8 +89,12 @@ pub fn doctor_tools() -> Vec<ToolSpec> {
 pub enum Probe {
     /// The tool ran and reported this version line.
     Ok(String),
-    /// The tool is not on `PATH`, or did not answer.
+    /// The tool could not be spawned because it is absent or not executable.
     Missing(String),
+    /// The tool did not answer before the deadline.
+    Slow(String),
+    /// The tool failed to run or exited unsuccessfully.
+    Failed(String),
 }
 
 impl Probe {
@@ -99,11 +104,17 @@ impl Probe {
         matches!(self, Self::Ok(_))
     }
 
+    /// Whether a background probe may recover this failure.
+    #[must_use]
+    pub const fn should_retry(&self) -> bool {
+        matches!(self, Self::Slow(_) | Self::Failed(_))
+    }
+
     /// The version line, or the failure text.
     #[must_use]
     pub fn detail(&self) -> &str {
         match self {
-            Self::Ok(v) | Self::Missing(v) => v,
+            Self::Ok(v) | Self::Missing(v) | Self::Slow(v) | Self::Failed(v) => v,
         }
     }
 
@@ -120,9 +131,21 @@ impl Probe {
     pub fn component(&self) -> ComponentHealth {
         match self {
             Self::Ok(v) => ComponentHealth::new(ComponentStatus::Ok).with("version", v.clone()),
-            Self::Missing(why) => {
+            Self::Missing(why) | Self::Slow(why) | Self::Failed(why) => {
                 ComponentHealth::new(ComponentStatus::Degraded).with("detail", why.clone())
             }
+        }
+    }
+
+    fn retry_component(&self) -> ComponentHealth {
+        let component = self.component();
+        if self.should_retry() {
+            component.with(
+                "detail",
+                format!("{}; retrying in the background", self.detail()),
+            )
+        } else {
+            component
         }
     }
 }
@@ -133,42 +156,118 @@ impl Probe {
 /// builds of `N_m3u8DL-RE` print to stderr, and "which stream did it use" is not information worth
 /// encoding per tool.
 pub async fn probe_tool(spec: &ToolSpec) -> Probe {
+    probe_tool_with_timeout(spec, VERSION_TIMEOUT).await
+}
+
+async fn probe_tool_with_timeout(spec: &ToolSpec, timeout: Duration) -> Probe {
     let mut cmd = Command::new(spec.program);
     cmd.arg(spec.arg)
         .kill_on_drop(true)
-        .stdin(std::process::Stdio::null());
-    let output = match tokio::time::timeout(VERSION_TIMEOUT, cmd.output()).await {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let detail = format!("{}: {e}", spec.program);
+            return match e.kind() {
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+                    Probe::Missing(detail)
+                }
+                _ => Probe::Failed(detail),
+            };
+        }
+    };
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Probe::Missing(format!("{}: {e}", spec.program)),
+        Ok(Err(e)) => return Probe::Failed(format!("{}: {e}", spec.program)),
         Err(_) => {
-            return Probe::Missing(format!(
-                "{} did not answer {} within {}s",
-                spec.program,
-                spec.arg,
-                VERSION_TIMEOUT.as_secs()
+            return Probe::Slow(format!(
+                "{} {} timed out after {timeout:?}",
+                spec.program, spec.arg,
             ));
         }
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let err = String::from_utf8_lossy(&output.stderr);
-    match first_line(&text).or_else(|| first_line(&err)) {
-        Some(line) => Probe::Ok(line),
-        None if output.status.success() => Probe::Ok(String::new()),
-        None => Probe::Missing(format!("{} exited with {}", spec.program, output.status)),
+    let line = first_line(&text)
+        .or_else(|| first_line(&err))
+        .unwrap_or_default();
+    if output.status.success() {
+        Probe::Ok(line)
+    } else {
+        Probe::Failed(format!(
+            "{} exited with {}: {line}",
+            spec.program, output.status
+        ))
     }
 }
 
 /// Probes every tool in `specs`, concurrently.
 pub async fn probe_all(specs: &[ToolSpec]) -> Vec<(&'static str, Probe)> {
-    let mut out = Vec::with_capacity(specs.len());
-    let mut futures = Vec::with_capacity(specs.len());
-    for spec in specs {
-        futures.push(async move { (spec.component, probe_tool(spec).await) });
+    futures_util::future::join_all(
+        specs
+            .iter()
+            .map(|spec| async move { (spec.component, probe_tool(spec).await) }),
+    )
+    .await
+}
+
+/// Re-probes a transient boot failure until it recovers, becomes missing, or shuts down.
+pub async fn retry_tool(
+    spec: ToolSpec,
+    health: Arc<HealthRegistry>,
+    events: EventSender,
+    shutdown: CancellationToken,
+) {
+    retry_probe(spec.component, health, events, shutdown, || {
+        probe_tool(&spec)
+    })
+    .await;
+}
+
+async fn retry_probe<F, Fut>(
+    component: &str,
+    health: Arc<HealthRegistry>,
+    events: EventSender,
+    shutdown: CancellationToken,
+    mut probe: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Probe>,
+{
+    let retries = async {
+        for seconds in [5, 15, 30, 60].into_iter().chain(std::iter::repeat(300)) {
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+            let result = probe().await;
+            if health.set(component, result.retry_component()) {
+                events
+                    .publish(DomainEvent::HealthChanged(health.snapshot()))
+                    .await;
+            }
+            if !result.should_retry() {
+                if result.is_ok() {
+                    tracing::info!(
+                        component,
+                        version = result.detail(),
+                        "external tool probe recovered"
+                    );
+                } else {
+                    tracing::warn!(
+                        component,
+                        detail = result.detail(),
+                        "external tool is missing; stopping retries"
+                    );
+                }
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {},
+        () = retries => {},
     }
-    for f in futures {
-        out.push(f.await);
-    }
-    out
 }
 
 /// The first non-empty, trimmed line of `text`.
@@ -278,14 +377,23 @@ impl Report {
         matches!(self.shim, ShimProbe::Ok(_))
     }
 
-    /// The optional tools that are missing, by component name.
+    /// The optional tools that did not answer successfully, by component name.
     #[must_use]
-    pub fn missing_optional(&self) -> Vec<&'static str> {
+    pub fn degraded_optional(&self) -> Vec<&'static str> {
         self.tools
             .iter()
             .filter(|(_, p)| !p.is_ok())
             .map(|(name, _)| *name)
             .collect()
+    }
+
+    /// Optional boot probes that should be retried after the server starts.
+    pub fn retryable_tools(&self) -> impl Iterator<Item = &'static ToolSpec> + '_ {
+        OPTIONAL_TOOLS.iter().filter(|spec| {
+            self.tools
+                .iter()
+                .any(|(name, probe)| *name == spec.component && probe.should_retry())
+        })
     }
 
     /// The printable table `doctor` and the boot log both use.
@@ -325,6 +433,8 @@ impl Report {
             let (mark, detail) = match probe {
                 Probe::Ok(v) => ("ok   ", v.as_str()),
                 Probe::Missing(why) => ("MISSING", why.as_str()),
+                Probe::Slow(why) => ("SLOW", why.as_str()),
+                Probe::Failed(why) => ("FAILED", why.as_str()),
             };
             let _ = writeln!(out, "  {name:<16} {mark} {detail}");
         }
@@ -343,7 +453,7 @@ pub async fn probe_everything(cfg: &Config, specs: &[ToolSpec]) -> Report {
 pub fn publish(report: &Report, health: &aulos_core::HealthRegistry) {
     health.set("ytdlp_runner", report.shim.component());
     for (name, probe) in &report.tools {
-        health.set(name, probe.component());
+        health.set(name, probe.retry_component());
     }
 }
 
@@ -368,14 +478,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_tool_is_down_with_a_detail_and_never_a_version() {
+    async fn a_missing_tool_is_degraded_with_a_detail_and_never_retried() {
         let spec = ToolSpec {
             component: "nope",
             program: "aulos-no-such-tool-cf4a1",
             arg: "--version",
         };
         let probe = probe_tool(&spec).await;
-        assert!(!probe.is_ok(), "{probe:?}");
+        assert!(matches!(probe, Probe::Missing(_)), "{probe:?}");
+        assert!(!probe.should_retry());
         let component = probe.component();
         assert_eq!(
             component.status,
@@ -401,6 +512,155 @@ mod tests {
         assert_eq!(probe.component().status, ComponentStatus::Ok);
     }
 
+    #[tokio::test]
+    async fn a_timeout_is_slow_and_retryable() {
+        let spec = ToolSpec {
+            component: "sleep",
+            program: "/bin/sleep",
+            arg: "30",
+        };
+        let probe = probe_tool_with_timeout(&spec, Duration::from_millis(50)).await;
+        assert!(matches!(probe, Probe::Slow(_)), "{probe:?}");
+        assert!(probe.should_retry());
+        assert_eq!(probe.component().status, ComponentStatus::Degraded);
+        assert!(probe.detail().contains("timed out after 50ms"));
+        assert!(!probe.component().detail.contains_key("version"));
+    }
+
+    #[tokio::test]
+    async fn permission_denied_is_missing_and_not_retried() {
+        let spec = ToolSpec {
+            component: "directory",
+            program: "/",
+            arg: "--version",
+        };
+        let probe = probe_tool(&spec).await;
+        assert!(matches!(probe, Probe::Missing(_)), "{probe:?}");
+        assert!(!probe.should_retry());
+    }
+
+    #[tokio::test]
+    async fn an_unsuccessful_exit_is_failed_even_when_it_prints_output() {
+        let spec = ToolSpec {
+            component: "ls",
+            program: "/bin/ls",
+            arg: "/aulos-no-such-file-cf4a1",
+        };
+        let probe = probe_tool(&spec).await;
+        assert!(matches!(probe, Probe::Failed(_)), "{probe:?}");
+        assert!(probe.should_retry());
+        assert!(probe.detail().contains("exited with"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_back_off_until_recovery_and_publish_only_changed_health() {
+        use aulos_core::event::{EventRouter, SubscriberSpec};
+
+        let health = Arc::new(HealthRegistry::new());
+        let slow = Probe::Slow("ffmpeg -version timed out after 30s".into());
+        health.set("ffmpeg", slow.retry_component());
+        let (mut router, events) = EventRouter::new(16);
+        let mut inbox = router.subscribe(SubscriberSpec::aggregator());
+        let router_task = router.spawn();
+        let start = tokio::time::Instant::now();
+        let mut attempts = Vec::new();
+        retry_probe(
+            "ffmpeg",
+            Arc::clone(&health),
+            events,
+            CancellationToken::new(),
+            || {
+                attempts.push(start.elapsed().as_secs());
+                std::future::ready(if attempts.len() < 7 {
+                    slow.clone()
+                } else {
+                    Probe::Ok("ffmpeg version 7.1.5".into())
+                })
+            },
+        )
+        .await;
+        assert_eq!(attempts, [5, 20, 50, 110, 410, 710, 1010]);
+        router_task.await.unwrap();
+        let event = inbox.recv().await.unwrap();
+        let DomainEvent::HealthChanged(view) = event.as_ref() else {
+            panic!("{event:?}")
+        };
+        assert_eq!(view.components["ffmpeg"].status, ComponentStatus::Ok);
+        assert_eq!(
+            view.components["ffmpeg"].detail["version"],
+            "ffmpeg version 7.1.5"
+        );
+        assert!(!view.components["ffmpeg"].detail.contains_key("detail"));
+        assert_eq!(view.components, health.snapshot().components);
+        assert!(
+            inbox.recv().await.is_none(),
+            "unchanged failures should not publish health events"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_stops_if_the_tool_becomes_missing() {
+        let health = Arc::new(HealthRegistry::new());
+        let (router, events) = aulos_core::event::EventRouter::new(16);
+        let router_task = router.spawn();
+        let mut attempts = 0;
+        retry_probe(
+            "ffprobe",
+            Arc::clone(&health),
+            events,
+            CancellationToken::new(),
+            || {
+                attempts += 1;
+                assert_eq!(attempts, 1);
+                std::future::ready(Probe::Missing("ffprobe: not found".into()))
+            },
+        )
+        .await;
+        router_task.await.unwrap();
+        let component = health.snapshot().components["ffprobe"].clone();
+        assert_eq!(component.status, ComponentStatus::Degraded);
+        assert_eq!(component.detail["detail"], "ffprobe: not found");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_interrupts_backoff_and_in_flight_probes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for stop_after in [2, 6] {
+            let health = Arc::new(HealthRegistry::new());
+            let (router, events) = aulos_core::event::EventRouter::new(16);
+            let router_task = router.spawn();
+            let shutdown = CancellationToken::new();
+            let token = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(stop_after)).await;
+                token.cancel();
+            });
+            let started = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicBool::new(false));
+            retry_probe("ffmpeg", health, events, shutdown, || {
+                let started = Arc::clone(&started);
+                let guard = Dropped(Arc::clone(&dropped));
+                async move {
+                    let _guard = guard;
+                    started.store(true, Ordering::SeqCst);
+                    std::future::pending::<Probe>().await
+                }
+            })
+            .await;
+            router_task.await.unwrap();
+            assert_eq!(started.load(Ordering::SeqCst), stop_after > 5);
+            assert_eq!(dropped.load(Ordering::SeqCst), stop_after > 5);
+        }
+    }
+
     #[test]
     fn the_first_line_skips_leading_blanks_and_trims() {
         assert_eq!(
@@ -417,14 +677,28 @@ mod tests {
             tools: vec![
                 ("ffmpeg", Probe::Ok("ffmpeg version 6.1.1".to_owned())),
                 ("deno", Probe::Missing("deno: not found".to_owned())),
+                (
+                    "ffprobe",
+                    Probe::Slow("ffprobe -version timed out after 30s".into()),
+                ),
+                ("nm3u8dl", Probe::Failed("temporary spawn failure".into())),
             ],
         };
         let table = report.render();
         assert!(table.contains("python3 + yt-dlp MISSING"), "{table}");
         assert!(table.contains("ffmpeg version 6.1.1"), "{table}");
         assert!(table.contains("deno"), "{table}");
+        assert!(table.contains("ffprobe          SLOW"), "{table}");
+        assert!(table.contains("nm3u8dl          FAILED"), "{table}");
         assert!(!report.required_ok());
-        assert_eq!(report.missing_optional(), ["deno"]);
+        assert_eq!(report.degraded_optional(), ["deno", "ffprobe", "nm3u8dl"]);
+        assert_eq!(
+            report
+                .retryable_tools()
+                .map(|spec| spec.component)
+                .collect::<Vec<_>>(),
+            ["ffprobe", "nm3u8dl"]
+        );
     }
 
     #[test]
