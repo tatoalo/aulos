@@ -106,6 +106,7 @@ fn fully_populated_item() -> Item {
 fn full_cell() -> ProgressCell {
     let mut n = Normalizer::new();
     let frame = RawProgress {
+        percent: None,
         downloaded_bytes: Some(44_040_192.0),
         total_bytes: Some(103_809_024.0),
         total_bytes_estimate: Some(103_800_000.0),

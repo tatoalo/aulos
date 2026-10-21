@@ -3,9 +3,8 @@
 //! The tool is a .NET HLS downloader that fetches segments in parallel and muxes them with ffmpeg
 //! when it is done. Three things about driving it are not obvious:
 //!
-//! 1. **Its progress is not lines.** Spectre.Console repaints, so the output has to be read as
-//!    *chunks* and assembled with [`crate::progress::Nm3u8Progress`]; a line reader would deliver
-//!    nothing for minutes and then one enormous line.
+//! 1. **Progress can cross pipe reads.** Redirected rows and Spectre.Console repaints are assembled
+//!    with [`crate::progress::Nm3u8Progress`] before the engine samples them.
 //! 2. **Exit 0 does not mean "the file is there".** When its own mux step fails — which is what a
 //!    16-thread run on a slow disk does — it exits 0 having left a directory of segments. That is
 //!    what the gapless fallback in [`crate::mux`] is for.
@@ -483,21 +482,38 @@ mod tests {
         .expect("progress while the process is running");
         assert_eq!(
             (frame.fragment_index, frame.fragment_count),
-            (Some(4), Some(12))
+            (Some(253), Some(499))
         );
-        assert_eq!(frame.downloaded_bytes, Some((369.02_f64 * 1024.0).trunc()));
+        assert_eq!(frame.percent, Some(50.70));
         assert_eq!(
-            frame.total_bytes,
-            Some((2.16_f64 * 1024.0 * 1024.0).trunc())
+            aulos_core::progress::Normalizer::new()
+                .apply(&frame, aulos_core::status::Status::Downloading),
+            50.70
         );
-        assert_eq!(frame.speed, Some((369.02_f64 * 1024.0).trunc()));
-        assert_eq!(frame.eta, Some(6));
+        assert_eq!(
+            frame.downloaded_bytes,
+            Some((360.74_f64 * 1024.0 * 1024.0).trunc())
+        );
+        assert_eq!(
+            frame.total_bytes_estimate,
+            Some((803.62_f64 * 1024.0 * 1024.0).trunc())
+        );
+        assert_eq!(frame.total_bytes, None);
+        assert_eq!(frame.speed, Some((98.18_f64 * 1024.0 * 1024.0).trunc()));
+        assert_eq!(frame.eta, Some(4));
         assert!(
             !names.out_path.exists(),
             "progress arrived before completion"
         );
         write(&f.out_dir().join("allow-finish"), b"");
         run.await.expect("download completes");
+        let frames = crate::testing::drain_frames(&mut rx);
+        let final_frame = frames.last().expect("final progress");
+        assert_eq!(final_frame.percent, Some(100.0));
+        assert_eq!(
+            (final_frame.fragment_index, final_frame.fragment_count),
+            (Some(499), Some(499))
+        );
     }
 
     #[tokio::test]
