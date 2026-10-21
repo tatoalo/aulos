@@ -1,23 +1,7 @@
 //! Progress parsing for both engines (DESIGN §10.5) — the `N_m3u8DL-RE` ANSI frame parser and the
 //! ffmpeg `-progress pipe:1` reader.
 //!
-//! # Why "last match wins" is the whole design
-//!
-//! `N_m3u8DL-RE` renders its progress with Spectre.Console, which **repaints**: it moves the
-//! cursor up, erases the line and prints the whole row again. When that output is a pipe rather
-//! than a terminal, several repaints arrive in one `read(2)`, separated by CSI sequences instead of
-//! newlines — and the oldest of them is almost always `0/100 0.00%`. A parser that takes the first
-//! match therefore pins the UI at zero for the whole download, which is exactly the bug legacy
-//! fixed by scanning every match and keeping the **last** one (`app/ytdl.py:129-168`).
-//!
-//! # What changed from legacy, and why
-//!
-//! Legacy put the *segment* counters into `downloaded_bytes`/`total_bytes` — "325 bytes of 2000
-//! bytes" for segment 325 of 2000 — so the byte counters were nonsense for every SC download and
-//! the percent jumped when the size line finally appeared. Here the segment counters go to
-//! [`RawProgress::fragment_index`]/[`RawProgress::fragment_count`], which
-//! [`Normalizer`](aulos_core::progress::Normalizer) already knows how to turn into a percent, and
-//! the byte fields stay `None` until a real `512 MB / 3.20 GB` row is parsed (DESIGN §10.5 Δ).
+//! Keeps the latest row per track type and prefers active video/audio progress over subtitles.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -30,13 +14,11 @@ use tokio::time::Instant;
 /// 0.5 s"; legacy `app/ytdl.py:672`, `:745`).
 pub const MIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The five patterns the `N_m3u8DL-RE` parser needs, compiled once.
-///
-/// Byte-identical to legacy's (`app/ytdl.py:108-117`) except for the ETA lookahead, which Rust's
-/// `regex` cannot express — see [`etas`].
+/// The patterns the `N_m3u8DL-RE` parser needs, compiled once.
 struct Patterns {
     /// CSI and OSC escape sequences.
     ansi: Regex,
+    repaint: Regex,
     /// `<index>/<count> <percent>%`.
     segment: Regex,
     /// `<done> <unit> / <total> <unit>`.
@@ -52,6 +34,7 @@ impl Patterns {
     fn compile() -> Option<Self> {
         Some(Self {
             ansi: Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x07|\x1b\\))").ok()?,
+            repaint: Regex::new(r"\x1b\[[0-9;]*[ABEFGHJK]").ok()?,
             segment: Regex::new(r"(\d+)/(\d+)\s+([\d.]+)%").ok()?,
             size: Regex::new(r"([\d.]+)\s*(KB|MB|GB)\s*/\s*([\d.]+)\s*(KB|MB|GB)").ok()?,
             speed: Regex::new(r"([\d.]+)\s*(KB|MB|GB)ps").ok()?,
@@ -119,46 +102,43 @@ pub fn strip_ansi(s: &str) -> String {
         .map_or_else(|| s.to_owned(), |p| p.ansi.replace_all(s, "").into_owned())
 }
 
-/// Extracts the newest progress frame from one read of `N_m3u8DL-RE`'s console output.
-///
-/// Returns `None` unless a segment row **or** a size row was found, mirroring legacy's
-/// `if not status: return {}` gate: a chunk that carries only a speed or an ETA is a repaint
-/// artefact, not a frame, and forwarding it would overwrite good numbers with nothing.
-///
-/// The frame is tagged [`PhaseTag::Fragment`], which is what the segment fetch is.
+/// Selects progress from the latest active video/audio row, falling back to other tracks.
 #[must_use]
 pub fn parse_nm3u8_frame(chunk: &str) -> Option<RawProgress> {
-    let p = PATTERNS.as_ref()?;
-    // Legacy: strip the escapes, then treat a carriage return as a line break so the ETA's
-    // "followed by whitespace" condition still holds at a frame boundary.
-    let text = strip_ansi(chunk).replace('\r', "\n");
+    let mut parser = Nm3u8Progress::default();
+    parser.feed(chunk.as_bytes());
+    parser.finish()
+}
 
+fn parse_nm3u8_row(text: &str) -> Option<RawProgress> {
+    let p = PATTERNS.as_ref()?;
     let mut out = RawProgress {
         phase: Some(PhaseTag::Fragment),
         ..RawProgress::default()
     };
     let mut usable = false;
 
-    if let Some(c) = p.segment.captures_iter(&text).last() {
+    if let Some(c) = p.segment.captures(text) {
+        out.percent = c.get(3).and_then(|m| m.as_str().parse().ok());
         out.fragment_index = c.get(1).and_then(|m| m.as_str().parse().ok());
         out.fragment_count = c.get(2).and_then(|m| m.as_str().parse().ok());
         usable = true;
     }
-    if let Some(c) = p.size.captures_iter(&text).last() {
+    if let Some(c) = p.size.captures(text) {
         let (d, du) = (c.get(1)?.as_str(), c.get(2)?.as_str());
         let (t, tu) = (c.get(3)?.as_str(), c.get(4)?.as_str());
         out.downloaded_bytes = size_bytes(d, du);
-        out.total_bytes = size_bytes(t, tu);
+        out.total_bytes_estimate = size_bytes(t, tu);
         usable = true;
     }
     if !usable {
         return None;
     }
 
-    if let Some(c) = p.speed.captures_iter(&text).last() {
+    if let Some(c) = p.speed.captures(text) {
         out.speed = size_bytes(c.get(1)?.as_str(), c.get(2)?.as_str());
     }
-    out.eta = etas(p, &text);
+    out.eta = etas(p, text);
     Some(out)
 }
 
@@ -166,7 +146,8 @@ pub fn parse_nm3u8_frame(chunk: &str) -> Option<RawProgress> {
 #[derive(Debug, Default)]
 pub struct Nm3u8Progress {
     pending: Vec<u8>,
-    latest: Option<RawProgress>,
+    tracks: [Option<RawProgress>; 4],
+    dirty: bool,
 }
 
 impl Nm3u8Progress {
@@ -193,12 +174,45 @@ impl Nm3u8Progress {
     }
 
     fn capture(&mut self) {
-        if let Some(frame) = parse_nm3u8_frame(&String::from_utf8_lossy(&self.pending)) {
-            self.latest = Some(frame);
+        let Some(patterns) = PATTERNS.as_ref() else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&self.pending);
+        let text = strip_ansi(&patterns.repaint.replace_all(&text, "\n"));
+        for row in text.lines() {
+            let Some(frame) = parse_nm3u8_row(row) else {
+                continue;
+            };
+            let kind = match row
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "vid" | "video" => 0,
+                "aud" | "audio" => 1,
+                "sub" | "subtitle" => 3,
+                _ => 2,
+            };
+            self.tracks[kind] = Some(frame);
+            self.dirty = true;
         }
     }
 
-    /// The newest completed row since the previous sample.
+    fn select_frame(&mut self) -> Option<RawProgress> {
+        if !std::mem::take(&mut self.dirty) {
+            return None;
+        }
+        let finished = |f: &RawProgress| matches!((f.fragment_index, f.fragment_count), (Some(done), Some(total)) if total > 0 && done >= total);
+        let rows = self.tracks.iter().flatten();
+        let all_finished = rows.clone().all(finished);
+        rows.filter(|f| (f.fragment_index, f.fragment_count) != (Some(0), Some(100)))
+            .find(|f| all_finished || !finished(f))
+            .copied()
+    }
+
+    /// Selects from all known tracks when a row has changed since the previous sample.
     pub fn take_frame(&mut self) -> Option<RawProgress> {
         // A console repaint need not end in a newline. Its final column is an ETA (or the
         // unknown-ETA placeholder), so wait for that column before accepting a partial row.
@@ -214,14 +228,14 @@ impl Nm3u8Progress {
             self.capture();
             self.pending.clear();
         }
-        self.latest.take()
+        self.select_frame()
     }
 
     /// Accepts the last unterminated row when the child closes its output.
     pub fn finish(&mut self) -> Option<RawProgress> {
         self.capture();
         self.pending.clear();
-        self.latest.take()
+        self.select_frame()
     }
 }
 
@@ -338,13 +352,79 @@ mod tests {
     }
 
     #[test]
+    fn multitrack_frames_keep_video_progress_across_reads_and_samples() {
+        let frames: Vec<_> = include_str!("../tests/fixtures/sc/nm3u8_multitrack.txt")
+            .split("\n\n")
+            .collect();
+        for size in 1..=frames.iter().map(|f| f.len()).max().expect("frames") {
+            let mut parser = Nm3u8Progress::default();
+            for (frame, done) in frames.iter().zip([0, 253, 499]) {
+                for chunk in frame.as_bytes().chunks(size) {
+                    parser.feed(chunk);
+                }
+                let raw = parser.take_frame().expect("video progress");
+                assert_eq!(
+                    (raw.fragment_index, raw.fragment_count),
+                    (Some(done), Some(499)),
+                    "chunk size {size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_subtitle_update_between_samples_cannot_replace_video_progress() {
+        let mut parser = Nm3u8Progress::default();
+        parser.feed(b"Vid 253/499 50.70% 360.74MB/803.62MB 98.18MBps 00:00:04\n");
+        let video = parser.take_frame().expect("video");
+        for row in [
+            "Sub 0/100 0.00% - - --:--:--\n",
+            "Sub 1/1 100.00% 1KB - 00:00:00\n",
+        ] {
+            parser.feed(row.as_bytes());
+            assert_eq!(parser.take_frame(), Some(video));
+        }
+    }
+
+    #[test]
+    fn active_tracks_win_over_placeholders_and_finished_tracks() {
+        for (rows, expected) in [
+            ("Vid 0/100 0.00%\nSub 0/100 0.00%", None),
+            (
+                "Vid 20/40 50.00%\nAud 10/20 50.00%\nSub 1/2 50.00%",
+                Some(40),
+            ),
+            (
+                "Vid 40/40 100.00%\nAud 10/20 50.00%\nSub 0/100 0.00%",
+                Some(20),
+            ),
+            (
+                "Vid 40/40 100.00%\nAud 20/20 100.00%\nSub 1/2 50.00%",
+                Some(2),
+            ),
+            (
+                "Vid 40/40 100.00%\nAud 20/20 100.00%\nSub 2/2 100.00%",
+                Some(40),
+            ),
+            ("Aud 10/20 50.00%\nSub 0/100 0.00%", Some(20)),
+            ("Sub 1/2 50.00%", Some(2)),
+        ] {
+            assert_eq!(
+                parse_nm3u8_frame(rows).and_then(|f| f.fragment_count),
+                expected,
+                "{rows}"
+            );
+        }
+    }
+
+    #[test]
     fn the_last_repaint_wins_and_a_leading_zero_frame_never_pins_progress() {
         let f = parse_nm3u8_frame(REPAINTS).expect("a frame");
         assert_eq!(f.fragment_index, Some(325));
         assert_eq!(f.fragment_count, Some(2000));
         assert_eq!(f.downloaded_bytes, Some(512.0 * 1024.0 * 1024.0));
         assert_eq!(
-            f.total_bytes,
+            f.total_bytes_estimate,
             Some(f64::trunc(3.20 * 1024.0 * 1024.0 * 1024.0))
         );
         assert_eq!(f.speed, Some(8.50 * 1024.0 * 1024.0));
@@ -361,7 +441,7 @@ mod tests {
                    video 325/2000 16.25% 512 MB/3.20 GB 8.50 MBps 00:01:15";
         let f = parse_nm3u8_frame(raw).expect("a frame");
         assert_eq!(f.downloaded_bytes, Some(536_870_912.0));
-        assert_eq!(f.total_bytes, Some(3_435_973_836.0));
+        assert_eq!(f.total_bytes_estimate, Some(3_435_973_836.0));
         assert_eq!(f.speed, Some(8_912_896.0));
         assert_eq!(f.eta, Some(75));
         assert_eq!(
@@ -374,7 +454,7 @@ mod tests {
     fn the_units_are_1024_based() {
         let f = parse_nm3u8_frame("1/2 50.00% 1 KB/1 GB 1 MBps").expect("a frame");
         assert_eq!(f.downloaded_bytes, Some(1024.0));
-        assert_eq!(f.total_bytes, Some(1_073_741_824.0));
+        assert_eq!(f.total_bytes_estimate, Some(1_073_741_824.0));
         assert_eq!(f.speed, Some(1_048_576.0));
     }
 

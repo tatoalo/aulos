@@ -164,6 +164,7 @@ impl ProgressState {
         }
 
         RawProgress {
+            percent: None,
             downloaded_bytes: downloaded,
             total_bytes: total,
             total_bytes_estimate: frame.total_bytes_estimate.as_ref().and_then(number),

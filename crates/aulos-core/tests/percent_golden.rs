@@ -66,6 +66,7 @@ struct Frame {
 impl Frame {
     fn to_raw(&self) -> RawProgress {
         RawProgress {
+            percent: None,
             downloaded_bytes: number(&self.downloaded_bytes),
             total_bytes: number(&self.total_bytes),
             total_bytes_estimate: number(&self.total_bytes_estimate),

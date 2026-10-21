@@ -72,6 +72,8 @@ impl std::fmt::Display for PhaseTag {
 /// [`ProgressCell`] and `ItemView` hold `Option<u64>`, and [`to_wire_bytes`] does the conversion.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RawProgress {
+    /// Provider-reported percent, preferred over inferred byte or fragment ratios.
+    pub percent: Option<f64>,
     /// Bytes fetched so far.
     pub downloaded_bytes: Option<f64>,
     /// The exact total, when the provider knows it.
@@ -245,6 +247,7 @@ pub const ACTIVE_CEILING: f64 = 99.9;
 /// | Case | Behaviour |
 /// |---|---|
 /// | `status == Finished` | `100.0` |
+/// | finite provider `percent` | use the reported percentage |
 /// | `total_bytes` exact and `> 0` | `downloaded / total * 100` |
 /// | fragments known | `floor = idx/count*100`, `ceil = min((idx+1)/count*100, 99.9)`, result = `estimate.clamp(floor, ceil)`; with no estimate, `floor` |
 /// | no fragments and `total_bytes_estimate <= downloaded_bytes` | the estimate is ignored (the bogus 1 KiB/1 KiB HLS frame) |
@@ -343,7 +346,7 @@ impl Normalizer {
             }
         }
 
-        let Some(mut percent) = percent else {
+        let Some(mut percent) = m.percent.filter(|p| p.is_finite()).or(percent) else {
             // "keep previous": the floor is untouched, so a later usable frame is not clamped to a
             // value this frame never produced.
             return self.prev.unwrap_or(0.0);
@@ -378,6 +381,28 @@ mod tests {
     fn finished_is_exactly_one_hundred() {
         let mut n = Normalizer::new();
         assert!((n.apply(&RawProgress::default(), Status::Finished) - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn reported_percent_wins_but_still_obeys_the_active_ceiling_and_monotonic_floor() {
+        let mut n = Normalizer::new();
+        let mut f = frame(Some(10.0), Some(100.0), None);
+        f.percent = Some(50.7);
+        assert_eq!(n.apply(&f, Status::Downloading), 50.7);
+        f.percent = Some(20.0);
+        assert_eq!(n.apply(&f, Status::Downloading), 50.7);
+        f.percent = Some(100.0);
+        assert_eq!(n.apply(&f, Status::Downloading), ACTIVE_CEILING);
+        assert_eq!(n.apply(&f, Status::Finished), 100.0);
+    }
+
+    #[test]
+    fn a_non_finite_reported_percent_falls_back_to_the_counters() {
+        for percent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut f = frame(Some(25.0), Some(100.0), None);
+            f.percent = Some(percent);
+            assert_eq!(Normalizer::new().apply(&f, Status::Downloading), 25.0);
+        }
     }
 
     #[test]
