@@ -143,13 +143,18 @@ jobs:
           fi
           git push -u origin "$BRANCH"
 
+          # release.yml tags a merged PR only when this label is already on the closed event.
+          if ! gh api "repos/$GITHUB_REPOSITORY/labels/release" >/dev/null 2>&1; then
+            gh label create release --repo "$GITHUB_REPOSITORY" \
+              --color 0E8A16 \
+              --description "Publish a GitHub release and versioned container image after merge"
+          fi
+
           PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" --json url --jq '.[0].url')
           if [ -z "$PR_URL" ]; then
-            LABEL_ARGS=""
+            LABEL_ARGS="--label release"
             if gh api "repos/$GITHUB_REPOSITORY/labels/automated" >/dev/null 2>&1; then
-              LABEL_ARGS="--label automated"
-            else
-              echo "Label 'automated' not found; creating PR without label"
+              LABEL_ARGS="$LABEL_ARGS --label automated"
             fi
             # shellcheck disable=SC2086
             PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" \
@@ -161,6 +166,8 @@ jobs:
 
           ---
           *This PR was automatically created by the update-yt-dlp workflow.*" $LABEL_ARGS)
+          else
+            gh pr edit "$PR_URL" --add-label release
           fi
 
           if [ "$HAVE_PAT" = "true" ]; then
