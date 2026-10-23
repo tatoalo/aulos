@@ -396,7 +396,11 @@ async fn a_terminal_transition_produces_completed_then_removal_produces_removed(
 /// to the engine, which persists them and republishes, and the resulting `delta` is what the client
 /// sees. This is the whole round trip — provider → aggregator → engine → SQLite → hub — with the
 /// aggregator standing in for the pump WP-12's tests used.
-#[tokio::test(start_paused = true)]
+///
+/// The clock stays real. The engine's batched write is committed by the store's writer thread,
+/// which waits on `std::time`, and a `start_paused` runtime treats that wait as idle and
+/// auto-advances `next_frame`'s timeout past it.
+#[tokio::test]
 async fn a_stage_message_is_forwarded_to_the_engine_and_comes_back_as_a_delta() {
     let mut parked = row(Status::Queued, 1);
     parked.auto_start = false;
