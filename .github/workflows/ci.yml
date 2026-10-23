@@ -28,7 +28,7 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -36,20 +36,32 @@ jobs:
           toolchain: 1.95.0
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+        with:
+          key: ubuntu-24.04-preinstalled
+      - name: Verify native build dependencies
+        run: |
+          cmake --version
+          clang --version
+          clang++ --version
+          python3 -c 'import ctypes; ctypes.CDLL("libclang-18.so.1")'
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
-      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+        with:
+          key: ubuntu-24.04-preinstalled
+      - name: Verify native build dependencies
+        run: |
+          cmake --version
+          clang --version
+          clang++ --version
+          python3 -c 'import ctypes; ctypes.CDLL("libclang-18.so.1")'
       - run: cargo test --workspace --locked
       # PLAN WP-08 requires both SC client feature combinations to run in CI. `--all-features`
       # above only ever exercises the impersonating `wreq` path; this is the plain `reqwest` one,
