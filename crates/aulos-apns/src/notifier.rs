@@ -326,6 +326,9 @@ impl Notifier for ApnsNotifier {
     async fn on_event(&self, ev: &DomainEvent) {
         match ev {
             DomainEvent::StatusChanged { from, to, view, .. } => {
+                if is_start_edge(*from, *to) {
+                    self.shared.clear_ended(view.id);
+                }
                 // The start push is the only thing on this path that fans out to devices rather
                 // than to a registration the app already made, so it is the only thing the source
                 // gate covers here (DESIGN §25.2).
@@ -353,6 +356,7 @@ impl Notifier for ApnsNotifier {
                 self.shared.live_activity_update(Arc::clone(view)).await;
             }
             DomainEvent::Completed(view) => {
+                self.shared.mark_ended(view.id);
                 let shared = Arc::clone(&self.shared);
                 let view = Arc::clone(view);
                 self.shared
@@ -463,6 +467,10 @@ struct State {
     bundle_ids: HashMap<Box<str>, Arc<str>>,
     /// When `bundle_ids` was last filled.
     bundle_ids_at: Option<Instant>,
+    start_ts: HashMap<Box<str>, i64>,
+    activity_ts: HashMap<Box<str>, i64>,
+    started_ts: HashMap<ItemId, i64>,
+    ended: HashSet<ItemId>,
 }
 
 /// One item's Live Activity state.
@@ -604,6 +612,7 @@ impl Shared {
         for id in ids {
             st.started.remove(id);
             st.items.remove(id);
+            st.started_ts.remove(id);
         }
         let total = live_activity_count(&st);
         self.counters.set_live_activities(total);
@@ -611,6 +620,62 @@ impl Shared {
 
     fn now_secs(&self) -> i64 {
         self.clock.now_ms().div_euclid(1_000)
+    }
+
+    /// iOS drops a Live Activity push whose `aps.timestamp` is not strictly newer than the last.
+    fn alloc_ts(map: &mut HashMap<Box<str>, i64>, key: &str, now: i64, floor: i64) -> i64 {
+        let prev = map.get(key).copied().unwrap_or(0).max(floor);
+        let ts = now.max(prev.saturating_add(1));
+        if let Some(slot) = map.get_mut(key) {
+            *slot = ts;
+        } else {
+            map.insert(Box::from(key), ts);
+        }
+        ts
+    }
+
+    fn claim_start(&self, item: ItemId, start_token: &str) -> i64 {
+        let now = self.now_secs();
+        let mut st = self.lock_state();
+        let ts = Self::alloc_ts(&mut st.start_ts, start_token, now, 0);
+        let floor = st.started_ts.entry(item).or_insert(0);
+        *floor = (*floor).max(ts);
+        ts
+    }
+
+    fn claim_updates(&self, id: ItemId, targets: Vec<Target>) -> Vec<(Target, i64)> {
+        let now = self.now_secs();
+        let mut st = self.lock_state();
+        if st.ended.contains(&id) {
+            return Vec::new();
+        }
+        let floor = st.started_ts.get(&id).copied().unwrap_or(0);
+        let mut out = Vec::with_capacity(targets.len());
+        for target in targets {
+            let ts = Self::alloc_ts(&mut st.activity_ts, &target.token, now, floor);
+            out.push((target, ts));
+        }
+        out
+    }
+
+    fn claim_end_timestamps(&self, id: ItemId, tokens: &[Box<str>]) -> Vec<i64> {
+        let now = self.now_secs();
+        let mut st = self.lock_state();
+        st.ended.insert(id);
+        let floor = st.started_ts.get(&id).copied().unwrap_or(0);
+        let mut out = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            out.push(Self::alloc_ts(&mut st.activity_ts, token, now, floor));
+        }
+        out
+    }
+
+    fn mark_ended(&self, id: ItemId) {
+        self.lock_state().ended.insert(id);
+    }
+
+    fn clear_ended(&self, id: ItemId) {
+        self.lock_state().ended.remove(&id);
     }
 
     // -- device / bundle-id cache -------------------------------------------
@@ -875,9 +940,7 @@ impl Shared {
         let Some((view, targets)) = step.send else {
             return;
         };
-        let now = self.now_secs();
-        let payload = payload::live_activity_update(&view, now);
-        for t in targets {
+        for (t, ts) in self.claim_updates(id, targets) {
             let push = Push {
                 kind: PushKind::LiveActivity,
                 topic: t.topic,
@@ -886,7 +949,7 @@ impl Shared {
                 // time a queue drains, and Apple asks providers to say so.
                 expiration: 0,
                 collapse_id: None,
-                payload: payload.clone(),
+                payload: payload::live_activity_update(&view, ts),
             };
             self.spawn_push(
                 push,
@@ -966,19 +1029,19 @@ impl Shared {
         if !self.mark_started(view.id) {
             return; // a sibling task claimed it first.
         }
-        let now = self.now_secs();
-        let payload = payload::live_activity_start(&view, now);
+        let wall = self.now_secs();
         for d in targets {
             let Some(start_token) = d.live_activity_start_token.as_ref() else {
                 continue;
             };
+            let ts = self.claim_start(view.id, start_token);
             let push = Push {
                 kind: PushKind::LiveActivity,
                 topic: live_activity_topic(&d.bundle_id),
                 priority: PRIORITY_IMMEDIATE,
-                expiration: now + payload::ALERT_TTL_SECS,
+                expiration: wall + payload::ALERT_TTL_SECS,
                 collapse_id: None,
-                payload: payload.clone(),
+                payload: payload::live_activity_start(&view, ts),
             };
             self.spawn_push(
                 push,
@@ -1055,6 +1118,7 @@ impl Shared {
     /// phone was watching this download even when its `source` says somebody else added it.
     async fn end_live_activities(self: &Arc<Self>, view: &Arc<ItemView>) -> bool {
         let id = view.id;
+        self.mark_ended(id);
         // A failed read is not "this item had no registrations". DESIGN §25.2 makes the end
         // unconditional, nothing retries a `Completed`, and the only other sweep
         // (`WriteOp::DeleteItems`) fires on removal — so a transient store error here would leave
@@ -1074,8 +1138,9 @@ impl Shared {
             if self.bundle_ids_stale(id) {
                 self.refresh_devices().await;
             }
-            let now = self.now_secs();
-            let payload = payload::live_activity_end(view, now);
+            let wall = self.now_secs();
+            let tokens: Vec<Box<str>> = records.iter().map(|r| r.update_token.clone()).collect();
+            let timestamps = self.claim_end_timestamps(id, &tokens);
             let topics = {
                 let st = self.lock_state();
                 records
@@ -1088,14 +1153,14 @@ impl Shared {
                     })
                     .collect::<Vec<_>>()
             };
-            for (r, topic) in records.iter().zip(topics) {
+            for ((r, topic), ts) in records.iter().zip(topics).zip(timestamps) {
                 let push = Push {
                     kind: PushKind::LiveActivity,
                     topic,
                     priority: PRIORITY_IMMEDIATE,
-                    expiration: now + payload::ALERT_TTL_SECS,
+                    expiration: wall + payload::ALERT_TTL_SECS,
                     collapse_id: None,
-                    payload: payload.clone(),
+                    payload: payload::live_activity_end(view, ts),
                 };
                 self.spawn_push(
                     push,
