@@ -473,6 +473,22 @@ This requires the repository's `AULOS_REPO_PAT` secret with permission to create
 created with `GITHUB_TOKEN` do not trigger the downstream workflows. Ordinary merges keep
 publishing the usual dated and `latest` container images without a GitHub release.
 
+Published images carry OCI version, commit revision, build time and source labels. The version
+label matches the image's `AULOS_VERSION` and `METUBE_VERSION` defaults; iOS displays the server's
+version from `/api/v2/capabilities`. A container updater that copies the old container's environment
+can preserve a stale version even after pulling a newer image. Compare the image defaults with
+the running container's environment before treating this as a build problem:
+
+```sh
+docker image inspect "$(docker inspect -f '{{.Image}}' aulos)" \
+  -f '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(AULOS|METUBE)_VERSION='
+docker inspect aulos \
+  -f '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(AULOS|METUBE)_VERSION='
+```
+
+If they differ, recreate the service from its Compose configuration without explicit version
+environment overrides so it inherits the new image defaults.
+
 ## Documentation
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture, and the env var table (§17.3).

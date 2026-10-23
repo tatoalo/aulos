@@ -109,6 +109,67 @@ async function open(page, mock) {
 
 /* ------------------------------------------------------------------ tests */
 
+test('server metadata follows snapshots and formats yt-dlp builds like iOS', withMock({ freeze: true }, async ({ page, mock }) => {
+  await open(page, mock);
+  await expect(page.locator('#footer [data-server-version]')).toHaveText('2026.09.05');
+  await expect(page.locator('#footer [data-ytdlp-version]')).toHaveText('2026.8.30 (build 232658.dev0)');
+  await page.getByRole('button', { name: 'About Aulos' }).click();
+
+  for (const server of [
+    { version: '2026.10.23.1', yt_dlp: '2026.10.21' },
+    { version: '<b>dev</b>', yt_dlp: '' },
+  ]) {
+    await page.evaluate((server) => {
+      const A = window.__aulos;
+      A.applyFrame({ t: 'snapshot', seq: A.state.seq + 1, boot_id: 'new-boot', server });
+    }, server);
+    for (const parent of ['#footer', '#about-sheet']) {
+      await expect(page.locator(`${parent} [data-server-version]`)).toHaveText(server.version);
+      await expect(page.locator(`${parent} [data-ytdlp-version]`)).toHaveText(server.yt_dlp || 'Unavailable');
+      await expect(page.locator(`${parent} [data-server-version] b`)).toHaveCount(0);
+    }
+  }
+}));
+
+for (const [width, theme] of [[1440, 'dark'], [390, 'light']]) {
+  test(`About Aulos at ${width}px: keyboard, dismissal and layout`, withMock({ freeze: true, theme }, async ({ page, mock }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await open(page, mock);
+    const logo = page.getByRole('button', { name: 'About Aulos' });
+    const sheet = page.getByRole('dialog', { name: 'About Aulos' });
+    await logo.focus();
+    await page.keyboard.press('Enter');
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByRole('heading', { name: 'Meaning' })).toBeVisible();
+    await expect(sheet.getByRole('heading', { name: 'What the app does' })).toBeVisible();
+    await expect(page.locator('#about-done')).toBeFocused();
+    for (const id of ['hdr', 'wrap', 'footer']) expect(await page.locator(`#${id}`).evaluate(el => el.inert)).toBe(true);
+    await page.keyboard.press('Shift+Tab');
+    await expect(sheet.getByRole('link', { name: 'Aulos on GitHub' })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(page.locator('#about-done')).toBeFocused();
+    expect(await page.evaluate(() => document.scrollingElement.scrollWidth)).toBeLessThanOrEqual(width);
+    expect(await sheet.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await expect(sheet.locator('[data-server-version]')).toHaveText('2026.09.05');
+    await page.screenshot({ path: join(SHOTS, `about-${width}-${theme}.png`), animations: 'disabled' });
+    await page.keyboard.press('Escape');
+    await expect(sheet).toBeHidden();
+    await expect(logo).toBeFocused();
+    for (const id of ['hdr', 'wrap', 'footer']) expect(await page.locator(`#${id}`).evaluate(el => el.inert)).toBe(false);
+    const box = await logo.boundingBox();
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    await logo.click();
+    await sheet.getByRole('button', { name: 'Done' }).click();
+    await expect(sheet).toBeHidden();
+    await logo.click();
+    await page.locator('#scrim').click({ position: { x: 4, y: 4 } });
+    await expect(sheet).toBeHidden();
+    await expect(logo).toBeFocused();
+    expect(await page.evaluate(() => window.__csp)).toEqual([]);
+  }));
+}
+
 test('snapshot renders the expected sections and rows', withMock({}, async ({ page, mock }) => {
   await open(page, mock);
 

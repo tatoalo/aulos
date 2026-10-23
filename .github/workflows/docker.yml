@@ -73,7 +73,7 @@ jobs:
         id: meta
         run: |
           set -eu
-          date=$(date +'%Y.%m.%d')
+          date=$(date -u +'%Y.%m.%d')
           version=$date
           case "$GITHUB_REF" in
             refs/tags/v*) version=${GITHUB_REF#refs/tags/v} ;;
@@ -83,6 +83,8 @@ jobs:
           {
             echo "date=$date"
             echo "version=$version"
+            echo "revision=$(git rev-parse HEAD)"
+            echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "tags<<EOF"
             echo "${repo}:latest"
             echo "${repo}:${date}"
@@ -115,6 +117,11 @@ jobs:
           load: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.push != true) }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -126,12 +133,22 @@ jobs:
       # network check in CI is the three-daily `mode=extract` in `update-yt-dlp.yml`, which is the
       # entire reason that workflow exists.
       - name: Smoke the built image (offline)
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_REVISION: ${{ steps.meta.outputs.revision }}
         run: |
           set -eu
-          img=$(echo "ghcr.io/${GITHUB_REPOSITORY}:sha-$(git rev-parse --short HEAD)" | tr '[:upper:]' '[:lower:]')
-          # PRs and non-publishing manual builds are loaded locally; published builds are
-          # pulled back from the registry for the smoke.
-          docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
+          repo=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          img="${repo}:sha-$(git rev-parse --short HEAD)"
+          if ! docker image inspect "$img" >/dev/null 2>&1; then
+            img="${repo}@${IMAGE_DIGEST}"
+            docker pull "$img"
+          fi
+          test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$img")" = "$IMAGE_VERSION"
+          test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$img")" = "$IMAGE_REVISION"
+          docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" | grep -Fx "AULOS_VERSION=$IMAGE_VERSION"
+          docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" | grep -Fx "METUBE_VERSION=$IMAGE_VERSION"
           docker run --rm "$img" doctor
           # `healthcheck` probes a *running* server, so against this one-shot container it must
           # exit non-zero (DESIGN §3.1, PLAN WP-17) — that is the whole point of the subcommand,

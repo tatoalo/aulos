@@ -135,6 +135,16 @@ function until(ms) {
 
 const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 
+function renderServerInfo(server) {
+  if (!server) return;
+  const version = server.version?.trim() || 'Unavailable';
+  const ytdlp = server.yt_dlp?.trim() || 'Unavailable';
+  const parts = ytdlp.split('.').filter(Boolean);
+  const display = parts.length > 3 ? `${parts.slice(0, 3).join('.')} (build ${parts.slice(3).join('.')})` : ytdlp;
+  for (const el of document.querySelectorAll('[data-server-version]')) el.textContent = version;
+  for (const el of document.querySelectorAll('[data-ytdlp-version]')) el.textContent = display;
+}
+
 /* ------------------------------------------------------------- 4. state */
 
 const state = {
@@ -265,6 +275,7 @@ function applyHealth(component, status, detail) {
 function applyFrame(f) {
   switch (f.t) {
     case 'snapshot': {
+      renderServerInfo(f.server);
       state.items = new Map();
       for (const it of (f.items || []).concat(f.done || [])) state.items.set(it.id, it);
       state.subs = new Map((f.subscriptions || []).map((s) => [s.id, s]));
@@ -1397,7 +1408,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
 let sheetReturn = null;
 
 /** The sheet on top (the token sheet stacks over the add sheet), or null. */
-const topSheet = () => ['token-sheet', 'confirm-sheet', 'sheet'].map($).find((el) => !el.hidden);
+const topSheet = () => ['token-sheet', 'confirm-sheet', 'about-sheet', 'sheet'].map($).find((el) => !el.hidden);
 
 let confirmResolve = null;
 
@@ -1420,7 +1431,7 @@ function closeConfirm(accepted = false) {
 }
 
 function inertBg(on) {
-  for (const bg of [$('hdr'), $('wrap')]) {
+  for (const bg of [$('hdr'), $('wrap'), $('footer')]) {
     bg.inert = on;
     if (on) bg.setAttribute('aria-hidden', 'true'); else bg.removeAttribute('aria-hidden');
   }
@@ -1459,6 +1470,7 @@ function trapTab(e) {
 function openSheet() { openOverlay($('sheet'), $('sheet-url')); }
 function closeSheet() { closeOverlay($('sheet')); }
 function closeToken() { closeOverlay($('token-sheet')); }
+function closeAbout() { closeOverlay($('about-sheet')); }
 
 function needAuth() {
   setConn('auth');
@@ -1472,6 +1484,7 @@ function needAuth() {
 async function loadCapabilities() {
   const caps = await api('api/v2/capabilities');
   state.caps = caps;
+  renderServerInfo(caps);
   const c = caps.config || {};
   if (!defaultsApplied) {
     defaultsApplied = true;
@@ -1494,6 +1507,8 @@ async function loadCapabilities() {
 }
 
 function wire() {
+  $('about-open').addEventListener('click', () => { closeMenu(); openOverlay($('about-sheet'), $('about-done')); });
+  $('about-done').addEventListener('click', closeAbout);
   $('url-ico').innerHTML = icon('link', 18, 1.8);
   $('sub-url-ico').innerHTML = icon('rss', 18, 1.8);
   $('empty-ico').innerHTML = icon('download', 26, 1.6);
@@ -1517,7 +1532,7 @@ function wire() {
   $('add-btn').addEventListener('click', () => { if (isPhone()) openSheet(); else submitAdd(); });
   $('sheet-add').addEventListener('click', submitAdd);
   $('sheet-cancel').addEventListener('click', closeSheet);
-  $('scrim').addEventListener('click', () => { closeConfirm(); closeSheet(); closeToken(); });
+  $('scrim').addEventListener('click', () => { closeConfirm(); closeSheet(); closeToken(); closeAbout(); });
   $('confirm-cancel').addEventListener('click', () => closeConfirm());
   $('confirm-accept').addEventListener('click', () => closeConfirm(true));
 
@@ -1613,6 +1628,7 @@ function wire() {
     closeMenu();
     if (!$('token-sheet').hidden) closeToken();
     else if (!$('confirm-sheet').hidden) closeConfirm();
+    else if (!$('about-sheet').hidden) closeAbout();
     else if (!$('sheet').hidden) closeSheet();
   });
 

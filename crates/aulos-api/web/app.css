@@ -65,6 +65,9 @@ html { background: var(--bg); }
 
 body {
   margin: 0;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font: 15px/20px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
@@ -105,6 +108,8 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 }
 
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-btn { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 12px; background: none; flex-shrink: 0; }
+.brand-btn:hover { background: var(--field); }
 
 /* The iOS app icon, served next to this file; a CSS URL resolves against the stylesheet's own
    `assets/` location, so the mark needs no `{{PREFIX}}` and stays inside `img-src 'self'`. */
@@ -229,6 +234,8 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
   flex-direction: column;
   gap: 24px;
 }
+
+.footer { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 20px; margin-top: auto; padding: 0 24px calc(20px + env(safe-area-inset-bottom)); color: var(--text2); font-size: 12px; line-height: 18px; text-align: center; overflow-wrap: anywhere; }
 
 /* The empty queue is a composed state, not a leftover line: a disc, a 20px headline and one
    supporting sentence, sitting where the first row would have been. */
@@ -449,6 +456,20 @@ input::placeholder, textarea::placeholder { color: var(--text3); }
 .confirm-actions button { min-height: 44px; }
 .confirm-actions .btn-sm { background: var(--err); }
 .confirm-actions .btn-sm:hover { opacity: 0.85; }
+.aboutsheet { gap: 16px; }
+.aboutsheet .text-btn { min-width: 44px; min-height: 44px; }
+.about-card { margin: 0; padding: 16px; background: var(--field); border-radius: 14px; }
+.about-card h3 { margin: 0 0 8px; color: var(--accent); font-size: 14px; line-height: 20px; }
+.about-card p { color: var(--text2); font-size: 14px; line-height: 21px; }
+.about-hero { display: flex; align-items: center; gap: 12px; }
+.about-hero .mark { width: 48px; height: 48px; }
+.about-hero strong { display: block; margin-bottom: 4px; font-size: 17px; }
+.about-versions { display: grid; gap: 12px; font-size: 13px; line-height: 18px; }
+.about-versions > div { display: flex; justify-content: space-between; gap: 16px; }
+.about-versions dt { flex-shrink: 0; }
+.about-versions dd { margin: 0; color: var(--text2); text-align: right; overflow-wrap: anywhere; min-width: 0; }
+.about-link { display: flex; align-items: center; justify-content: space-between; min-height: 44px; color: var(--accent); text-decoration: none; }
+.about-link:hover { text-decoration: underline; }
 .grp { display: flex; flex-direction: column; gap: 8px; }
 .pair { display: flex; gap: 12px; }
 .pair .grp { flex: 1; min-width: 0; }
