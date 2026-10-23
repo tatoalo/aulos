@@ -41,7 +41,7 @@ jobs:
 
   release:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -52,8 +52,14 @@ jobs:
         with:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
-      - name: Native build dependencies (BoringSSL/bindgen for the impersonating SC client)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev
+        with:
+          key: ubuntu-24.04-preinstalled
+      - name: Verify native build dependencies
+        run: |
+          cmake --version
+          clang --version
+          clang++ --version
+          python3 -c 'import ctypes; ctypes.CDLL("libclang-18.so.1")'
 
       - name: Build the amd64 binary
         run: |
