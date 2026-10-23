@@ -1821,3 +1821,114 @@ async fn a_group_keeps_the_engines_roll_up_when_the_snapshot_has_nothing() {
     assert_eq!(last_state(&bodies)["speed"], json!(1_000.0));
     rig.notifier.shutdown().await;
 }
+
+#[tokio::test]
+async fn live_activity_timestamps_stay_strictly_increasing_inside_one_second() {
+    let rig = Rig::new().await;
+    let mut d = device("aa11", ApnsEnvironment::Sandbox);
+    d.live_activity_start_token = Some("start-aa11".into());
+    rig.store.add_device(d);
+
+    let first = ItemBuilder::new("one").status(Status::Downloading);
+    let second = ItemBuilder::new("two").status(Status::Downloading);
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &first))
+        .await;
+    rig.notifier
+        .on_event(&changed(Status::Queued, Status::Downloading, &second))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let mut starts = Vec::new();
+    for (_, _, body) in rig.requests().await {
+        if body["aps"]["event"] == json!("start") {
+            starts.push(body["aps"]["timestamp"].as_i64().unwrap());
+        }
+    }
+    starts.sort_unstable();
+    assert_eq!(starts.len(), 2, "both downloads are push-started");
+    assert!(
+        starts[0] < starts[1],
+        "two starts on one push-to-start token in the same second must not share a timestamp, \
+         got {starts:?}"
+    );
+
+    let first_start = rig
+        .requests()
+        .await
+        .into_iter()
+        .find_map(|(_, _, body)| {
+            (body["aps"]["event"] == json!("start")
+                && body["aps"]["attributes"]["itemId"] == json!(first.item_id().to_string()))
+            .then(|| body["aps"]["timestamp"].as_i64().unwrap())
+        })
+        .expect("the first item's start");
+
+    rig.store.add_activity(activity(
+        "aa11",
+        first.item_id(),
+        "act-1",
+        ApnsEnvironment::Sandbox,
+    ));
+    tokio::time::sleep(WINDOW + Duration::from_millis(20)).await;
+    let moving = first.clone().progress(40.0, None, None, None, None);
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Downloading, &moving))
+        .await;
+    let done = first.clone().status(Status::Finished);
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Finished, &done))
+        .await;
+    rig.notifier
+        .on_event(&DomainEvent::Completed(done.view()))
+        .await;
+    rig.notifier.quiesce().await;
+
+    let activity_pushes: Vec<(String, i64)> = rig
+        .requests()
+        .await
+        .into_iter()
+        .filter_map(|(path, _, body)| {
+            (path == "/3/device/act-1").then(|| {
+                (
+                    body["aps"]["event"].as_str().unwrap().to_owned(),
+                    body["aps"]["timestamp"].as_i64().unwrap(),
+                )
+            })
+        })
+        .collect();
+    let end_ts = activity_pushes
+        .iter()
+        .find(|(event, _)| event == "end")
+        .map(|(_, ts)| *ts)
+        .expect("an end push");
+    assert!(
+        activity_pushes
+            .iter()
+            .filter(|(event, _)| event == "update")
+            .all(|(_, ts)| *ts > first_start && *ts < end_ts),
+        "the end has to be the newest push for this activity or iOS keeps the update; \
+         start {first_start}, pushes {activity_pushes:?}"
+    );
+    assert!(
+        activity_pushes.iter().any(|(event, _)| event == "update"),
+        "the finish path still publishes an update before the end: {activity_pushes:?}"
+    );
+
+    let sent = rig.requests().await.len();
+    rig.store.add_activity(activity(
+        "aa11",
+        first.item_id(),
+        "act-late",
+        ApnsEnvironment::Sandbox,
+    ));
+    rig.notifier
+        .on_event(&changed(Status::Downloading, Status::Downloading, &moving))
+        .await;
+    rig.notifier.quiesce().await;
+    assert_eq!(
+        rig.requests().await.len(),
+        sent,
+        "no Live Activity push after the end was claimed"
+    );
+}
