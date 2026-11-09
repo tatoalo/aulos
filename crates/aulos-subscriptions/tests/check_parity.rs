@@ -657,17 +657,28 @@ async fn a_check_publishes_checking_true_then_false() {
     assert!(!job.job_id.is_empty());
     assert_eq!(job.subscriptions, vec![view.id.clone()]);
 
-    h.settle().await;
-    let flags: Vec<bool> = h
-        .events
-        .changed()
-        .iter()
-        .filter(|v| v.id == view.id)
-        .map(|v| v.checking)
-        .collect();
+    // The check and event collector run independently of the manager's command channel.
+    // Wait for the observable pair rather than assuming a health round-trip drains both.
+    let mut flags = Vec::new();
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            flags = h
+                .events
+                .changed()
+                .iter()
+                .filter(|v| v.id == view.id)
+                .map(|v| v.checking)
+                .collect::<Vec<bool>>();
+            if flags.windows(2).any(|w| w == [true, false]) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
     assert!(
-        flags.windows(2).any(|w| w == [true, false]),
-        "expected a true→false pair, got {flags:?}"
+        observed.is_ok(),
+        "timed out waiting for a true→false pair, got {flags:?}"
     );
 }
 
