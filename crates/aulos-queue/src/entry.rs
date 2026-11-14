@@ -14,6 +14,7 @@
 use aulos_core::{EntryBlob, Item, ProviderId};
 use aulos_provider::{EntryHints, MediaEntry};
 use serde_json::{Map, Value};
+use url::Url;
 
 /// The provider id whose partial files are worthless after a kill, and whose entry must survive
 /// until the NFO hook has run (DESIGN §7.5, §8.7, §8.9).
@@ -36,12 +37,14 @@ const STATE_KEY: &str = "state";
 ///
 /// | Provider / case | Kept |
 /// |---|---|
-/// | `ytdlp` (and any plain provider), non-playlist child | nothing |
-/// | `ytdlp`, playlist/channel child | the playlist/channel hints, so `outtmpl` survives a restart |
 /// | `streamingcommunity` | the **whole** `state` object, in the §10.3 shape the importer also writes |
 /// | `command:<name>` | the `state` object plus `media_id`/`title`/`url` |
 #[must_use]
-pub fn compact_entry(provider: &ProviderId, entry: &MediaEntry) -> Option<EntryBlob> {
+pub fn compact_entry(
+    provider: &ProviderId,
+    entry: &MediaEntry,
+    submitted_url: &Url,
+) -> Option<EntryBlob> {
     let id = provider.as_str();
     if id == SC_PROVIDER {
         // The state object verbatim: `write_sidecar`, the JIT m3u8 and the NFO hook all read it,
@@ -62,9 +65,10 @@ pub fn compact_entry(provider: &ProviderId, entry: &MediaEntry) -> Option<EntryB
         }
         return Some(EntryBlob::new(Value::Object(obj)));
     }
-    // A plain provider: nothing at all unless the entry is part of a container, in which case the
-    // output template needs its position back after a restart.
     let mut obj = Map::new();
+    if entry.url != *submitted_url {
+        obj.insert("url".to_owned(), Value::String(entry.url.to_string()));
+    }
     if entry.hints != EntryHints::default() {
         obj.insert(HINTS_KEY.to_owned(), hints_json(&entry.hints));
     }
@@ -88,10 +92,6 @@ pub fn compact_entry(provider: &ProviderId, entry: &MediaEntry) -> Option<EntryB
 }
 
 /// Turns a persisted row back into the [`MediaEntry`] a `download` call needs (DESIGN §7.5).
-///
-/// Total by construction: `media_id`, `title` and `url` are all `NOT NULL` on the row (`title` is
-/// the URL before resolution), so a missing, dropped or truncated blob costs the hints and the
-/// state and nothing else.
 #[must_use]
 pub fn rebuild_entry(item: &Item) -> MediaEntry {
     let media_id = item
@@ -112,8 +112,15 @@ pub fn rebuild_entry(item: &Item) -> MediaEntry {
 
     if is_sc {
         entry.state = value.clone();
-    } else if let Some(state) = value.get(STATE_KEY) {
-        entry.state = state.clone();
+    } else {
+        if let Some(state) = value.get(STATE_KEY) {
+            entry.state = state.clone();
+        }
+        if let Some(url) = value.get("url").and_then(Value::as_str)
+            && let Ok(url) = Url::parse(url)
+        {
+            entry.url = url;
+        }
     }
     if let Some(hints) = value.get(HINTS_KEY).cloned()
         && let Ok(parsed) = serde_json::from_value::<EntryHints>(hints)
@@ -218,7 +225,32 @@ mod tests {
     #[test]
     fn a_plain_single_video_persists_nothing() {
         let entry = MediaEntry::video("m7", "Episode 7", url());
-        assert!(compact_entry(&provider("ytdlp"), &entry).is_none());
+        assert!(compact_entry(&provider("ytdlp"), &entry, &url()).is_none());
+    }
+
+    #[test]
+    fn a_resolved_url_survives_persistence_without_changing_the_submitted_url() {
+        let resolved = Url::parse("https://example.test/video/7").unwrap();
+        let entry = MediaEntry::video("m7", "Episode 7", resolved.clone());
+        for id in ["ytdlp", "command:demo"] {
+            let blob = compact_entry(&provider(id), &entry, &url()).unwrap();
+            let persisted = serde_json::to_string(&blob).unwrap();
+            let item = row(id, Some(serde_json::from_str(&persisted).unwrap()));
+            assert_eq!(rebuild_entry(&item).url, resolved);
+            assert_eq!(item.url, url());
+            assert_eq!(item.request.url, url());
+        }
+    }
+
+    #[test]
+    fn an_invalid_saved_url_falls_back_to_the_submitted_url() {
+        for value in [serde_json::json!(null), serde_json::json!("/relative")] {
+            let item = row(
+                "ytdlp",
+                Some(EntryBlob::new(serde_json::json!({ "url": value }))),
+            );
+            assert_eq!(rebuild_entry(&item).url, url());
+        }
     }
 
     #[test]
@@ -231,7 +263,8 @@ mod tests {
             ext: Some("mp4".into()),
             ..EntryHints::default()
         };
-        let blob = compact_entry(&provider("ytdlp"), &entry).expect("a playlist child has hints");
+        let blob =
+            compact_entry(&provider("ytdlp"), &entry, &url()).expect("a playlist child has hints");
         let json = blob.as_value();
         assert_eq!(json["hints"]["playlist_index"], 3);
         assert_eq!(json["hints"]["playlist_title"], "Season 1");
@@ -261,7 +294,7 @@ mod tests {
             "formats": [{ "format_id": "137" }],
             "description": "x".repeat(8192),
         });
-        let blob = compact_entry(&provider("ytdlp"), &entry).expect("a playlist child");
+        let blob = compact_entry(&provider("ytdlp"), &entry, &url()).expect("a playlist child");
         let state = blob.as_value()[STATE_KEY].as_object().expect("an object");
         let mut keys: Vec<&str> = state.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -290,7 +323,7 @@ mod tests {
         let mut entry = MediaEntry::video("m7", "Episode 7", url());
         entry.state = serde_json::json!({ "title": "Episode 7", "playlist_id": null });
         assert!(
-            compact_entry(&provider("ytdlp"), &entry).is_none(),
+            compact_entry(&provider("ytdlp"), &entry, &url()).is_none(),
             "DESIGN §7.5: a ytdlp non-playlist child keeps nothing"
         );
     }
@@ -301,7 +334,8 @@ mod tests {
         entry.state = serde_json::json!({
             "base_url": "https://sc.test", "title_id": 42, "episode_id": 7
         });
-        let blob = compact_entry(&provider(SC_PROVIDER), &entry).expect("sc keeps its state");
+        let blob =
+            compact_entry(&provider(SC_PROVIDER), &entry, &url()).expect("sc keeps its state");
         assert_eq!(
             blob.as_value(),
             &entry.state,
@@ -316,8 +350,8 @@ mod tests {
     fn a_command_plugin_keeps_its_state_and_identity() {
         let mut entry = MediaEntry::video("plug-1", "A clip", url());
         entry.state = serde_json::json!({ "token": "abc" });
-        let blob =
-            compact_entry(&provider("command:demo"), &entry).expect("a command plugin has state");
+        let blob = compact_entry(&provider("command:demo"), &entry, &url())
+            .expect("a command plugin has state");
         let json = blob.as_value();
         assert_eq!(json["state"]["token"], "abc");
         assert_eq!(json["media_id"], "plug-1");
@@ -347,7 +381,7 @@ mod tests {
             filesize_approx: Some(4_000),
             ..EntryHints::default()
         };
-        let blob = compact_entry(&provider("ytdlp"), &entry);
+        let blob = compact_entry(&provider("ytdlp"), &entry, &url());
         let mut item = row("ytdlp", blob);
         assert_eq!(size_hint(&item), Some(4_000));
         assert_eq!(size_hint_excluding_size(&item), Some(4_000));

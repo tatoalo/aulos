@@ -112,6 +112,9 @@ jobs:
           docker run --rm --network none \
             --mount "type=bind,source=$PWD/tests/e2e,target=/smoke,readonly" \
             --entrypoint python3 aulos-server:bump-smoke /smoke/sc_smoke.py
+          docker run --rm --network none \
+            --mount "type=bind,source=$PWD/tests/e2e,target=/smoke,readonly" \
+            --entrypoint python3 aulos-server:bump-smoke /smoke/single_video_smoke.py
 
       - name: Create or update the pull request
         if: steps.update.outputs.has_update == 'true'

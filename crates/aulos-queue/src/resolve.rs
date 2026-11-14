@@ -218,7 +218,7 @@ impl Engine {
         let provider = meta.provider.clone();
         let media_id = (!entry.media_id.trim().is_empty()).then(|| entry.media_id.clone());
         let key = canonical_key(&provider, &entry.url, media_id.as_deref());
-        let blob = crate::entry::compact_entry(&provider, &entry);
+        let blob = crate::entry::compact_entry(&provider, &entry, &before.url);
         let title = if entry.title.trim().is_empty() {
             Box::<str>::from(entry.url.as_str())
         } else {
@@ -524,7 +524,7 @@ impl Engine {
             msg: None,
             error: pre_error,
             request,
-            entry: crate::entry::compact_entry(provider, entry),
+            entry: crate::entry::compact_entry(provider, entry, &entry.url),
             filename: None,
             size: None,
             chapter_files: Vec::new(),
