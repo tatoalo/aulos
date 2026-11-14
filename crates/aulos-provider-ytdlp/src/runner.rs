@@ -898,19 +898,15 @@ impl<'a> Consumer<'a> {
             return Err(ProviderError::Unsupported(EMPTY_DATA.to_owned()));
         }
 
-        if let Some(root) = root.as_ref().filter(|r| r.is_redirect()) {
-            let target = entries
-                .first()
-                .map(|e| e.url.clone())
-                .or_else(|| root.webpage_url.as_deref().and_then(|u| Url::parse(u).ok()));
-            if let Some(url) = target {
-                let mut entry = entries.remove(0);
-                entry.kind = EntryKind::Redirect { url };
-                return Ok(RunnerOutcome::Extracted {
-                    entries: vec![entry],
-                    truncated: result.truncated,
-                });
-            }
+        if root.as_ref().is_some_and(Root::is_redirect) {
+            let mut entry = entries.remove(0);
+            entry.kind = EntryKind::Redirect {
+                url: entry.url.clone(),
+            };
+            return Ok(RunnerOutcome::Extracted {
+                entries: vec![entry],
+                truncated: result.truncated,
+            });
         }
 
         if let Some(root) = root.as_ref().filter(|r| r.is_container()) {
@@ -1035,10 +1031,14 @@ fn exit_note(what: &str, exit_code: Option<i32>, stderr_tail: &str) -> String {
 /// resolution reports [`EMPTY_DATA`].
 fn media_entry(frame: &EntryFrame, root: Option<&Root>) -> Option<MediaEntry> {
     let entry = &frame.entry;
-    let url = str_of(entry, "webpage_url")
-        .or_else(|| str_of(entry, "url"))
-        .or_else(|| str_of(entry, "original_url"))
-        .and_then(|u| Url::parse(u).ok())?;
+    let url = if root.is_some_and(Root::is_redirect) {
+        str_of(entry, "url")
+    } else {
+        str_of(entry, "webpage_url")
+            .or_else(|| str_of(entry, "url"))
+            .or_else(|| str_of(entry, "original_url"))
+    }
+    .and_then(|u| Url::parse(u).ok())?;
 
     let media_id: Box<str> = str_of(entry, "id")
         .filter(|i| !i.is_empty())

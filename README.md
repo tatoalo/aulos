@@ -91,6 +91,27 @@ each time the options are loaded or reloaded:
   video/mp4 downloads, where Aulos sets `"mp4"` over it so a video asked for as mp4 is always
   remuxed into one (never re-encoded).
 
+### Redirects
+
+`AULOS_RESOLVE_MAX_DEPTH` limits successive extractor redirects, with a default of `3`.
+For a legitimately longer chain, set it to `10` in the container environment and restart Aulos.
+Repeated URLs still fail as a redirect loop. This setting does not control HTTP redirects
+followed internally by yt-dlp, or StreamingCommunity's site-version probe.
+
+The image includes yt-dlp's Requests HTTP transport. If a URL still fails, include the item
+error, Aulos version and redacted proxy/extractor options in the report. A loop error and an
+extractor-depth error describe different failures; raising the depth does not repair a loop.
+
+### StreamingCommunity
+
+The official image includes the StreamingCommunity provider and its download tools. Supported
+links contain `/watch/`, `/titles/` or `/season-`. For a mirror whose hostname does not contain
+`streamingcommunity`, set `AULOS_SC_EXTRA_HOSTS` to its actual hostname and restart Aulos.
+
+Check `/api/v2/providers`, `aulos-server doctor` and the item's error when diagnosing a failure.
+A ready provider means its local setup is available; it does not guarantee a particular mirror,
+proxy or current site layout works.
+
 ### Jellyfin
 
 `JELLYFIN_SYNC_ENABLED=true` with a `JELLYFIN_URL` and a `JELLYFIN_API_KEY` asks Jellyfin to scan
