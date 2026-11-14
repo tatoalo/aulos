@@ -12,7 +12,7 @@
 //!                             └─────────────────────────────────┘
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -223,14 +223,12 @@ impl HealthCell {
 }
 
 /// One chat's live board (DESIGN §12.1).
-///
-/// One burst of downloads is one message: the rows are inserted when the jobs are added and
-/// nothing but [`Self::message`] is ever sent, so a batch of three links costs exactly one
-/// `sendMessage` and however many edits the limiter allows.
 #[derive(Debug, Default)]
 struct ChatBoard {
     message: Option<MessageId>,
     jobs: IndexMap<ItemId, JobLine>,
+    new_items: HashSet<ItemId>,
+    receipts: VecDeque<(MessageId, String)>,
     last_rendered: String,
     dirty: bool,
     /// When the last job ended, or `None` while any is still running.
@@ -244,6 +242,18 @@ struct ChatBoard {
 }
 
 impl ChatBoard {
+    fn start_new_message(&mut self) {
+        let Some(message) = self.message.take() else {
+            return;
+        };
+        self.receipts
+            .push_back((message, render::receipt_text(&self.lines())));
+        self.jobs.retain(|_, line| !line.status.is_terminal());
+        self.last_rendered.clear();
+        self.dirty = true;
+        self.idle_since = None;
+    }
+
     fn lines(&self) -> Vec<JobLine> {
         self.jobs.values().cloned().collect()
     }
@@ -621,6 +631,8 @@ impl TelegramActor {
                         outcome.duplicates.len()
                     };
                     self.send(chat, &notify::already_queued(n), None).await;
+                } else if let Some(board) = self.boards.get_mut(&chat) {
+                    board.new_items.extend(outcome.ids);
                 }
             }
             Ok(outcome) => {
@@ -834,6 +846,7 @@ impl TelegramActor {
             if board
                 .idle_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= RETIRE_AFTER)
+                && board.receipts.is_empty()
             {
                 retire.push(chat);
             }
@@ -853,6 +866,7 @@ impl TelegramActor {
             .filter(|c| !retire.contains(c))
             .collect();
         for chat in chats {
+            self.flush_receipt(chat).await;
             self.redraw(chat).await;
         }
     }
@@ -925,7 +939,7 @@ impl TelegramActor {
         let Some(board) = self.boards.get(&chat) else {
             return;
         };
-        if !board.dirty || board.jobs.is_empty() {
+        if !board.dirty || (board.jobs.is_empty() && board.receipts.is_empty()) {
             return;
         }
         let lines = board.lines();
@@ -948,7 +962,7 @@ impl TelegramActor {
         let message = board.message;
         match message {
             Some(id) => {
-                if self.edit(chat, id, &text).await {
+                if self.edit(chat, id, &text).await.is_ok() {
                     self.mark_rendered(chat, body);
                 }
             }
@@ -974,9 +988,32 @@ impl TelegramActor {
         }
     }
 
+    async fn flush_receipt(&mut self, chat: i64) {
+        let Some(board) = self.boards.get(&chat) else {
+            return;
+        };
+        if board.message.is_none() {
+            return;
+        }
+        let Some((message, text)) = board.receipts.front().cloned() else {
+            return;
+        };
+        if self.limiter.acquire(chat).is_err() {
+            return;
+        }
+        if matches!(
+            self.edit(chat, message, &text).await,
+            Ok(()) | Err(TgError::Api(_))
+        ) && let Some(board) = self.boards.get_mut(&chat)
+        {
+            board.receipts.pop_front();
+        }
+    }
+
     /// One edit, with the DESIGN §12.4 failure ladder.
-    async fn edit(&mut self, chat: i64, message: MessageId, text: &str) -> bool {
-        for attempt in 1..=NETWORK_ATTEMPTS {
+    async fn edit(&mut self, chat: i64, message: MessageId, text: &str) -> Result<(), TgError> {
+        let mut attempt = 1;
+        loop {
             match self
                 .transport
                 .edit_message_text(chat, message, text, None)
@@ -984,16 +1021,17 @@ impl TelegramActor {
             {
                 Ok(()) => {
                     self.limiter.record_sent(chat);
-                    return true;
+                    return Ok(());
                 }
                 Err(TgError::NotModified) => {
                     // Telegram is the authority on whether the message changed; treat it as sent.
                     self.limiter.record_sent(chat);
-                    return true;
+                    return Ok(());
                 }
                 Err(e @ TgError::Network(_)) if attempt < NETWORK_ATTEMPTS => {
                     tracing::debug!("board edit attempt {attempt} failed: {e}");
                     tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
+                    attempt += 1;
                 }
                 Err(e) => {
                     // A non-retryable rejection of an *edit* means this message id is unusable —
@@ -1002,15 +1040,19 @@ impl TelegramActor {
                     // of its own (DESIGN §12.5), so holding on to a dead id would mean re-editing
                     // it every tick and losing every completion in the burst. Forget it and let
                     // the next redraw open a fresh message with the same rows.
-                    if matches!(e, TgError::Api(_)) {
+                    if matches!(e, TgError::Api(_))
+                        && self
+                            .boards
+                            .get(&chat)
+                            .is_some_and(|b| b.message == Some(message))
+                    {
                         self.forget_board_message(chat);
                     }
                     self.after_failure(chat, &e).await;
-                    return false;
+                    return Err(e);
                 }
             }
         }
-        false
     }
 
     /// Drops a board's message id after Telegram refused to edit it, keeping the rows.
@@ -1061,7 +1103,7 @@ impl TelegramActor {
             return;
         }
         let closed = match message {
-            Some(id) => self.edit(chat, id, &text).await,
+            Some(id) => self.edit(chat, id, &text).await.is_ok(),
             // The board message was refused mid-flight (see `edit`) and its rows never reached the
             // user in their final shape; the receipt is still owed, so post it as a new message.
             None => match self.transport.send_message(chat, &text, None).await {
@@ -1090,6 +1132,9 @@ impl TelegramActor {
             return;
         }
         let board = self.boards.entry(chat).or_default();
+        if board.new_items.remove(&view.id) {
+            board.start_new_message();
+        }
         // A watchdog marker is board state, not item state, so it survives the upsert.
         let mark = board.jobs.get(&view.id).and_then(|l| l.mark);
         let line = JobLine {
