@@ -181,6 +181,7 @@ async fn the_whole_pipeline_runs_over_a_socket_and_hands_the_engines_the_cookie_
         .await;
     Mock::given(method("GET"))
         .and(path("/vix/98765"))
+        .and(header("referer", format!("{uri}/").as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_string(VIXCLOUD))
         .mount(&server)
         .await;

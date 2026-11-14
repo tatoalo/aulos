@@ -151,8 +151,8 @@ jobs:
           pip install --quiet ruff
           ruff check "$shim"
           python -m py_compile "$shim"
-          ruff check tests/e2e/redirect_smoke.py
-          python -m py_compile tests/e2e/redirect_smoke.py
+          ruff check tests/e2e/redirect_smoke.py tests/e2e/sc_smoke.py
+          python -m py_compile tests/e2e/redirect_smoke.py tests/e2e/sc_smoke.py
       - name: shim contract test (canned job, stubbed yt_dlp)
         run: |
           set -eu

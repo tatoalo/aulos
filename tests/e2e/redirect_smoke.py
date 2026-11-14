@@ -109,7 +109,7 @@ def api(base, path, body=None):
 
 
 @contextlib.contextmanager
-def aulos(depth, proxy=""):
+def aulos(depth, proxy="", extra_env=None):
     with tempfile.TemporaryDirectory(prefix="aulos-redirect-") as temp:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -127,6 +127,7 @@ def aulos(depth, proxy=""):
             "AULOS_SHUTDOWN_GRACE_SECS": "0",
             "YTDL_OPTIONS": json.dumps({"proxy": proxy, "cachedir": False}),
         }
+        env.update(extra_env or {})
         log_path = Path(temp) / "server.log"
         with log_path.open("w") as log:
             proc = subprocess.Popen(

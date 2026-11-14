@@ -120,7 +120,7 @@ pub async fn resolve_watch(
 
     // The validity probe legacy performed, and the reason an unplayable page becomes
     // `Unsupported` rather than a queued item that can never download.
-    let _stream = embed::stream_for_embed(http, &embed_url).await?;
+    let _stream = embed::stream_for_embed(http, &embed_url, base).await?;
 
     // Legacy truthiness: `season_num and ep_num`, so a zero falls into the movie branch.
     let tv = title_type == "tv";
