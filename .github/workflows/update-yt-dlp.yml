@@ -106,6 +106,9 @@ jobs:
           docker run --rm aulos-server:bump-smoke doctor
           docker run --rm --entrypoint python3 aulos-server:bump-smoke \
             -c 'import yt_dlp; v = yt_dlp.version; print("yt_dlp", v.__version__, v.CHANNEL)'
+          docker run --rm --network none \
+            --mount "type=bind,source=$PWD/tests/e2e/redirect_smoke.py,target=/redirect_smoke.py,readonly" \
+            --entrypoint python3 aulos-server:bump-smoke /redirect_smoke.py
 
       - name: Create or update the pull request
         if: steps.update.outputs.has_update == 'true'

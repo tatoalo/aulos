@@ -74,6 +74,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # source tarball. The pin lives in exactly ONE place in the repo (this ARG) — CI asserts that.
 RUN pip3 install --break-system-packages --no-cache-dir --no-deps \
       "yt-dlp @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz"
+RUN pip3 install --break-system-packages --no-cache-dir \
+      "requests>=2.32.2,<3" "urllib3>=2.0.2,<3" \
+ && pip3 check
 
 # deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y

@@ -1,0 +1,5 @@
+{"v":1,"t":"hello","n":1,"ts":1772668801.0,"protocol":1,"yt_dlp":"2026.11.04.071645","python":"3.13.2","pid":4821}
+{"v":1,"t":"resolved","n":2,"ts":1772668802.0,"root":{"type":"url","webpage_url":"https://stub.test/http/1","extractor":"generic"}}
+{"v":1,"t":"entry","n":3,"ts":1772668803.0,"index":1,"entry":{"_type":"url","url":"https://stub.test/media.mp4","webpage_url":"https://stub.test/http/1","original_url":"https://stub.test/http/1","extractor":"generic","extractor_key":"Generic"}}
+{"v":1,"t":"result","n":4,"ts":1772668804.0,"ok":true,"count":1,"truncated":false}
+{"v":1,"t":"bye","n":5,"ts":1772668805.0,"elapsed_ms":4000,"frames":5}

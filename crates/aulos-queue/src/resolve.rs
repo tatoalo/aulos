@@ -548,7 +548,10 @@ impl Engine {
             let message = if looped {
                 format!("Redirect loop at {url}")
             } else {
-                format!("Too many redirects resolving {url}")
+                format!(
+                    "Too many extractor redirects resolving {url} (AULOS_RESOLVE_MAX_DEPTH={})",
+                    self.cfg.resolve_max_depth
+                )
             };
             self.fail_resolution(
                 id,

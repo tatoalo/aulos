@@ -9,6 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -382,6 +383,111 @@ async fn a_url_transparent_root_becomes_a_redirect_entry() {
         panic!("expected a redirect, got {:?}", entries[0].kind)
     };
     assert_eq!(url.as_str(), "https://elsewhere.test/real");
+    assert_eq!(&entries[0].url, url);
+    assert_eq!(entries[0].state["webpage_url"], "https://stub.test/short");
+}
+
+#[tokio::test]
+async fn generic_and_youtube_redirects_preserve_the_extractor_destination() {
+    for (fixture, target) in [
+        ("extract_http_redirect.jsonl", "https://stub.test/media.mp4"),
+        (
+            "extract_youtube_redirect.jsonl",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        ),
+    ] {
+        let RunnerOutcome::Extracted { entries, .. } =
+            replay(fixture, &extract_job()).await.unwrap()
+        else {
+            panic!("expected an extraction")
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url.as_str(), target);
+        assert_eq!(
+            entries[0].kind,
+            EntryKind::Redirect {
+                url: Url::parse(target).unwrap()
+            }
+        );
+        assert_ne!(entries[0].state["webpage_url"], target);
+        assert_eq!(entries[0].state["url"], target);
+    }
+}
+
+async fn replay_entry(
+    root_type: &str,
+    entry: serde_json::Value,
+) -> Result<RunnerOutcome, ProviderError> {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    for line in include_str!("fixtures/transcripts/extract_redirect.jsonl").lines() {
+        let mut frame: serde_json::Value = serde_json::from_str(line).unwrap();
+        match frame["t"].as_str() {
+            Some("resolved") => frame["root"]["type"] = root_type.into(),
+            Some("entry") => frame["entry"] = entry.clone(),
+            _ => {}
+        }
+        writeln!(file, "{frame}").unwrap();
+    }
+    let (sink, _rx) = sink();
+    RunnerHandle::default()
+        .replay(
+            file.path(),
+            &extract_job(),
+            &sink,
+            &CancellationToken::new(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn unusable_redirect_destinations_never_fall_back_to_the_source() {
+    for root in ["url", "url_transparent"] {
+        for target in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(17)),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!("/relative")),
+            Some(serde_json::json!("https://[invalid")),
+        ] {
+            let mut entry = serde_json::json!({
+                "webpage_url": "https://stub.test/source",
+                "original_url": "https://stub.test/source",
+            });
+            if let Some(target) = target {
+                entry["url"] = target;
+            }
+            let error = replay_entry(root, entry).await.unwrap_err();
+            assert_eq!(error.code(), ErrorCode::UnsupportedUrl);
+            assert_eq!(error.message(), EMPTY_DATA);
+        }
+    }
+}
+
+#[tokio::test]
+async fn videos_and_flat_playlist_children_keep_their_page_url() {
+    for root in ["video", "playlist"] {
+        let RunnerOutcome::Extracted { entries, .. } = replay_entry(
+            root,
+            serde_json::json!({
+                "_type": "url",
+                "id": "video",
+                "webpage_url": "https://stub.test/watch/video",
+                "url": "https://cdn.test/signed.mp4?token=expiring",
+            }),
+        )
+        .await
+        .unwrap() else {
+            panic!("expected an extraction")
+        };
+        let entry = if root == "playlist" {
+            &entries[0].children()[0]
+        } else {
+            &entries[0]
+        };
+        assert_eq!(entry.url.as_str(), "https://stub.test/watch/video");
+        assert_eq!(entry.kind, EntryKind::Video);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
