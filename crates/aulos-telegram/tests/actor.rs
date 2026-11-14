@@ -39,6 +39,20 @@ fn callback(chat: i64, data: &str) -> Incoming {
     }
 }
 
+async fn accept_links(h: &mut Harness, chat: i64, urls: &str) {
+    h.handle(text(chat, urls)).await;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), h.inbox.as_mut().unwrap().recv())
+            .await
+            .expect("accepted links must publish an event")
+            .expect("event inbox must stay open");
+        h.observe(&event).await;
+        if matches!(*event, DomainEvent::Added(_, AddReason::Created)) {
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
@@ -423,6 +437,353 @@ async fn the_board_is_created_once_and_edited_afterwards() {
     let edits = h.transport.edits();
     assert_eq!(edits.len(), 1);
     assert!(edits[0].text().contains("55%"));
+}
+
+#[tokio::test]
+async fn new_links_carry_unfinished_jobs_to_a_fresh_board_and_leave_a_receipt() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let mut scheduled = view(
+        ItemId::new(),
+        "Scheduled premiere",
+        Status::Queued,
+        SourceRef::with_ref(SourceKind::Subscription, "channel"),
+    );
+    scheduled.msg = Some("Scheduled release; checking on 2026-11-14 at 14:00 UTC".into());
+    scheduled.error = Some(aulos_core::WireError::new(
+        aulos_core::ErrorCode::NotYetLive,
+        "Premieres later",
+    ));
+    let running = tg_view(
+        ItemId::new(),
+        "Still downloading",
+        Status::Downloading,
+        CHAT,
+    );
+    let mut done = tg_view(ItemId::new(), "Earlier download", Status::Downloading, CHAT);
+    h.observe(&added_batch(
+        &[scheduled.clone(), running, done.clone()],
+        AddReason::Created,
+    ))
+    .await;
+    h.tick().await;
+    done.status = Status::Finished;
+    h.observe(&completed(&done)).await;
+    h.transport.clear();
+
+    accept_links(&mut h, CHAT, "https://a.test/new-1 https://a.test/new-2").await;
+    h.tick().await;
+    assert_eq!(h.transport.count(), 0);
+    h.advance(Duration::from_secs(3)).await;
+
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1);
+    let fresh = calls.iter().find(|call| call.chat() == Some(CHAT)).unwrap();
+    assert!(matches!(fresh, Call::Send { .. }));
+    for expected in [
+        "Scheduled premiere",
+        "14:00 UTC",
+        "Still downloading",
+        "new-1",
+        "new-2",
+    ] {
+        assert!(fresh.text().contains(expected), "{}", fresh.text());
+    }
+    assert!(!fresh.text().contains("Earlier download"));
+    assert!(
+        calls
+            .iter()
+            .all(|call| !matches!(call, Call::Edit { chat: CHAT, .. }))
+    );
+
+    h.advance(Duration::from_secs(3)).await;
+    let receipts: Vec<_> = h
+        .transport
+        .edits()
+        .into_iter()
+        .filter(|call| call.chat() == Some(CHAT))
+        .collect();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].text(),
+        "🧾 Aulos — 1 finished\n\n✅  Earlier download\n\n↪ 2 unfinished item(s) carried forward."
+    );
+    let Call::Edit {
+        message: old_message,
+        ..
+    } = receipts[0]
+    else {
+        unreachable!();
+    };
+    h.transport.clear();
+
+    scheduled.status = Status::Finished;
+    scheduled.error = None;
+    scheduled.msg = None;
+    h.observe(&completed(&scheduled)).await;
+    h.advance(Duration::from_secs(3)).await;
+    let edits = h.transport.edits();
+    let live = edits.iter().find(|call| call.chat() == Some(CHAT)).unwrap();
+    assert!(matches!(live, Call::Edit { message, .. } if *message != old_message));
+    assert!(live.text().contains("✅  Scheduled premiere"));
+    assert!(!live.text().contains("Earlier download"));
+}
+
+#[tokio::test]
+async fn a_completed_board_becomes_a_receipt_when_new_links_arrive() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let mut old = tg_view(ItemId::new(), "Previous clip", Status::Downloading, CHAT);
+    h.observe(&added(&old)).await;
+    h.tick().await;
+    old.status = Status::Finished;
+    h.observe(&completed(&old)).await;
+    h.transport.clear();
+
+    accept_links(&mut h, CHAT, "https://a.test/new").await;
+    h.advance(Duration::from_secs(3)).await;
+    assert!(matches!(h.transport.calls()[0], Call::Send { .. }));
+    assert!(!h.transport.texts()[0].contains("Previous clip"));
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(
+        h.transport.edits()[0].text(),
+        "✅ All done — 1 finished\n\n✅  Previous clip"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_and_rejected_links_keep_the_current_board() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    accept_links(&mut h, CHAT, "https://a.test/existing").await;
+    h.tick().await;
+    h.transport.clear();
+
+    h.handle(text(CHAT, "https://a.test/existing")).await;
+    h.handle(text(CHAT, "http://localhost:8081/x")).await;
+    assert_eq!(h.transport.count(), 2);
+    assert_eq!(h.transport.texts()[0], "Already queued: 1 link(s).");
+    assert!(h.transport.texts()[1].starts_with("Ignored invalid links:"));
+    h.transport.clear();
+
+    let item = h.items().await.remove(0);
+    let v = tg_view(item.id, "Existing clip", Status::Downloading, CHAT);
+    h.observe(&changed(&v, Status::Queued)).await;
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.count(), 1);
+    assert!(matches!(
+        h.transport.calls()[0],
+        Call::Edit {
+            message: MessageId(1001),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn submissions_before_the_next_send_share_one_fresh_board() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let old = tg_view(ItemId::new(), "Waiting clip", Status::Queued, CHAT);
+    h.observe(&added(&old)).await;
+    h.tick().await;
+    h.transport.clear();
+
+    accept_links(&mut h, CHAT, "https://a.test/first").await;
+    h.tick().await;
+    accept_links(&mut h, CHAT, "https://a.test/second https://a.test/third").await;
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.count(), 1);
+    assert!(matches!(h.transport.calls()[0], Call::Send { .. }));
+    assert!(h.transport.texts()[0].contains("Waiting clip"));
+    for item in h.items().await {
+        let finished = tg_view(item.id, "New finished clip", Status::Finished, CHAT);
+        h.observe(&completed(&finished)).await;
+    }
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.edits().len(), 1);
+    h.advance(Duration::from_secs(3)).await;
+    assert!(
+        h.transport
+            .edits()
+            .last()
+            .unwrap()
+            .text()
+            .contains("3 done")
+    );
+    assert_eq!(
+        h.transport
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Send { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_failed_fresh_send_keeps_the_receipt_pending_until_delivery() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let old = tg_view(ItemId::new(), "Carried clip", Status::Queued, CHAT);
+    h.observe(&added(&old)).await;
+    h.tick().await;
+    h.transport.clear();
+    accept_links(&mut h, CHAT, "https://a.test/new").await;
+    h.transport
+        .fail_next(vec![TgError::Network("offline".into())]);
+
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.count(), 0);
+    h.tick().await;
+    assert_eq!(h.transport.count(), 1);
+    assert!(matches!(h.transport.calls()[0], Call::Send { .. }));
+    assert!(h.transport.texts()[0].contains("Carried clip"));
+    assert!(h.transport.texts()[0].contains("new"));
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.edits().len(), 1);
+    assert!(h.transport.edits()[0].text().contains("carried forward"));
+}
+
+#[tokio::test]
+async fn receipt_failures_do_not_replace_the_new_live_message() {
+    for permanent in [false, true] {
+        let mut h = Harness::builder().parked_downloads().build().await;
+        let mut old = tg_view(ItemId::new(), "Carried clip", Status::Queued, CHAT);
+        h.observe(&added(&old)).await;
+        h.tick().await;
+        accept_links(&mut h, CHAT, "https://a.test/new").await;
+        h.advance(Duration::from_secs(3)).await;
+        h.transport.clear();
+        h.transport.fail_next(if permanent {
+            vec![TgError::Api("message to edit not found".into())]
+        } else {
+            (0..3).map(|_| TgError::Network("offline".into())).collect()
+        });
+
+        h.advance(Duration::from_secs(3)).await;
+        assert_eq!(h.transport.count(), 0);
+        h.tick().await;
+        assert_eq!(h.transport.edits().len(), usize::from(!permanent));
+        old.status = Status::Finished;
+        h.observe(&completed(&old)).await;
+        h.advance(Duration::from_secs(3)).await;
+        let edits = h.transport.edits();
+        assert!(matches!(
+            edits.last().unwrap(),
+            Call::Edit {
+                message: MessageId(1002),
+                ..
+            }
+        ));
+        assert!(edits.last().unwrap().text().contains("✅  Carried clip"));
+        assert!(
+            h.transport
+                .calls()
+                .iter()
+                .all(|call| matches!(call, Call::Edit { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn successive_submissions_preserve_each_receipt() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let old = tg_view(ItemId::new(), "Carried clip", Status::Queued, CHAT);
+    h.observe(&added(&old)).await;
+    h.tick().await;
+    accept_links(&mut h, CHAT, "https://a.test/first").await;
+    h.advance(Duration::from_secs(3)).await;
+    accept_links(&mut h, CHAT, "https://a.test/first https://a.test/second").await;
+    h.advance(Duration::from_secs(3)).await;
+    h.advance(Duration::from_secs(3)).await;
+    h.advance(Duration::from_secs(3)).await;
+
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 5);
+    assert!(
+        calls[..3]
+            .iter()
+            .all(|call| matches!(call, Call::Send { .. }))
+    );
+    assert!(matches!(
+        calls[3],
+        Call::Edit {
+            message: MessageId(1001),
+            ..
+        }
+    ));
+    assert!(matches!(
+        calls[4],
+        Call::Edit {
+            message: MessageId(1002),
+            ..
+        }
+    ));
+    assert!(
+        calls[3]
+            .text()
+            .contains("1 unfinished item(s) carried forward")
+    );
+    assert!(
+        calls[4]
+            .text()
+            .contains("2 unfinished item(s) carried forward")
+    );
+    h.transport.clear();
+
+    let finished = tg_view(old.id, "Carried clip", Status::Finished, CHAT);
+    h.observe(&completed(&finished)).await;
+    h.advance(Duration::from_secs(3)).await;
+    assert_eq!(h.transport.count(), 1);
+    assert!(matches!(
+        h.transport.calls()[0],
+        Call::Edit {
+            message: MessageId(1003),
+            ..
+        }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_throttled_receipt_survives_until_the_finished_board_can_retire() {
+    let mut h = Harness::builder().parked_downloads().build().await;
+    let mut old = tg_view(ItemId::new(), "Carried clip", Status::Queued, CHAT);
+    h.observe(&added(&old)).await;
+    h.tick().await;
+    accept_links(&mut h, CHAT, "https://a.test/new").await;
+    h.advance(Duration::from_secs(3)).await;
+    old.status = Status::Finished;
+    h.observe(&completed(&old)).await;
+    let item = h.items().await.remove(0);
+    let finished = tg_view(item.id, "New clip", Status::Finished, CHAT);
+    h.observe(&completed(&finished)).await;
+    h.transport.clear();
+    h.transport
+        .fail_next(vec![TgError::RetryAfter(Duration::from_secs(70))]);
+
+    h.advance(Duration::from_secs(3)).await;
+    h.advance(Duration::from_secs(61)).await;
+    assert_eq!(h.transport.count(), 0);
+    assert_eq!(h.actor.health().boards, 1);
+    h.advance(Duration::from_secs(10)).await;
+    assert_eq!(h.transport.count(), 1);
+    assert!(matches!(
+        h.transport.calls()[0],
+        Call::Edit {
+            message: MessageId(1001),
+            ..
+        }
+    ));
+    assert!(h.transport.texts()[0].contains("carried forward"));
+    h.advance(Duration::from_secs(6)).await;
+    assert_eq!(h.actor.health().boards, 0);
+    assert!(matches!(
+        h.transport.calls()[1],
+        Call::Edit {
+            message: MessageId(1002),
+            ..
+        }
+    ));
+    assert_eq!(
+        h.transport.texts()[1],
+        "✅ All done — 2 finished\n\n✅  Carried clip\n✅  New clip"
+    );
 }
 
 /// DESIGN §12.4: an unchanged render issues **no** API call — Telegram answers an unmodified edit

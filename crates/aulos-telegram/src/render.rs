@@ -1,11 +1,5 @@
 //! The live progress board (DESIGN §12.4) and the discrete notification texts (DESIGN §12.5).
 //!
-//! In board mode a burst of downloads is **one** message: the rows are the acknowledgement, the
-//! progress and the completion, and the glyph at the head of each row is the whole story
-//! (`⏳` queued → `⏬` running → `✅`/`❌`/`🚫`). Nothing here is sent twice; the actor edits the
-//! same message until it retires it. `per_job` mode keeps the legacy discrete texts instead, so
-//! both vocabularies live in this module.
-//!
 //! Everything is a pure function of a [`JobLine`] slice and a clock reading, so the whole layout —
 //! the bars, the overflow, the group aggregate, the retirement — is snapshot-testable without a
 //! bot.
@@ -163,12 +157,34 @@ pub fn render_body(lines: &[JobLine]) -> String {
 /// the actor forgets it immediately afterwards and the next burst opens a new message.
 #[must_use]
 pub fn retired_text(lines: &[JobLine]) -> String {
-    let mut out = retired_header(lines);
+    let mut out = completed_header(lines, "✅ All done");
     let rows = render_rows(lines);
     if !rows.is_empty() {
         out.push_str("\n\n");
         out.push_str(&rows);
     }
+    out
+}
+
+pub(crate) fn receipt_text(lines: &[JobLine]) -> String {
+    let completed: Vec<_> = lines
+        .iter()
+        .filter(|line| line.status.is_terminal())
+        .cloned()
+        .collect();
+    let pending = lines.len() - completed.len();
+    if pending == 0 {
+        return retired_text(lines);
+    }
+    let mut out = completed_header(&completed, "🧾 Aulos");
+    let rows = render_rows(&completed);
+    if !rows.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&rows);
+    }
+    out.push_str(&format!(
+        "\n\n↪ {pending} unfinished item(s) carried forward."
+    ));
     out
 }
 
@@ -196,11 +212,10 @@ fn live_header(lines: &[JobLine]) -> String {
     out
 }
 
-/// `✅ All done — 4 finished, 1 failed`.
-fn retired_header(lines: &[JobLine]) -> String {
+fn completed_header(lines: &[JobLine], heading: &str) -> String {
     let n = |s: Status| lines.iter().filter(|l| l.status == s).count();
     let (finished, failed, canceled) = (n(Status::Finished), n(Status::Error), n(Status::Canceled));
-    let mut out = format!("✅ All done — {finished} finished");
+    let mut out = format!("{heading} — {finished} finished");
     if failed > 0 {
         out.push_str(&format!(", {failed} failed"));
     }
