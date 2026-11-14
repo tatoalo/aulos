@@ -1191,6 +1191,18 @@ impl Engine {
             return false;
         }
         if let Some(item) = self.cached(id) {
+            if status == Status::Error
+                && let Some(error) = item.error.as_ref()
+            {
+                tracing::warn!(
+                    item = %id,
+                    provider = error.provider.as_deref()
+                        .or_else(|| item.provider.as_ref().map(aulos_core::ProviderId::as_str))
+                        .unwrap_or("unknown"),
+                    code = %error.code,
+                    "provider job failed"
+                );
+            }
             self.drop_dedupe(&item);
         }
         self.arm_clear_after(id, status).await;

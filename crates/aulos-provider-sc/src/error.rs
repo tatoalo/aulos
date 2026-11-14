@@ -79,6 +79,12 @@ impl std::fmt::Display for ScErrorCode {
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ScError {
+    #[expect(missing_docs)]
+    #[error("vixcloud refused the embed (403): missing/rejected Referer")]
+    EmbedForbidden,
+    #[expect(missing_docs)]
+    #[error("vixcloud embed token expired (410), retry")]
+    EmbedExpired,
     /// The transport failed before a response arrived.
     #[error("request to {url} failed: {message}")]
     Transport {
@@ -179,7 +185,10 @@ impl ScError {
         match self {
             Self::Transport { .. } => ScErrorCode::Transport,
             Self::Timeout { .. } => ScErrorCode::Timeout,
-            Self::Status { .. } | Self::VersionProbe { .. } => ScErrorCode::Status,
+            Self::Status { .. }
+            | Self::VersionProbe { .. }
+            | Self::EmbedForbidden
+            | Self::EmbedExpired => ScErrorCode::Status,
             Self::BadJson { .. } => ScErrorCode::BadJson,
             Self::VersionUnreadable { .. } => ScErrorCode::VersionUnreadable,
             Self::VersionRejected { .. } => ScErrorCode::VersionRejected,
@@ -204,10 +213,13 @@ impl ScError {
         let message = self.to_string();
         match &self {
             Self::Timeout { .. } => ProviderError::Timeout(message),
-            Self::VersionProbe {
+            Self::EmbedForbidden
+            | Self::VersionProbe {
                 status: 400..=499, ..
             } => ProviderError::Unavailable(message),
-            Self::Transport { .. } | Self::VersionProbe { .. } => ProviderError::Network(message),
+            Self::EmbedExpired | Self::Transport { .. } | Self::VersionProbe { .. } => {
+                ProviderError::Network(message)
+            }
             Self::Status { status, .. } => match *status {
                 401 => ProviderError::AuthRequired(message),
                 // Cloudflare fronts the site; a 403 here is a bot check, not a login wall.

@@ -82,7 +82,7 @@ pub async fn fresh_stream(
         url: watch_url.to_string(),
     })?;
 
-    let (iframe, params) = embed::stream_for_embed(http, &embed_url).await?;
+    let (iframe, params) = embed::stream_for_embed(http, &embed_url, &site.base).await?;
     Ok(StreamTarget {
         m3u8: params.m3u8,
         headers: vec![
@@ -162,6 +162,10 @@ mod tests {
         assert_eq!(t.header("origin"), Some("https://vixcloud.co"));
         assert_eq!(t.header("User-Agent"), Some(USER_AGENT));
         assert_eq!(t.cookies, "sid=abc; cf_clearance=zzz");
+        assert!(
+            http.headers_for("https://vixcloud.co/embed/98765?token=abc&referer=1")
+                .contains(&("Referer".to_owned(), "https://sc.test/".to_owned()))
+        );
     }
 
     #[tokio::test]
@@ -183,6 +187,48 @@ mod tests {
             .await
             .expect("a target");
         assert_eq!(http.count("https://sc.test/"), 2);
+    }
+
+    #[tokio::test]
+    async fn retrying_an_expired_embed_fetches_a_new_token() {
+        let http = mock()
+            .on_sequence(
+                "https://sc.test/embed/456",
+                vec![
+                    (
+                        200,
+                        "<iframe src=\"https://vixcloud.cc/embed/1?token=expired\"></iframe>"
+                            .to_owned(),
+                    ),
+                    (
+                        200,
+                        "<iframe src=\"https://vixcloud.cc/embed/1?token=fresh\"></iframe>"
+                            .to_owned(),
+                    ),
+                ],
+            )
+            .on("https://vixcloud.cc/embed/1?token=expired", 410, "Expired")
+            .on(
+                "https://vixcloud.cc/embed/1?token=fresh",
+                200,
+                include_str!("../tests/fixtures/sc/vixcloud_streams_active.html"),
+            );
+        let watch = Url::parse("https://sc.test/it/watch/9?e=456").expect("url");
+        let error = fresh_stream(&http, &base(), &watch)
+            .await
+            .expect_err("expired token");
+        assert!(error.into_provider_error().retryable());
+        let target = fresh_stream(&http, &base(), &watch)
+            .await
+            .expect("fresh token");
+        assert_eq!(
+            target.header("Referer"),
+            Some("https://vixcloud.cc/embed/1?token=fresh")
+        );
+        assert_eq!(http.count("https://sc.test/embed/456"), 2);
+        assert_eq!(http.count("https://vixcloud.cc/embed/1?token=expired"), 1);
+        assert_eq!(http.count("https://vixcloud.cc/embed/1?token=fresh"), 1);
+        assert_eq!(http.total(), 8);
     }
 
     #[tokio::test]
@@ -287,6 +333,14 @@ mod tests {
         assert_eq!(target.cookies, "sid=abc; cf_clearance=zzz");
         assert_eq!(old.urls(), ["https://sc.test/"]);
         assert_eq!(migrated.total(), 4);
+        assert!(
+            migrated
+                .headers_for("https://vixcloud.co/embed/98765?token=abc&referer=1")
+                .contains(&(
+                    "Referer".to_owned(),
+                    "https://streamingcommunity.new/".to_owned()
+                ))
+        );
         assert_eq!(
             migrated.count("https://streamingcommunity.new/it/watch/9?e=456"),
             1

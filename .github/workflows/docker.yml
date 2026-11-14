@@ -49,7 +49,7 @@ jobs:
             // The API caps the list at 3,000 files; an incomplete diff must not skip a build.
             if (files.length >= 3000) return true;
             const packaging = path =>
-              /^(docker\/|\.cargo\/|\.dockerignore$|\.github\/workflows\/docker\.yml$|crates\/aulos-provider-ytdlp\/(python|src)\/|crates\/aulos-queue\/src\/resolve\.rs$|tests\/e2e\/redirect_smoke\.py$|plugins\/examples\/)/.test(path) ||
+              /^(docker\/|\.cargo\/|\.dockerignore$|\.github\/workflows\/docker\.yml$|crates\/aulos-provider-ytdlp\/(python|src)\/|crates\/aulos-provider-sc\/src\/|crates\/aulos-queue\/src\/(resolve|engine)\.rs$|tests\/e2e\/(redirect|sc)_smoke\.py$|plugins\/examples\/)/.test(path) ||
               /(^|\/)(Cargo\.toml|Cargo\.lock|build\.rs|rust-toolchain(\.toml)?)$/.test(path);
             const build = files.some(file =>
               packaging(file.filename) || (file.previous_filename && packaging(file.previous_filename)));
@@ -153,6 +153,9 @@ jobs:
           docker run --rm --network none \
             --mount "type=bind,source=$PWD/tests/e2e/redirect_smoke.py,target=/redirect_smoke.py,readonly" \
             --entrypoint python3 "$img" /redirect_smoke.py
+          docker run --rm --network none \
+            --mount "type=bind,source=$PWD/tests/e2e,target=/smoke,readonly" \
+            --entrypoint python3 "$img" /smoke/sc_smoke.py
           # `healthcheck` probes a *running* server, so against this one-shot container it must
           # exit non-zero (DESIGN §3.1, PLAN WP-17) — that is the whole point of the subcommand,
           # and asserting it here is what stops a future "always exit 0" regression from making

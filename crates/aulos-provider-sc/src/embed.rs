@@ -91,11 +91,23 @@ pub async fn embed_iframe(http: &dyn ScHttp, embed_url: &Url) -> Result<Url, ScE
 /// # Errors
 /// [`ScError::NoStream`] when no script carries a usable stream URL, plus anything the transport
 /// can produce.
-pub async fn stream_from_iframe(http: &dyn ScHttp, iframe: &Url) -> Result<StreamParams, ScError> {
+pub async fn stream_from_iframe(
+    http: &dyn ScHttp,
+    iframe: &Url,
+    site_base: &Url,
+) -> Result<StreamParams, ScError> {
     let res = http
-        .get(ScReq::get(iframe.clone()))
-        .await?
-        .error_for_status()?;
+        .get(ScReq::get(iframe.clone()).header(
+            "Referer",
+            format!("{}/", site_base.origin().ascii_serialization()),
+        ))
+        .await?;
+    match res.status {
+        403 => return Err(ScError::EmbedForbidden),
+        410 => return Err(ScError::EmbedExpired),
+        _ => {}
+    }
+    let res = res.error_for_status()?;
     extract_stream(&res.body, iframe)
 }
 
@@ -106,9 +118,10 @@ pub async fn stream_from_iframe(http: &dyn ScHttp, iframe: &Url) -> Result<Strea
 pub async fn stream_for_embed(
     http: &dyn ScHttp,
     embed_url: &Url,
+    site_base: &Url,
 ) -> Result<(Url, StreamParams), ScError> {
     let iframe = embed_iframe(http, embed_url).await?;
-    let params = stream_from_iframe(http, &iframe).await?;
+    let params = stream_from_iframe(http, &iframe, site_base).await?;
     Ok((iframe, params))
 }
 
@@ -528,10 +541,13 @@ mod tests {
                 200,
                 include_str!("../tests/fixtures/sc/vixcloud_streams_active.html"),
             );
-        let (iframe, params) =
-            stream_for_embed(&http, &Url::parse("https://sc.test/embed/1").expect("url"))
-                .await
-                .expect("a stream");
+        let (iframe, params) = stream_for_embed(
+            &http,
+            &Url::parse("https://sc.test/embed/1").expect("url"),
+            &Url::parse("https://sc.test/").expect("url"),
+        )
+        .await
+        .expect("a stream");
         assert_eq!(iframe.host_str(), Some("vixcloud.co"));
         assert!(params.m3u8.path().contains("/playlist/"));
         assert_eq!(
@@ -543,5 +559,46 @@ mod tests {
             !http.requested_anything_containing("/playlist/"),
             "the debug GET of the m3u8 is removed (DESIGN §10.5)"
         );
+        assert!(
+            http.headers_for(iframe.as_str())
+                .contains(&("Referer".to_owned(), "https://sc.test/".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_rejections_are_distinct_from_site_bot_checks() {
+        for (status, code, message, retryable) in [
+            (
+                403,
+                aulos_core::ErrorCode::Unavailable,
+                "vixcloud refused the embed (403): missing/rejected Referer",
+                false,
+            ),
+            (
+                410,
+                aulos_core::ErrorCode::Network,
+                "vixcloud embed token expired (410), retry",
+                true,
+            ),
+        ] {
+            let iframe = Url::parse("https://vixcloud.cc/embed/1?token=secret").expect("url");
+            let http = MockHttp::new().on(iframe.as_str(), status, "Forbidden");
+            let error = stream_from_iframe(
+                &http,
+                &iframe,
+                &Url::parse("https://sc.test:8443/it/watch/1?token=private").expect("url"),
+            )
+            .await
+            .expect_err("embed error")
+            .into_provider_error();
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), message);
+            assert_eq!(error.retryable(), retryable);
+            assert!(
+                http.headers_for(iframe.as_str())
+                    .contains(&("Referer".to_owned(), "https://sc.test:8443/".to_owned()))
+            );
+            assert_eq!(http.total(), 1);
+        }
     }
 }
