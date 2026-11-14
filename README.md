@@ -98,6 +98,10 @@ For a legitimately longer chain, set it to `10` in the container environment and
 Repeated URLs still fail as a redirect loop. This setting does not control HTTP redirects
 followed internally by yt-dlp, or StreamingCommunity's site-version probe.
 
+Downloads use the resolved video URL while keeping the submitted URL on the item.
+Each yt-dlp item enforces `noplaylist`, including items queued before upgrading and when
+user options set it to `false`. Submit a playlist URL to download its entries as a group.
+
 The image includes yt-dlp's Requests HTTP transport. If a URL still fails, include the item
 error, Aulos version and redacted proxy/extractor options in the report. A loop error and an
 extractor-depth error describe different failures; raising the depth does not repair a loop.

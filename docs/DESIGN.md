@@ -1549,8 +1549,8 @@ The provider entry blob is the one unbounded field. Rules ported from
 
 | Provider / case | Kept |
 |---|---|
-| `ytdlp`, non-playlist child | nothing (`entry_json = NULL`) |
-| `ytdlp`, playlist/channel child | keys matching `^(playlist\|channel)`, plus `n_entries`, `__last_playlist_index` — needed to re-resolve `outtmpl` after a restart |
+| `ytdlp`, non-playlist child | resolved `url` when different from the submitted URL; otherwise nothing (`entry_json = NULL`) |
+| `ytdlp`, playlist/channel child | resolved `url` when different from the item URL, plus keys matching `^(playlist\|channel)`, `n_entries`, `__last_playlist_index` — needed to re-resolve `outtmpl` after a restart |
 | `streamingcommunity` | the **whole** entry, in the `state` shape of §10.3 — needed for the JIT m3u8 (`base_url`, `title_id`, `episode_id`) and for NFO metadata. Rows imported from legacy JSON are translated into that shape at import time (§7.6.3a); nothing at runtime reads the legacy `_sc_*` key names. |
 | `command` plugin | the entry's `state` object plus `media_id`/`title`/`url` |
 | any | hard cap `AULOS_ENTRY_MAX_BYTES` (262144); over cap ⇒ store `{"__truncated":true}` and log a WARN |

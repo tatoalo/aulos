@@ -414,6 +414,7 @@ fn download_options(job: DownloadOptions<'_>) -> Map<String, Value> {
     for (key, value) in user {
         options.insert(key, value);
     }
+    options.insert("noplaylist".to_owned(), json!(true));
     pin_sidecars_to_the_scratch_dir(&mut options);
 
     if split_by_chapters {
@@ -658,6 +659,18 @@ mod tests {
         assert_eq!(options["ignore_no_formats_error"], json!(true));
         assert_eq!(options["socket_timeout"], json!(SOCKET_TIMEOUT));
         assert!(options.get("postprocessors").is_none());
+    }
+
+    #[test]
+    fn a_download_cannot_enable_playlist_expansion_through_user_options() {
+        for user in [
+            json!({}),
+            json!({ "noplaylist": false }),
+            json!({ "noplaylist": null }),
+        ] {
+            let options = built("/downloads", "/downloads/01ABC", &user);
+            assert_eq!(options["noplaylist"], true);
+        }
     }
 
     #[test]
