@@ -1,25 +1,13 @@
-# DESIGN §18.3. A drop-in replacement for the legacy MeTube-POT service: same env var names, same
-# volumes. `STATE_DIR` is unchanged on purpose — the importer reads the legacy JSON from it on
-# first start.
-#
-# The image tag is what `.github/workflows/docker.yml` actually publishes,
-# `ghcr.io/${GITHUB_REPOSITORY}` — DESIGN §18.3 was written as `aulos-server`, before the
-# repository was named `aulos`.
+# See docs/operations.md for deployment and docs/integrations.md for optional services.
 services:
   aulos:
     image: ghcr.io/tatoalo/aulos:latest
+    platform: linux/amd64
     container_name: aulos
     restart: unless-stopped
-    ports: ["8081:8081"]
-    # Docker's default stop timeout is 10 s, which SIGKILLs the container in the middle of the
-    # DESIGN §21.4 shutdown: in-flight downloads are killed instead of being given their grace,
-    # the interrupted rows never get `msg="Interrupted by shutdown"`, and the WAL is never
-    # checkpointed. The steps run one after another, so the stop timeout must exceed their sum:
-    # AULOS_SHUTDOWN_GRACE_SECS (20) + ENGINE_SHUTDOWN_CEILING (5) + WS_CLOSE_GRACE (2) +
-    # ENGINE_DRAIN_CEILING (2) + CONSUMER_DRAIN_CEILING (2) + TRACKER_CEILING (10) = 41 s, and only
-    # *then* comes store.close() -- the wal_checkpoint(TRUNCATE) plus `PRAGMA optimize` this
-    # setting exists to protect. 60 s is that sum plus room for the checkpoint on a large WAL.
-    # Raise it further if you raise AULOS_SHUTDOWN_GRACE_SECS.
+    ports:
+      - "127.0.0.1:8081:8081"
+    # Allow active work to stop and SQLite to checkpoint before Docker sends SIGKILL.
     stop_grace_period: 60s
     environment:
       PUID: "1000"
@@ -28,61 +16,16 @@ services:
       CHOWN_DIRS: "false"
       DOWNLOAD_DIR: /downloads
       AUDIO_DOWNLOAD_DIR: /downloads/audio
-      STATE_DIR: /downloads/.metube          # unchanged: the importer reads it
+      STATE_DIR: /downloads/.metube
       TEMP_DIR: /downloads/.aulos-tmp
       MAX_CONCURRENT_DOWNLOADS: "3"
       SC_MAX_CONCURRENT_DOWNLOADS: "1"
-      # The built-in web UI, served at the same address as the API. `GET <URL_PREFIX>` answers the
-      # page when the request asks for `text/html` and the JSON identity document otherwise, so
-      # curl, the iOS app and the v1 clients are unaffected. `false` turns it off entirely.
-      # The page, its assets and its manifest are NOT behind AULOS_API_TOKEN (a browser cannot put
-      # a bearer token on a document navigation); every API route keeps its auth.
       AULOS_WEB_UI: "true"
-      DEFAULT_THEME: auto                    # the UI's initial theme: auto | light | dark
-      YTDL_OPTIONS_FILE: /config/ytdl-options.json
-      JELLYFIN_SYNC_ENABLED: "true"
-      JELLYFIN_URL: http://jellyfin:8096
-      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY}
-      # A finished download asks Jellyfin for a GLOBAL scan (POST /Library/Refresh), coalesced
-      # over AULOS_JELLYFIN_DEBOUNCE_SECS. It is the only endpoint that discovers a file Jellyfin
-      # has never seen — see docs/reference/jellyfin-refresh-experiment.md.
-      #
-      # JELLYFIN_LIBRARY_ID is accepted but INERT: Jellyfin has no per-library scan, so an id
-      # cannot narrow the work. Setting it logs one boot WARN and nothing else.
-      #
-      # For a genuinely targeted scan, map aulos paths to the paths JELLYFIN sees. Here the same
-      # host directory is /downloads in this container; if the jellyfin container mounts it at
-      # /data/videos, that is:
-      # JELLYFIN_PATH_MAP: /downloads=/data/videos
-      # Comma-separated pairs, longest source prefix wins. Anything unmapped falls back to the
-      # global scan. The targeted call waits out Jellyfin's own LibraryMonitorDelay (60s default),
-      # so it trades latency for less scanning — leave it unset unless full scans cost you.
-      TELEGRAM_BOT_ENABLED: "true"
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
-      # Who reports a download: the channel that added it. The bot announces its own adds, and
-      # every subscription check (background work has no other push channel). A web, curl or iOS
-      # add is not reported here unless you turn this on.
-      # AULOS_TELEGRAM_WATCH_ALL: "true"
-      # iOS push notifications (docs/DESIGN.md §25). The .p8 is the only secret here: APNS_KEY_ID
-      # and APNS_TEAM_ID are identifiers, not credentials. Mount the key read-only and keep it out
-      # of the image. With APNS_ENABLED=true and an unreadable key the server logs an ERROR, runs
-      # with push disabled and reports `apns: degraded` — it does not refuse to start.
-      # APNS_ENABLED: "true"
-      # APNS_KEY_FILE: /config/AuthKey_ABCD1234EF.p8
-      # APNS_KEY_ID: ABCD1234EF
-      # APNS_TEAM_ID: TEAM123456
-      # APNS_TOPIC defaults to com.tatoalo.aulos; a device's own bundle_id wins when it reports one.
-      # The mirror of AULOS_TELEGRAM_WATCH_ALL: by default the phone is pushed only for downloads
-      # the app itself added (the share sheet counts), so a Telegram add does not also ring here —
-      # and only the device that added one, so an iPhone download leaves the iPad quiet. Turn this
-      # on to be pushed on every device for every download, whoever added it. A Live Activity that
-      # has started is always updated and ended either way.
-      # APNS_PUSH_ALL: "true"
+      DEFAULT_THEME: auto
+      # Create this JSON file before enabling it.
+      # YTDL_OPTIONS_FILE: /config/ytdl-options.json
+      # Configure auth before exposing the port beyond localhost.
+      # AULOS_API_TOKEN: ${AULOS_API_TOKEN}
     volumes:
-      - /srv/media:/downloads
-      - /srv/aulos/config:/config
-      # The APNs signing key, if you enabled push above. Read-only, and a single file rather than a
-      # directory so nothing else in it can be reached: it is the one credential in this file that
-      # is not an environment variable.
-      # - /srv/aulos/apns/AuthKey_ABCD1234EF.p8:/config/AuthKey_ABCD1234EF.p8:ro
+      - ./downloads:/downloads
+      - ./config:/config

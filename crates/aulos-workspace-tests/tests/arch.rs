@@ -513,8 +513,8 @@ fn the_ubiquitous_five_match_the_design_paragraph() {
         .expect("docs/DESIGN.md must be readable");
     let paragraph = design
         .split("\n\n")
-        .find(|p| p.contains("**The ubiquitous five.**"))
-        .expect("DESIGN §3 must still contain the ubiquitous-five paragraph");
+        .find(|p| p.contains("**Shared dependencies.**"))
+        .expect("the architecture guide must list shared dependencies");
 
     for name in UBIQUITOUS_FIVE {
         assert!(

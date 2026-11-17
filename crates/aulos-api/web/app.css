@@ -1,4 +1,4 @@
-/* Aulos web UI — tokens lifted from docs/design/web-ui/{Main,Mobile,MobileAdd}.dc.html.
+/* Aulos web UI. This stylesheet defines the maintained design tokens.
    No framework, no external font, no inline style attribute (the page runs under
    `style-src 'self'`, so every visual state is a class and every measured value is set
    through the CSSOM). */

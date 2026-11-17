@@ -1,12 +1,4 @@
-//! The `ytdlp` catalogue is asserted three ways: against an `insta` snapshot (so any change to
-//! its wire shape is a reviewed diff), against the **DESIGN §6.6 markdown table** itself (so the
-//! document and the code cannot drift apart silently), and against the two notices §6.6 requires
-//! the honest labelling of `best_remux` and `worst` to carry.
-//!
-//! Parsing the design table rather than retyping it is deliberate: a hand-copied expectation in a
-//! test is one more place the matrix can be wrong. The catalogue *data* lives in `aulos-core`
-//! (§6.6 is a wire type), so this file is the provider's proof that what it advertises is what the
-//! design says, not a second definition.
+//! Compare the yt-dlp catalog with its wire snapshot and documented format table.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)] // test code: a panic IS the failure
 
@@ -31,30 +23,30 @@ fn actual_rows() -> Vec<(String, String, Vec<String>)> {
         .collect()
 }
 
-/// The DESIGN §6.6 table, parsed out of the document.
+/// Read the format table from docs/PROTOCOL.md.
 ///
 /// The table's format cell packs several ids per row (`opus` / `wav` / `flac`, and the seven
-/// caption formats), so one markdown row expands to several catalogue rows — which is exactly how
+/// caption formats), so one markdown row expands to several catalogue rows, which is how
 /// a reader reads it.
-fn design_rows() -> Vec<(String, String, Vec<String>)> {
+fn documented_rows() -> Vec<(String, String, Vec<String>)> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/DESIGN.md");
-    let design = std::fs::read_to_string(&path)
+        .join("docs/PROTOCOL.md");
+    let protocol = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 
-    let section = design
-        .split("### 6.6 ")
+    let section = protocol
+        .split("## 8. Format and quality selection")
         .nth(1)
-        .expect("DESIGN must still have a §6.6")
-        .split("\n### ")
+        .expect("the protocol must document format selection")
+        .split("\n## ")
         .next()
         .expect("a section always has a first chunk");
-    let header = "| download_type | format | qualities |";
+    let header = "| Download type | Format | Quality |";
     let table = section
         .split(header)
         .nth(1)
-        .expect("DESIGN §6.6 must still contain the download_type/format/qualities table");
+        .expect("the protocol must contain a download type, format and quality table");
 
     let clean = |s: &str| s.replace(['`', '*'], "").trim().to_owned();
     let mut rows = Vec::new();
@@ -69,20 +61,20 @@ fn design_rows() -> Vec<(String, String, Vec<String>)> {
         if cells.iter().all(|c| c.trim().starts_with("---")) {
             continue; // the markdown separator row
         }
-        assert_eq!(cells.len(), 3, "unexpected §6.6 row {line:?}");
+        assert_eq!(cells.len(), 3, "unexpected format table row {line:?}");
         let dt = clean(cells[0]);
         let qualities: Vec<String> = cells[2].split(',').map(clean).collect();
         for format in cells[1].split(['/', ',']) {
             rows.push((dt.clone(), clean(format), qualities.clone()));
         }
     }
-    assert!(!rows.is_empty(), "the §6.6 table parsed to nothing");
+    assert!(!rows.is_empty(), "the format table parsed to nothing");
     rows
 }
 
 #[test]
-fn the_catalog_matches_the_design_6_6_table_exactly() {
-    assert_eq!(actual_rows(), design_rows());
+fn the_catalog_matches_the_documented_format_table() {
+    assert_eq!(actual_rows(), documented_rows());
 }
 
 #[test]
