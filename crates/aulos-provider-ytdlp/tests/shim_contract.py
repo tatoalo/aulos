@@ -341,6 +341,7 @@ def test_error_classification():
         ({"class": "GeoRestrictedError", "message": "not in your country"}, "geo_restricted"),
         ({"class": "ExtractorError", "message": "Sign in to confirm your age"}, "auth_required"),
         ({"class": "ExtractorError", "message": "Video unavailable"}, "unavailable"),
+        ({"class": "ExtractorError", "message": "[youtube] 5XtVeev7nOc: This video is unavailable"}, "unavailable"),
         ({"class": "ExtractorError", "message": "Premieres in 2 hours"}, "not_yet_live"),
         ({"class": "DownloadError", "message": "Requested format is not available"}, "no_format"),
         (

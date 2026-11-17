@@ -1354,3 +1354,25 @@ test('downloaded release requires explicit selection and future-only sends no ID
   await expect(page.locator('#releases-sheet')).toBeHidden();
   expect((await mock.log(request)).at(-1).body).toEqual({ preview_id: 'preview-1', ids: [], force: false });
 }));
+
+test('release picker reports hidden videos and offers a retry only for lookup failures', withMock({ freeze: true }, async ({ page, mock }) => {
+  let attempts = 0;
+  await page.route('**/api/v2/subscriptions/*/releases?*', async (route) => {
+    attempts++;
+    await route.fulfill({ json: {
+      preview_id: 'filtered', subscription_id: 'sub', limit: 100, has_more: false,
+      unavailable_count: 2, unresolved_count: attempts === 1 ? 1 : 0,
+      items: [{ id: 'upcoming', title: 'Lecture 1: What Are Agents?', url: 'https://example.test/lecture', waiting_for_release: true, queued_item_id: 'queued' }],
+    } });
+  });
+  await open(page, mock);
+  await page.getByRole('button', { name: 'Browse releases', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Existing releases', exact: true });
+  await expect(dialog.locator('.release-row')).toHaveCount(1);
+  await expect(dialog.locator('.release-row')).toContainText('Upcoming');
+  await expect(dialog.locator('#releases-status')).toContainText('2 unavailable hidden');
+  await expect(dialog.locator('#releases-status')).toContainText('1 could not be resolved');
+  await dialog.locator('#releases-reload').click();
+  await expect(dialog.locator('#releases-reload')).toBeHidden();
+  await expect(dialog.locator('#releases-status')).not.toContainText('could not be resolved');
+}));

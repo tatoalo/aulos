@@ -704,6 +704,7 @@ pub struct ScriptProvider {
     feeds: Mutex<HashMap<String, Vec<aulos_provider::MediaEntry>>>,
     delay: Mutex<Option<Duration>>,
     resolves: AtomicUsize,
+    details: Mutex<HashMap<String, Result<aulos_provider::MediaEntry, aulos_core::ErrorCode>>>,
 }
 
 impl ScriptProvider {
@@ -715,12 +716,21 @@ impl ScriptProvider {
             feeds: Mutex::new(HashMap::new()),
             delay: Mutex::new(None),
             resolves: AtomicUsize::new(0),
+            details: Mutex::new(HashMap::new()),
         })
     }
 
     /// Declares `url` a container listing `entries`. Replaces any previous listing.
     pub fn set_feed(&self, url: &str, entries: Vec<aulos_provider::MediaEntry>) {
         self.feeds.lock().unwrap().insert(url.to_owned(), entries);
+    }
+
+    pub fn set_details(
+        &self,
+        url: &str,
+        result: Result<aulos_provider::MediaEntry, aulos_core::ErrorCode>,
+    ) {
+        self.details.lock().unwrap().insert(url.to_owned(), result);
     }
 
     /// Makes every resolve take `d`, so a race is deterministic.
@@ -763,6 +773,17 @@ impl Provider for ScriptProvider {
         let delay = *self.delay.lock().unwrap();
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
+        }
+        if let Some(result) = self.details.lock().unwrap().get(url.as_str()).cloned() {
+            return result.map(|entry| vec![entry]).map_err(|code| match code {
+                aulos_core::ErrorCode::AuthRequired => {
+                    aulos_provider::ProviderError::AuthRequired("Private video".into())
+                }
+                aulos_core::ErrorCode::Unavailable => {
+                    aulos_provider::ProviderError::Unavailable("Video unavailable".into())
+                }
+                _ => aulos_provider::ProviderError::Network("Lookup failed".into()),
+            });
         }
         let listed = self.feeds.lock().unwrap().get(url.as_str()).cloned();
         match listed {

@@ -525,7 +525,7 @@ _AUTH_RE = re.compile(r"sign in|log in|members-only|private video", re.IGNORECAS
 # `404`/`410` on the media or its page: the thing is gone. §1.6's `unavailable` is what tells a
 # client to offer Delete rather than Retry, which is the right advice for a dead link.
 _UNAVAILABLE_RE = re.compile(
-    r"video unavailable|removed by the uploader|account.*terminated"
+    r"video (?:is )?unavailable|removed by the uploader|account.*terminated"
     r"|http error 404|http error 410",
     re.IGNORECASE,
 )
