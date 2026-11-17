@@ -52,6 +52,7 @@ expression: body
     "cancel_resolve",
     "groups",
     "subscriptions",
+    "subscription_releases",
     "file_serving",
     "batch_add",
     "postprocessing_status",

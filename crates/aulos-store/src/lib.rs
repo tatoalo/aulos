@@ -43,6 +43,7 @@
 mod actor;
 mod alloc;
 mod devices;
+mod download_history;
 mod error;
 pub mod import;
 mod items;
@@ -73,6 +74,7 @@ use tokio::sync::{Semaphore, oneshot};
 use crate::actor::{StoreMetrics, WriteJob, WriteMsg};
 
 pub use crate::alloc::{IdWarning, ORD_BLOCK, SEQ_BLOCK};
+pub use crate::download_history::{ReleaseIdentity, ReleaseState};
 pub use crate::error::StoreError;
 mod canonical;
 pub use crate::canonical::canonical_key;
@@ -322,6 +324,20 @@ impl Store {
     pub async fn seen(&self, sub: &SubId) -> Result<HashSet<Box<str>>, StoreError> {
         let sub = sub.clone();
         self.read(move |c| reads::seen(c, &sub)).await
+    }
+
+    /// Look up successful downloads and active items in the same order as the identities.
+    ///
+    /// # Errors
+    /// Returns a store error when the database cannot be read.
+    pub async fn release_states(
+        &self,
+        identities: Vec<ReleaseIdentity>,
+        download_type: &str,
+    ) -> Result<Vec<ReleaseState>, StoreError> {
+        let download_type = download_type.to_owned();
+        self.read(move |c| download_history::lookup(c, &identities, &download_type))
+            .await
     }
 
     /// Every chat's stored Telegram defaults.

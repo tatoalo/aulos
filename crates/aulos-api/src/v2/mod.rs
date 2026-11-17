@@ -116,6 +116,10 @@ pub fn router(state: ApiState) -> Router {
             patch(subs::update).delete(subs::remove),
         )
         .route(&r("subscriptions/{id}/check"), post(subs::check_one))
+        .route(
+            &r("subscriptions/{id}/releases"),
+            get(subs::releases).post(subs::download_releases),
+        )
         // --- push registration (PROTOCOL §4.8) ---
         .route(
             &r("devices/{token}"),

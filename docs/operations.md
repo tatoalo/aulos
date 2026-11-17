@@ -1,5 +1,17 @@
 # Operations
 
+## Subscription releases
+
+After subscribing, choose existing releases to download or select **Future releases only**.
+Use **Browse releases** to return to the picker later. **Select available** excludes downloaded
+and queued items. Turn on **Show downloaded**, select an item and use **Download again** to
+repeat a successful download.
+
+Completed items show their subscription name. The name stays attached if the subscription is
+renamed or deleted. Successful download history also stays in the database when you clear the
+queue or delete files from Jellyfin. Downloads cleared before this upgrade cannot be recovered.
+
+
 ## Deployment
 
 Start with the [README quickstart](../README.md#quickstart) or

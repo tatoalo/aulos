@@ -1316,3 +1316,41 @@ test.describe('real server', () => {
     });
   }
 });
+
+for (const width of [1440, 390]) {
+  test(`release picker selects available items and fits ${width}px`, withMock({ freeze: true }, async ({ page, mock, request }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page, mock);
+    await page.getByRole('button', { name: 'Browse releases', exact: true }).first().click();
+    const dialog = page.getByRole('dialog', { name: 'Existing releases', exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('.release-row')).toHaveCount(3);
+    await expect(dialog.locator('.release-row').first()).toContainText('Published Nov 16, 2026');
+    await expect(dialog).not.toContainText('Lecture 1:');
+    await dialog.getByRole('button', { name: 'Select available', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Download selected (2)', exact: true })).toBeEnabled();
+    const box = await dialog.boundingBox();
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    await dialog.getByRole('button', { name: 'Download selected (2)', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const log = await mock.log(request);
+    expect(log.at(-1).body).toEqual({ preview_id: 'preview-1', ids: ['lecture-1', 'lecture-2'], force: false });
+  }));
+}
+
+test('downloaded release requires explicit selection and future-only sends no IDs', withMock({ freeze: true }, async ({ page, mock, request }) => {
+  await open(page, mock);
+  const browse = page.getByRole('button', { name: 'Browse releases', exact: true }).first();
+  await browse.click();
+  await page.getByLabel('Show downloaded').check();
+  const downloaded = page.locator('.release-row').filter({ hasText: 'Lecture 1: What Are Agents?' });
+  await downloaded.locator('input').check();
+  await page.getByRole('button', { name: 'Download again (1)', exact: true }).click();
+  await expect(page.locator('#releases-sheet')).toBeHidden();
+  expect((await mock.log(request)).at(-1).body).toEqual({ preview_id: 'preview-1', ids: ['lecture-4'], force: true });
+  await browse.click();
+  await page.getByRole('button', { name: 'Future releases only', exact: true }).click();
+  await expect(page.locator('#releases-sheet')).toBeHidden();
+  expect((await mock.log(request)).at(-1).body).toEqual({ preview_id: 'preview-1', ids: [], force: false });
+}));

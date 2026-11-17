@@ -235,6 +235,28 @@ pub struct SubsHealth {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SubCmd {
+    /// Resolve a bounded list of existing releases for selection.
+    Releases {
+        /// Subscription to browse.
+        id: SubId,
+        /// Maximum entries to resolve, from 1 to 1000.
+        limit: u32,
+        /// The resolved list and its short-lived selection token.
+        ack: oneshot::Sender<Result<SubscriptionReleases, SubError>>,
+    },
+    /// Queue releases from a previously resolved list.
+    DownloadReleases {
+        /// Subscription to use for options and attribution.
+        id: SubId,
+        /// Token returned by Releases.
+        preview_id: Box<str>,
+        /// Media IDs selected by the user.
+        ids: Vec<Box<str>>,
+        /// Allow another download of successfully downloaded media.
+        force: bool,
+        /// Accepted releases and explicit skip reasons.
+        ack: oneshot::Sender<Result<ReleaseDownloadResult, SubError>>,
+    },
     /// Create a subscription from a feed URL, resolving its name and suppressing the backfill.
     ///
     /// The whole download template travels with the command, as PLAN WP-16's
@@ -287,6 +309,65 @@ pub enum SubCmd {
         /// Answered with the aggregate.
         ack: oneshot::Sender<SubsHealth>,
     },
+}
+
+/// One release in a subscription's current listing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionRelease {
+    /// Provider media ID, scoped to this listing.
+    pub id: Box<str>,
+    /// Source URL.
+    pub url: Box<str>,
+    /// Display title.
+    pub title: Box<str>,
+    /// Duration in seconds, when known.
+    pub duration: Option<f64>,
+    /// Source publication date as YYYY-MM-DD, when known.
+    #[serde(default)]
+    pub published_date: Option<Box<str>>,
+    /// Creator or channel name, when known.
+    pub channel: Option<Box<str>>,
+    /// Whether this is an upcoming or ongoing broadcast.
+    pub waiting_for_release: bool,
+    /// Last successful download of this media and download type.
+    pub downloaded_at: Option<UnixMs>,
+    /// Active queue item, if one already exists.
+    pub queued_item_id: Option<crate::ItemId>,
+}
+
+/// A bounded release listing. Browsing does not change seen state or queue work.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionReleases {
+    /// Selection token. Expires after ten minutes or a server restart.
+    pub preview_id: Box<str>,
+    /// The subscription being browsed.
+    pub subscription_id: SubId,
+    /// Releases in provider order.
+    pub items: Vec<SubscriptionRelease>,
+    /// Maximum number of entries requested from the provider.
+    pub limit: u32,
+    /// The scan reached its limit; more entries may exist.
+    pub has_more: bool,
+}
+
+/// A release not queued by a selection request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseSkip {
+    /// Media ID.
+    pub id: Box<str>,
+    /// `already_queued` or `already_downloaded`.
+    pub reason: Box<str>,
+}
+
+/// Result of queueing an explicit selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseDownloadResult {
+    /// Media IDs accepted by the queue.
+    pub queued: Vec<Box<str>>,
+    /// Releases skipped after checking current state.
+    pub skipped: Vec<ReleaseSkip>,
+    /// Errors for entries the queue rejected.
+    pub errors: Vec<Box<str>>,
 }
 
 /// A cheap clone over an `mpsc::Sender<SubCmd>` with **no logic** (DESIGN §14.1).

@@ -186,6 +186,7 @@ impl FeedChecker for ScriptedChecker {
             ScriptedAnswer::Fail(f) => Err(f),
             ScriptedAnswer::Ok(_) => Ok(Feed {
                 name: Some("Scripted".into()),
+                limit_reached: false,
                 entries: Vec::new(),
             }),
         }

@@ -70,6 +70,7 @@ const TABLE: [(&str, Option<&[&str]>); 13] = [
             "nix",
             "command-fds",
             "url",
+            "time", // Normalize provider publication dates and Unix timestamps.
         ]),
     ),
     (

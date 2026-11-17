@@ -208,6 +208,7 @@ impl Manager {
                 },
                 Some(msg) = self.checks_rx.recv() => self.on_check(msg).await,
                 Some(p) = self.probes_rx.recv() => self.on_probed(p).await,
+                Some(_) = self.tasks.join_next(), if !self.tasks.is_empty() => {},
             }
         }
         tracing::info!("subscription manager stopping");
@@ -226,6 +227,54 @@ impl Manager {
 
     async fn on_cmd(&mut self, cmd: SubCmd) {
         match cmd {
+            SubCmd::Releases { id, limit, ack } => {
+                let Some(slot) = self.subs.get(&id) else {
+                    let _ = ack.send(Err(SubError::NotFound(id)));
+                    return;
+                };
+                let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() else {
+                    let _ = ack.send(Err(SubError::Unavailable));
+                    return;
+                };
+                let record = Arc::clone(&slot.record);
+                let checker = Arc::clone(&self.deps.checker);
+                let window = self.timing.check_timeout();
+                self.tasks.spawn(async move {
+                    let _permit = permit;
+                    let result = tokio::time::timeout(window, checker.releases(&record, limit))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(SubError::Other(
+                                "Loading releases timed out. Try again.".into(),
+                            ))
+                        });
+                    let _ = ack.send(result);
+                });
+            }
+            SubCmd::DownloadReleases {
+                id,
+                preview_id,
+                ids,
+                force,
+                ack,
+            } => {
+                let Some(slot) = self.subs.get(&id) else {
+                    let _ = ack.send(Err(SubError::NotFound(id)));
+                    return;
+                };
+                let record = Arc::clone(&slot.record);
+                let checker = Arc::clone(&self.deps.checker);
+                let tx = self.checks_tx.clone();
+                self.tasks.spawn(async move {
+                    let result = checker
+                        .download_releases(&record, &preview_id, &ids, force)
+                        .await;
+                    if result.is_ok() {
+                        let _ = tx.send(CheckMsg::ReleasesAdded(id)).await;
+                    }
+                    let _ = ack.send(result);
+                });
+            }
             SubCmd::Add {
                 request,
                 check_interval_minutes,
@@ -591,6 +640,17 @@ impl Manager {
 
     async fn on_check(&mut self, msg: CheckMsg) {
         match msg {
+            CheckMsg::ReleasesAdded(id) => {
+                if let Ok(Some(record)) = self.deps.store.subscription(&id).await
+                    && let Some(slot) = self.subs.get_mut(&id)
+                {
+                    let mut updated = (*slot.record).clone();
+                    updated.seen_count = record.seen_count;
+                    slot.record = Arc::new(updated);
+                    let view = slot.record.to_view(slot.checking);
+                    self.publish_changed(&view).await;
+                }
+            }
             CheckMsg::Started(id) => {
                 if let Some(slot) = self.subs.get_mut(&id) {
                     slot.checking = true;

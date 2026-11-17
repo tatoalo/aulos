@@ -1101,6 +1101,7 @@ fn hints_of(entry: &Map<String, Value>, root: Option<&Root>, index: u32) -> Entr
             .and_then(|v| (v >= 0.0).then_some(v))
             .map(|v| v as u64),
         thumbnail: str_of(entry, "thumbnail").map(Into::into),
+        published_date: crate::dates::published_date(entry),
         uploader: str_of(entry, "uploader")
             .or_else(|| str_of(entry, "channel"))
             .map(Into::into),

@@ -8,6 +8,7 @@
 //! the legacy asymmetry where `YTDL_OPTIONS` could break subscription extraction while leaving
 //! normal adds intact cannot be reproduced.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -18,6 +19,7 @@ use aulos_core::request::DownloadRequest;
 use aulos_core::selection::{Codec, DownloadType, FormatId, QualityId, Selection};
 use aulos_core::source::{SourceKind, SourceRef};
 use aulos_core::subscription::SubscriptionRecord;
+use aulos_core::subscription::{ReleaseDownloadResult, SubError, SubscriptionReleases};
 use aulos_core::ytdl_options::YtdlOptions;
 use aulos_provider::{LiveStatus, MediaEntry, Registry, ResolveCtx};
 use aulos_queue::{AddError, EngineHandle};
@@ -30,6 +32,9 @@ use crate::detect::{
     media_id_of,
 };
 use crate::model::{CheckFailure, CheckReport};
+
+#[path = "releases.rs"]
+mod releases;
 
 /// The throwaway selection a *metadata-only* resolution borrows.
 ///
@@ -51,6 +56,8 @@ pub struct Feed {
     pub name: Option<Box<str>>,
     /// The media entries, in provider order.
     pub entries: Vec<MediaEntry>,
+    /// The provider returned at least the requested number of entries before filtering.
+    pub limit_reached: bool,
 }
 
 impl Feed {
@@ -96,6 +103,25 @@ impl OptionsSource for StaticOptions {
 /// What the manager needs from a feed, behind a trait so the scheduler tests need no provider.
 #[async_trait]
 pub trait FeedChecker: Send + Sync + std::fmt::Debug {
+    /// Resolve existing releases without queueing them or changing seen state.
+    async fn releases(
+        &self,
+        _record: &SubscriptionRecord,
+        _limit: u32,
+    ) -> Result<SubscriptionReleases, SubError> {
+        Err(SubError::Unavailable)
+    }
+
+    /// Queue an explicit selection from a recent release listing.
+    async fn download_releases(
+        &self,
+        _record: &SubscriptionRecord,
+        _preview_id: &str,
+        _ids: &[Box<str>],
+        _force: bool,
+    ) -> Result<ReleaseDownloadResult, SubError> {
+        Err(SubError::Unavailable)
+    }
     /// Resolves `url` and reports what it is. Used by `subscribe` for the name and the backfill.
     ///
     /// # Errors
@@ -119,6 +145,8 @@ pub struct Checker {
     ytdl: Arc<dyn OptionsSource>,
     engine: EngineHandle,
     clock: Arc<dyn Clock>,
+    previews: tokio::sync::Mutex<VecDeque<releases::Preview>>,
+    queue_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Checker {
@@ -147,11 +175,13 @@ impl Checker {
             ytdl,
             engine,
             clock,
+            previews: tokio::sync::Mutex::new(VecDeque::new()),
+            queue_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// One flat resolution through the registry (DESIGN §14.3 step 1).
-    async fn resolve_flat(&self, url: &Url) -> Result<Vec<MediaEntry>, CheckFailure> {
+    async fn resolve_flat(&self, url: &Url, scan: u32) -> Result<Vec<MediaEntry>, CheckFailure> {
         let provider = {
             // The registry is behind a `std::sync::RwLock`, so the guard must not cross an await.
             let guard = self
@@ -171,7 +201,6 @@ impl Checker {
         // from the same defaults an unconfigured add would use. Only `playlist_item_limit` (which
         // the caller overrides with `playlist_end`) and the option presets read it back.
         let request = DownloadRequest::new(url.clone(), probe_selection());
-        let scan = self.cfg.subscription_scan_playlist_end.max(1);
         let timeout = std::time::Duration::from_secs(self.cfg.resolve_timeout_secs.max(1));
         let ctx = ResolveCtx {
             item_id: ItemId::new(),
@@ -191,22 +220,29 @@ impl Checker {
 
     /// Resolve → classify → filter → tab recursion, at most [`TAB_RECURSION_MAX_DEPTH`] deep.
     async fn probe_at(&self, url: &Url, depth: u32) -> Result<Feed, CheckFailure> {
+        self.probe_limited(url, depth, self.cfg.subscription_scan_playlist_end.max(1))
+            .await
+    }
+
+    async fn probe_limited(&self, url: &Url, depth: u32, limit: u32) -> Result<Feed, CheckFailure> {
         if is_shorts_url(url) {
             return Ok(Feed {
                 name: None,
                 entries: Vec::new(),
+                limit_reached: false,
             });
         }
-        let entries = self.resolve_flat(url).await?;
+        let entries = self.resolve_flat(url, limit).await?;
         match classify(entries) {
             Classified::SingleVideo => Err(CheckFailure::VideoOnly),
             Classified::Redirect(target) => {
                 if depth >= TAB_RECURSION_MAX_DEPTH {
                     return Err(CheckFailure::VideoOnly);
                 }
-                Box::pin(self.probe_at(&target, depth + 1)).await
+                Box::pin(self.probe_limited(&target, depth + 1, limit)).await
             }
             Classified::Feed { name, entries } => {
+                let limit_reached = entries.len() >= limit as usize;
                 let media: Vec<MediaEntry> = entries
                     .iter()
                     .filter(|e| is_media_entry(e))
@@ -216,21 +252,24 @@ impl Checker {
                     return Ok(Feed {
                         name,
                         entries: media.into_iter().filter(|entry| !is_short(entry)).collect(),
+                        limit_reached,
                     });
                 }
                 if depth < TAB_RECURSION_MAX_DEPTH
                     && let Some(child) = entries.iter().find(|entry| !is_short(entry))
                 {
-                    let feed = Box::pin(self.probe_at(&child.url, depth + 1)).await?;
+                    let feed = Box::pin(self.probe_limited(&child.url, depth + 1, limit)).await?;
                     return Ok(Feed {
                         name: feed.name.or(name),
                         entries: feed.entries,
+                        limit_reached: feed.limit_reached,
                     });
                 }
                 if !entries.is_empty() && entries.iter().all(is_short) {
                     return Ok(Feed {
                         name,
                         entries: Vec::new(),
+                        limit_reached,
                     });
                 }
                 // A container that lists nothing downloadable is the legacy "no longer resolves to
@@ -276,7 +315,8 @@ impl Checker {
         record: &SubscriptionRecord,
         entries: &[MediaEntry],
     ) -> (Vec<Box<str>>, Vec<Box<str>>) {
-        let source = SourceRef::with_ref(SourceKind::Subscription, record.id.as_str());
+        let source = SourceRef::with_ref(SourceKind::Subscription, record.id.as_str())
+            .with_name(record.name.as_ref());
         let cap = usize::try_from(self.cfg.max_batch_urls.max(1)).unwrap_or(usize::MAX);
         let mut queued = Vec::new();
         let mut errors = Vec::new();
@@ -336,6 +376,23 @@ impl Checker {
 
 #[async_trait]
 impl FeedChecker for Checker {
+    async fn releases(
+        &self,
+        record: &SubscriptionRecord,
+        limit: u32,
+    ) -> Result<SubscriptionReleases, SubError> {
+        self.browse_releases(record, limit).await
+    }
+
+    async fn download_releases(
+        &self,
+        record: &SubscriptionRecord,
+        preview_id: &str,
+        ids: &[Box<str>],
+        force: bool,
+    ) -> Result<ReleaseDownloadResult, SubError> {
+        self.queue_releases(record, preview_id, ids, force).await
+    }
     async fn probe(&self, url: &Url) -> Result<Feed, CheckFailure> {
         if is_shorts_url(url) {
             return Err(CheckFailure::ShortsExcluded);
@@ -345,6 +402,7 @@ impl FeedChecker for Checker {
 
     async fn check(&self, record: &SubscriptionRecord) -> Result<CheckReport, CheckFailure> {
         let feed = self.probe_at(&record.url, 0).await?;
+        let _guard = self.queue_lock.lock().await;
         let seen = self
             .store
             .seen(&record.id)
@@ -359,11 +417,29 @@ impl FeedChecker for Checker {
             .collect();
 
         let new_total = new.len();
-        let (queued, errors) = if new.is_empty() {
+        let states = self
+            .states_for(record, &new)
+            .await
+            .map_err(|e| CheckFailure::Store(e.to_string().into_boxed_str()))?;
+        let mut handled = Vec::new();
+        let new: Vec<_> = new
+            .into_iter()
+            .zip(states)
+            .filter_map(|(entry, state)| {
+                if state.downloaded_at.is_some() || state.queued_item_id.is_some() {
+                    handled.push(media_id_of(&entry));
+                    None
+                } else {
+                    Some(entry)
+                }
+            })
+            .collect();
+        let (mut queued, errors) = if new.is_empty() {
             (Vec::new(), Vec::new())
         } else {
             self.queue(record, &new).await
         };
+        queued.extend(handled);
         tracing::info!(
             subscription = record.id.as_str(),
             name = &*record.name,
@@ -402,6 +478,7 @@ mod tests {
         live.live = LiveStatus::IsLive;
         let feed = Feed {
             name: Some("Chan".into()),
+            limit_reached: false,
             entries: vec![video("a"), upcoming, live, video("b")],
         };
         let backfill = feed.backfill_ids();

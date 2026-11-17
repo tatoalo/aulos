@@ -658,10 +658,13 @@ pub fn selection() -> Selection {
 /// duplicate, and an unknown id — and nothing else. `aulos-subscriptions` is the real thing and
 /// `aulos-api` must not depend on it (DESIGN §3), which is exactly why the handlers are one
 /// message each.
+type ReleaseSelection = (String, Vec<Box<str>>, bool);
+
 #[derive(Default)]
 pub struct SubsFake {
     rows: Mutex<Vec<SubscriptionView>>,
     pub checks: Mutex<Vec<Vec<SubId>>>,
+    pub release_selections: Mutex<Vec<ReleaseSelection>>,
 }
 
 impl SubsFake {
@@ -768,6 +771,42 @@ impl SubsFake {
                     job_id: "01JC00000000000000000000JOB".into(),
                     subscriptions,
                 }));
+            }
+            SubCmd::Releases { id, limit, ack } => {
+                let result = if self.all().iter().any(|row| row.id == id) {
+                    Ok(aulos_core::subscription::SubscriptionReleases {
+                        preview_id: "preview-1".into(),
+                        subscription_id: id,
+                        items: vec![],
+                        limit,
+                        has_more: false,
+                    })
+                } else {
+                    Err(SubError::NotFound(id))
+                };
+                let _ = ack.send(result);
+            }
+            SubCmd::DownloadReleases {
+                id,
+                preview_id,
+                ids,
+                force,
+                ack,
+            } => {
+                if self.all().iter().any(|row| row.id == id) {
+                    self.release_selections.lock().unwrap().push((
+                        preview_id.to_string(),
+                        ids.clone(),
+                        force,
+                    ));
+                    let _ = ack.send(Ok(aulos_core::subscription::ReleaseDownloadResult {
+                        queued: ids,
+                        skipped: vec![],
+                        errors: vec![],
+                    }));
+                } else {
+                    let _ = ack.send(Err(SubError::NotFound(id)));
+                }
             }
             SubCmd::List { ack } => {
                 let _ = ack.send(Ok(self.rows.lock().unwrap().clone()));
