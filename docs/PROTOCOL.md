@@ -1,660 +1,272 @@
-# Aulos Protocol v2 — Client Author's Reference (PROTOCOL.md)
+# Protocol v2
 
-Status: **normative**. This document is the contract. If the server disagrees with this document,
-the server is wrong.
-
-Audience: whoever writes the client. It is written so that Swift `Codable` types can be
-hand-written from it with no guessing: every field has a type, a nullability, and a statement of
-whether the key can ever be absent.
-
-Companion documents: `docs/DESIGN.md` (why and how), `docs/PLAN.md` (implementation order).
-
----
-
-## 0. The five rules that make this protocol easy
-
-1. **One object shape.** `GET api/v2/items`, `GET api/v2/items/{id}`, the WebSocket `snapshot`,
-   and the WebSocket `added`/`completed` frames all carry the **same** `Item` object. Playlists are
-   `Item`s with `kind: "group"` in the **same array**. One Swift struct, one array, one decoder.
-2. **No key is ever absent from a full `Item`.** Optional means the value is JSON `null`, not that
-   the key is missing. Declare your Swift properties as non-optional where the type says
-   non-optional, and as `T?` where it says `T | null` — and never write a fallback for a missing
-   key.
-3. **`id` is the only key.** A 26-character ULID string, server-assigned, immutable for the
-   record's life — including when a provisional item becomes a group. `url` is data.
-4. **`ord` is the only sort key.** A server-assigned, monotonically increasing integer, stable
-   across server restarts. Sort by `ord` ascending, then `id` ascending. Never sort by title, never
-   prepend, never insert at index 0.
-5. **In a `delta`, an absent key means "unchanged"; an explicitly `null` value means "changed to
-   null".** This is stated on the wire as `protocol.delta_semantics: "absent-key-means-unchanged"`.
-   Merge by iterating the keys that are present.
-
----
+This reference describes the current server API. The web UI and the iOS app (private alpha) use
+this API. All paths below are relative to the configured server base URL.
 
 ## 1. Conventions
 
-### 1.1 Base URL and prefix
+### 1.1 Base URL
 
-Every path in this document is relative to `URL_PREFIX`, written `<p>`. `<p>` always begins and
-ends with `/`; the default is `/`. So with the default prefix the add endpoint is
-`/api/v2/downloads`, and with `URL_PREFIX=/metube/` it is `/metube/api/v2/downloads`.
+`URL_PREFIX` defaults to `/` and is normalized to a leading and trailing slash. With
+`URL_PREFIX=/aulos/`, the add route is `/aulos/api/v2/downloads` and the socket is `/aulos/ws`.
+`GET api/v2/capabilities` reports the effective prefix.
 
-Do not guess the prefix. `GET <p>api/v2/capabilities` echoes it as `url_prefix`, and so does
-`GET <p>healthz`. Construct your paths by appending to the configured base
-URL, then verify once against `capabilities.url_prefix`.
-
-**`GET <p>` is content-negotiated, and it is the only route in the server that is.** When the
-request's `Accept` list contains `text/html` (or `text/*`) the server answers the embedded web UI's
-`index.html`; for every other `Accept` — `application/json`, the bare `*/*` that `curl` and most
-HTTP clients send by default, or no `Accept` header at all — it answers the same small JSON
-identity document it always has, unchanged:
+The root route returns HTML when `Accept` includes `text/html` or `text/*`, and a JSON identity
+otherwise. `*/*` alone selects JSON. Both representations carry `Vary: Accept`.
+`AULOS_WEB_UI=false` makes the root return JSON for every Accept value.
 
 ```json
-{ "name": "aulos-server", "version": "1.0.0", "url_prefix": "/", "protocol": "v2" }
+{"name":"aulos-server","version":"dev","url_prefix":"/","protocol":"v2"}
 ```
 
-`*/*` alone does **not** count as a vote for HTML, precisely so that a client that never thought
-about the header keeps getting JSON. `HEAD` behaves the same. Both representations carry
-`Vary: Accept`. If your HTTP library sets `Accept: text/html` for you — some do — send
-`Accept: application/json` explicitly on this one route, or read `<p>api/v2/capabilities` instead, which is
-never negotiated. When the operator sets `AULOS_WEB_UI=false` the negotiation disappears and every
-`Accept` gets the identity document.
+### 1.2 Encoding and compatibility
 
-Nothing else changes for an API client: no other route has an HTML representation, no response body
-or header on any `api/v2/*` route is affected, and the UI adds no endpoint you need to know about.
+API bodies are JSON. Send `Content-Type: application/json` for JSON request bodies.
+Cookie upload uses multipart form data. File routes, static assets, redirects, WebSocket upgrades
+and bodyless responses have their own HTTP representations.
 
-### 1.2 Content type and encoding
+Timestamps are integer Unix milliseconds, except `ytdl_options.update_time`, which is epoch
+seconds or null. Durations use seconds unless the field name ends in `_ms`. Sizes are bytes and
+rates are bytes per second. Numeric fields are JSON numbers.
 
-- Every response body is `application/json; charset=utf-8`, including every error. The only
-  exceptions are the file routes (`<p>download/*`, `<p>audio_download/*`) and `<p>robots.txt`.
-- Every request body is `application/json`. Mutating endpoints **require** that header; a request
-  without it is rejected with `400 bad_request`. (The one exception is the multipart cookie
-  upload.)
-- All timestamps are **integer milliseconds** since the Unix epoch, UTC. There are no date strings
-  anywhere except `ytdl_options.update_time`, which is a float of epoch **seconds** for legacy
-  compatibility and is documented as such at its one use site.
-- All durations are **integer seconds** unless the field name ends in `_ms`.
-- All sizes and byte counts are **integers**. All rates are `bytes/s` as JSON numbers.
-- Numbers are always JSON numbers. A numeric field is never sent as a string. You do not need a
-  flexible numeric decoder.
+Full item objects include nullable keys with null values. Delta patches omit unchanged keys.
+Unknown request fields are ignored and may produce warnings. Clients should tolerate additional
+response fields and unknown enum values.
 
 ### 1.3 Headers
 
-**Request headers.** All three are optional; none of them can make a request fail.
-
-| Header | Meaning |
+| Request header | Meaning |
 |---|---|
-| `X-Request-Id` | 1–64 printable ASCII characters. Echoed back on the response, so it is the key to correlating your logs with the server's. Anything else is ignored and a fresh id is minted. |
-| `X-Aulos-Client` | optional; a client that wants its adds attributed to it. The iOS app sends `ios/<version>`. Only the token before the slash is interpreted (ASCII-case-insensitively); unknown clients are `api_v2`. It sets `Item.source.kind` on `POST api/v2/downloads` (§2.3, §4.1) and does nothing anywhere else. |
-| `X-Aulos-Install` | optional; **which installation** of that client is calling — the iPhone as opposed to the iPad. 8–64 characters of `[A-Za-z0-9._-]`, surrounding whitespace trimmed; **anything else is treated as absent, never as a `400`**. Mint one opaque id per install (a UUID is the obvious choice), store it, and send it on every request from every target of the app. On `POST api/v2/downloads` it sets `Item.source.ref` when the resolved kind is `"ios"` (§4.1); on `PUT api/v2/devices/{token}` the same value is sent as the `install_id` field (§4.8). Together they are what makes a completion alert reach the device the download was started from. It does nothing anywhere else. |
+| `X-Request-Id` | Optional 1 to 64 printable ASCII characters. Invalid values are replaced with a generated ID. |
+| `X-Aulos-Client` | `ios/<version>` attributes added items to iOS. Other or missing values use `api_v2`. The client token is case-insensitive. |
+| `X-Aulos-Install` | Optional install ID for iOS adds: 8 to 64 characters from `[A-Za-z0-9._-]`, trimmed. Invalid values are treated as absent. |
 
-**Response headers.**
-
-| Header | On | Meaning |
-|---|---|---|
-| `X-Request-Id` | every response | a ULID; echoed from your request's `X-Request-Id` if you send one. Log it; it is the key to the server logs. |
-| `X-Aulos-Seq` | every response | the frame sequence number at the moment the response was produced. After a mutation, this is the `seq` at or before which the corresponding WebSocket frame will arrive — which is what makes optimistic UI deterministic (§7.4). |
-| `ETag` | `capabilities`, `catalog`, `state`, file routes | see the endpoint |
-| `Retry-After` | `503` | seconds; always `1` |
-
-### 1.4 Auth
-
-The server has no user model. Two mechanisms, both optional, and they compose:
-
-| Mechanism | How |
+| Response header | Meaning |
 |---|---|
-| **Cookie passthrough (primary)** — the deployment runs Authelia or similar in front | Send your session cookies on every request, including the WebSocket upgrade. The server forwards nothing and validates nothing; the proxy decides. **The server never redirects on an auth failure**: you get `401` with the JSON error envelope, never a `303` to a login page, and never a 200 with an HTML body. |
-| **Bearer token (for non-browser clients)** | When the operator sets `AULOS_API_TOKEN`, `Authorization: Bearer <token>` is accepted on any v1 or v2 route as an alternative to proxy auth. Intended for Shortcuts, bookmarklets and `curl`. |
+| `X-Request-Id` | Echoed request ID or a generated ULID. |
+| `X-Aulos-Seq` | Event hub cursor when the response was produced. It is not a mutation acknowledgment barrier. |
+| `ETag` | Cache validator on state, capabilities, catalog, files and static assets. |
+| `Retry-After` | `1` on service-unavailable responses. |
 
-For the WebSocket, cookies on the upgrade request are the normal path. If the reverse proxy cannot
-forward them to `<p>ws`, the same bearer token is accepted two other ways:
-`Sec-WebSocket-Protocol: aulos.v2, bearer.<token>`, or `?token=<token>` in the query string.
+### 1.4 Authentication
 
-A `401` body is always:
+The API has no user accounts. With neither auth setting configured, requests are open.
+`AULOS_API_TOKEN` accepts `Authorization: Bearer <token>`.
+`AULOS_TRUSTED_PROXY_AUTH_HEADER` accepts a non-empty value in the configured header.
+When both are configured, either grants access. A reverse proxy must control the trusted header.
 
-```json
-{ "error": { "code": "unauthorized", "message": "authentication required",
-             "field": null, "provider": null, "provider_code": null,
-             "request_id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA" } }
-```
+For browser WebSockets, the token can also be sent through
+`Sec-WebSocket-Protocol: aulos.v2, bearer.<token>` or `?token=<token>`.
+Avoid putting tokens in URLs when the header option is available.
 
-Treat `401` as "show the login sheet". Treat `403` the same way. Treat a non-2xx with an
-unparseable body as a server or proxy problem, not as an expired session — that heuristic is no
-longer needed.
+API routes, WebSocket upgrades and downloaded files use the same auth middleware. Root discovery,
+static UI files, the manifest, `robots.txt`, `healthz` and `livez` are public at the server layer.
+Aulos does not validate reverse-proxy session cookies. A failed server auth check returns `401`
+with a JSON error, without a login redirect.
 
-#### The web UI routes are unauthenticated
+### 1.5 Errors
 
-Three routes are served **without** auth even when `AULOS_API_TOKEN` or the trusted-proxy header is
-configured, because they carry the embedded web UI and nothing else:
-
-| Route | What it is |
-|---|---|
-| `GET <p>` with `Accept: text/html` | `index.html` (the JSON branch of the same route, §1.1, is equally open — it always was) |
-| `GET <p>assets/*` | `app.css`, `app.js`, `icon.svg`, `icon-180.png` |
-| `GET <p>manifest.webmanifest` | the PWA manifest |
-
-They are identical bytes in every deployment and contain no queue data, no configuration and no
-secret; and a browser cannot attach `Authorization: Bearer …` to a document navigation, so gating
-them would answer the first request with a `401` the user has no way to act on — and this server
-never answers auth with a redirect to a login page (above). **Every other route keeps its auth
-exactly as documented here**, which is what the page itself relies on: it treats a `401` from any
-API call or from the WS upgrade as "ask for the token". An operator who wants the page itself gated
-puts the origin behind their proxy's auth, or sets `AULOS_WEB_UI=false`, in which case the assets
-and the manifest answer `404 not_found` like any other unknown route.
-
-### 1.5 Error envelope
-
-Every non-2xx response, without exception, has this exact shape:
-
-```json
-{ "error": { "code": "validation_failed",
-             "message": "quality \"1081\" is not valid for format \"mp4\"",
-             "field": "quality",
-             "provider": null,
-             "provider_code": null,
-             "request_id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA" } }
-```
-
-| Field | Type | Notes |
-|---|---|---|
-| `code` | string | from the closed list in §1.6. Branch on this, never on `message`. |
-| `message` | string | human-readable, already cleaned: no `"ERROR: "` prefix, no ANSI, no `\r`, at most 512 characters. Safe to show to the user. |
-| `field` | string \| null | the offending request field, when there is one |
-| `provider` | string \| null | e.g. `"ytdlp"`, when a provider produced the error |
-| `provider_code` | string \| null | the provider's own code, e.g. `"ExtractorError"`, for diagnostics only |
-| `retry_at` | integer, optional | earliest automatic recheck in Unix milliseconds for `not_yet_live`; omitted when unknown |
-| `request_id` | string | matches the `X-Request-Id` header |
-
-The **same object** appears as an `Item`'s `error` field, minus `request_id`, so you need only one
-Swift type for both. See `WireError` in §2.3. All five of `code`, `message`, `field`, `provider`
-and `provider_code` are present on both surfaces; which of them are non-null differs by surface
-(`field` is set on a validation 400 and `null` on an item error; `provider`/`provider_code` are
-usually the other way round), but the key set does not. If you want one struct for both, declare
-`request_id` as `String?` and it decodes an item error too.
-
-### 1.6 Error codes (closed list)
-
-Treat this as a closed enum with an `unknown` fallback case for forward compatibility — the list
-is `non_exhaustive` on the server and may gain members.
-
-HTTP errors:
-
-| `code` | HTTP | Meaning |
-|---|---|---|
-| `bad_request` | 400 | malformed body, missing `Content-Type`, unparseable field |
-| `validation_failed` | 400 | field-level validation; `field` is set |
-| `unsupported_url` | 400 | no provider matched and the scheme is unusable |
-| `overrides_disabled` | 400 | the server forbids `ytdl_options_overrides` |
-| `unknown_preset` | 400 | a named preset does not exist |
-| `folder_invalid` | 400 | `folder` escapes the base dir, does not exist, or custom dirs are off |
-| `unauthorized` | 401 | auth failure |
-| `not_found` | 404 | unknown item / group / subscription id, or no route matched the path |
-| `method_not_allowed` | 405 | the path exists but not under this method; the response also carries `Allow` |
-| `conflict` | 409 | duplicate subscription URL, or a strict-mode duplicate add |
-| `payload_too_large` | 413 | cookie upload over **1 000 000 bytes** (decimal, not 1 MiB — the legacy cap, preserved byte-for-byte along with its message `Cookie file too large (max 1MB)`), a batch add over the server's cap, or **any** request body over the server's `1 065 536`-byte ceiling (that cookie cap plus room for the multipart part headers). The last one is refused before the handler runs — from `Content-Length` where there is one — and its `message` names the limit in bytes. |
-| `internal` | 500 | a bug. `message` is a request id; details are in the server logs. |
-| `state_unavailable` | 503 | the database is busy; retry after `Retry-After` seconds |
-
-Item-terminal errors (these appear in `Item.error`, never as an HTTP status):
-
-| `code` | Meaning | Retry likely to help? |
-|---|---|---|
-| `auth_required` | the site needs credentials or cookies (login, members-only, private) | no — upload cookies |
-| `bot_check` | YouTube bot check; the POT sidecar is probably unhealthy | no — check `healthz` |
-| `geo_restricted` | not available in this region | no |
-| `unavailable` | removed, deleted, or the account was terminated — including a plain `404`/`410` on the media or its page | no |
-| `not_yet_live` | an upcoming or unfinished stream. Subscription items remain **`queued`** (§2.3): a known future release waits until its announced time; live, processing, overdue, or unknown-time releases recheck every 15 minutes without spending failure retries. `retry_at` persists the next check across restarts | later, and the server may do it for you |
-| `no_format` | the requested format is not available for this item | change the selection |
-| `network` | transport error, HTTP 5xx, or a timeout — a page or API fetch that failed for any reason other than one of the codes above it in this table lands here | **yes**, and the server already retried |
-| `throttled` | HTTP 429 | **yes**, later |
-| `postprocessing_failed` | ffmpeg or a postprocessor failed | maybe |
-| `disk_full` | out of disk space, or over quota | no |
-| `tool_missing` | a required binary is absent from the image | no |
-| `provider_degraded` | the provider that handles this URL is misconfigured | no — check `healthz` |
-| `timeout` | a resolve, job or stall deadline expired | yes |
-| `canceled` | cancelled by a user | n/a |
-| `contract` | a provider or plugin violated its protocol | no |
-| `internal` | a server bug | no |
-| `unsupported_url` | no provider could handle this URL | no |
-
-A sensible client offers a **Retry** button for `network`, `throttled`, `timeout`,
-`postprocessing_failed` and `not_yet_live`, and offers **Delete** for the rest.
-
-`internal` in an `Item.error` means a bug **in this server**, never an upstream failure — so it is
-the one item-terminal code worth reporting as a defect. Anything the provider could plausibly say
-about the site, the network or the disk has a code of its own above.
-
----
-
-## 2. The `Item` object
-
-This is the one type you must get right. Everything else is small.
-
-### 2.1 Example — a downloading item
+API errors use this envelope:
 
 ```json
 {
-  "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
-  "kind": "item",
-  "ord": 981,
-  "group_id": null,
-  "group_index": null,
-  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "title": "Rick Astley - Never Gonna Give You Up",
-  "status": "downloading",
-  "auto_start": true,
-  "provider": "ytdlp",
-
-  "percent": 42.7,
-  "speed": 3145728.0,
-  "eta": 63,
-  "downloaded_bytes": 44040192,
-  "total_bytes": null,
-  "total_bytes_estimate": 103809024,
-  "fragment_index": null,
-  "fragment_count": null,
-  "phase": "video",
-  "phase_percent": null,
-
-  "msg": null,
-  "error": null,
-
-  "filename": null,
-  "size": null,
-  "download_url": null,
-  "chapter_files": [],
-  "subtitle_files": [],
-
-  "selection": { "download_type": "video", "codec": "auto", "format": "mp4", "quality": "1080" },
-  "folder": null,
-  "request": {
-    "custom_name_prefix": "",
-    "playlist_item_limit": 0,
-    "auto_start": true,
-    "split_by_chapters": false,
-    "chapter_template": "%(title)s - %(section_number)02d - %(section_title)s.%(ext)s",
-    "subtitle_language": "en",
-    "subtitle_mode": "prefer_manual",
-    "ytdl_options_presets": [],
-    "ytdl_options_overrides": {}
-  },
-
-  "created_at": 1756999900000,
-  "started_at": 1756999901000,
-  "finished_at": null,
-  "attempt": 0,
-  "source": { "kind": "telegram", "ref": "12345" },
-
-  "children_total": null,
-  "children_done": null,
-  "children_error": null,
-  "children_active": null,
-  "children_inline": null
+  "error": {
+    "code": "validation_failed",
+    "message": "Invalid quality",
+    "field": "quality",
+    "provider": null,
+    "provider_code": null,
+    "request_id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA"
+  }
 }
 ```
 
-### 2.2 Example — a finished item and a group
+`code` and `message` are strings. `field`, `provider` and `provider_code` are nullable strings.
+`request_id` matches the response header. `retry_at` is an optional integer Unix-millisecond
+recheck time for `not_yet_live` errors.
 
-```json
-{
-  "id": "01JBQ9CCFFFF0000000000000B",
-  "kind": "item",
-  "ord": 977,
-  "group_id": "01JBQ8AA0000000000000000GG",
-  "group_index": 12,
-  "url": "https://www.youtube.com/watch?v=abc",
-  "title": "Episode 12",
-  "status": "finished",
-  "auto_start": true,
-  "provider": "ytdlp",
-  "percent": 100.0,
-  "speed": null,
-  "eta": null,
-  "downloaded_bytes": 288314112,
-  "total_bytes": 288314112,
-  "total_bytes_estimate": null,
-  "fragment_index": null,
-  "fragment_count": null,
-  "phase": null,
-  "phase_percent": null,
-  "msg": null,
-  "error": null,
-  "filename": "Lo-fi beats/Episode 12.mp4",
-  "size": 288314112,
-  "download_url": "download/Lo-fi%20beats/Episode%2012.mp4",
-  "chapter_files": [],
-  "subtitle_files": [
-    { "filename": "Lo-fi beats/Episode 12.en.srt", "size": 4821,
-      "download_url": "download/Lo-fi%20beats/Episode%2012.en.srt", "lang": "en" }
-  ],
-  "selection": { "download_type": "video", "codec": "auto", "format": "mp4", "quality": "best" },
-  "folder": null,
-  "request": { "custom_name_prefix": "", "playlist_item_limit": 0, "auto_start": true,
-               "split_by_chapters": false, "chapter_template": "%(title)s - %(section_number)02d - %(section_title)s.%(ext)s",
-               "subtitle_language": "en", "subtitle_mode": "prefer_manual",
-               "ytdl_options_presets": [], "ytdl_options_overrides": {} },
-  "created_at": 1756999950000,
-  "started_at": 1757000010000,
-  "finished_at": 1757000598000,
-  "attempt": 0,
-  "source": { "kind": "api_v2", "ref": null },
-  "children_total": null, "children_done": null, "children_error": null,
-  "children_active": null, "children_inline": null
-}
-```
+An item's `error` uses the same fields without `request_id`. Branch on `code`; `message` is display
+text. Messages are cleaned and bounded. Redirects, `204`, `304`, and file range responses do not
+use this envelope.
 
-```json
-{
-  "id": "01JBQ8AA0000000000000000GG",
-  "kind": "group",
-  "ord": 982,
-  "group_id": null,
-  "group_index": null,
-  "url": "https://www.youtube.com/playlist?list=PL123",
-  "title": "Lo-fi beats",
-  "status": "downloading",
-  "auto_start": true,
-  "provider": "ytdlp",
-  "percent": 12.4,
-  "speed": 4194304.0,
-  "eta": 4210,
-  "downloaded_bytes": 123456789,
-  "total_bytes": null,
-  "total_bytes_estimate": 5100000000,
-  "fragment_index": null,
-  "fragment_count": null,
-  "phase": null,
-  "phase_percent": null,
-  "msg": null,
-  "error": null,
-  "filename": null, "size": null, "download_url": null,
-  "chapter_files": [], "subtitle_files": [],
-  "selection": { "download_type": "video", "codec": "auto", "format": "mp4", "quality": "best" },
-  "folder": null,
-  "request": { "custom_name_prefix": "", "playlist_item_limit": 0, "auto_start": true,
-               "split_by_chapters": false, "chapter_template": "%(title)s - %(section_number)02d - %(section_title)s.%(ext)s",
-               "subtitle_language": "en", "subtitle_mode": "prefer_manual",
-               "ytdl_options_presets": [], "ytdl_options_overrides": {} },
-  "created_at": 1756999950000, "started_at": 1756999951000, "finished_at": null,
-  "attempt": 0, "source": { "kind": "api_v2", "ref": null },
-  "children_total": 500,
-  "children_done": 62,
-  "children_error": 1,
-  "children_active": 3,
-  "children_inline": false
-}
-```
+### 1.6 Error codes
 
-### 2.3 Complete field table
+| Code | HTTP status | Meaning |
+|---|---|---|
+| `bad_request` | 400 | Invalid body, content type or field encoding. |
+| `validation_failed` | 400 | Invalid field value. |
+| `unsupported_url` | 400 | URL cannot be handled. |
+| `overrides_disabled` | 400 | Request option overrides are disabled. |
+| `unknown_preset` | 400 | Preset does not exist. |
+| `folder_invalid` | 400 | Invalid or disallowed destination directory. |
+| `unauthorized` | 401 | Authentication failed. |
+| `not_found` | 404 | Route or record not found. |
+| `method_not_allowed` | 405 | Wrong method; see the `Allow` header. |
+| `conflict` | 409 | Duplicate subscription or strict-mode duplicate add. |
+| `payload_too_large` | 413 | Body, cookie file or URL batch exceeds its limit. |
+| `internal` | 500 | Server failure; use the request ID to find logs. |
+| `state_unavailable` | 503 | State is unavailable; retry after the indicated delay. |
 
-`T` means the key is always present with a value of type `T`. `T | null` means the key is always
-present and may be `null`. **No key is ever absent.**
+Cookie files are limited to 1,000,000 bytes. The request body ceiling is 1,065,536 bytes, allowing
+multipart overhead. Batch URL limits are configured separately.
+
+Item errors also include `auth_required`, `bot_check`, `geo_restricted`, `unavailable`,
+`not_yet_live`, `no_format`, `network`, `throttled`, `postprocessing_failed`, `disk_full`,
+`tool_missing`, `provider_degraded`, `timeout`, `canceled` and `contract`.
+These describe asynchronous failures after an add has been accepted.
+
+A queued subscription item with `not_yet_live` is waiting for a recording or scheduled release.
+Its optional `retry_at` identifies the next check. Unknown or overdue releases recheck after
+15 minutes without consuming normal failure retries.
+
+## 2. Items
+
+Full objects use the same shape in REST, snapshots, `added` and `completed`. They contain all
+40 fields below. Arrays are never null. `T | null` means the key exists and may contain null.
+
+### 2.1 Identity
+
+Key records by `id`. Sort by `ord`, then `id`. A resolving item can become a group without changing
+either value. Treat `added` as an upsert.
+
+### 2.2 Files
+
+Resolve a relative `download_url` against the configured base URL, including its prefix.
+Use an absolute URL as supplied. `FileRef` contains `filename` (string), `size` (integer or null),
+`download_url` (string or null) and `lang` (string or null).
+
+### 2.3 Fields
 
 | Key | Type | Notes |
 |---|---|---|
-| `id` | `string` | 26-char ULID. The only identifier. Immutable, including across a group promotion. |
-| `kind` | `"item"` \| `"group"` | A `"group"` is a playlist/channel/season container. It never downloads a file of its own. Both live in the same array. |
-| `ord` | `integer` | **The sort key.** Monotonic, server-assigned, stable across restarts. Sort ascending, tie-break on `id`. |
-| `group_id` | `string \| null` | the `id` of this item's group, or `null` for a top-level record |
-| `group_index` | `integer \| null` | 1-based position within the group |
-| `url` | `string` | the source page URL. Data, not a key. |
-| `title` | `string` | never `null`; before resolution it is the URL |
-| `status` | `Status` | the closed 8-value enum, §3. A group's `status` is a roll-up over the same 8 values — never a different vocabulary, and never `resolving`, `preparing` or `postprocessing`. The exact rule is §3.3. |
-| `auto_start` | `boolean` | with `status == "queued"`: `true` = waiting for a slot, `false` = waiting for the user (the legacy *pending* bucket) |
-| `provider` | `string \| null` | e.g. `"ytdlp"`, `"streamingcommunity"`, `"command:bandcamp"`. `null` until resolution picks one. |
-| `percent` | `number` | **never null.** `0.0` before any progress; `0.0…99.9` while active; exactly `100.0` when `finished`. `error`/`canceled` keep the last value. **It is not monotonic.** A merged download (a separate video stream and audio stream, joined afterwards) is two downloads behind one row, and `percent` is the *current* stream's progress: it climbs to ~100 while `phase == "video"`, restarts near `0` when `phase` flips to `"audio"`, and climbs again. Render it, do not assert on it — a bar that only ever grows will look stuck, and an animation keyed on "percent decreased" will fire. `phase` is the field that says which pass you are watching. |
-| `speed` | `number \| null` | bytes per second |
-| `eta` | `integer \| null` | whole seconds remaining |
-| `downloaded_bytes` | `integer \| null` | |
-| `total_bytes` | `integer \| null` | exact size, when the server knows it |
-| `total_bytes_estimate` | `integer \| null` | estimate; use it only if `total_bytes` is `null` |
-| `fragment_index` | `integer \| null` | HLS/DASH fragment or segment progress |
-| `fragment_count` | `integer \| null` | |
-| `phase` | `string \| null` | a finer-grained, purely cosmetic label: `"video"`, `"audio"`, `"fragment"`, `"remux"`, `"audio_sync"`, or a provider-specific string. Do not switch on it. |
-| `phase_percent` | `number \| null` | progress **of the current postprocessing phase**, `0.0…100.0`. Independent of `percent`. When `status == "postprocessing"` and this is non-null, render it as a secondary bar. |
-| `msg` | `string \| null` | a short **live** status line, e.g. `"Merging formats"`, `"N_m3u8DL-RE failed, retrying with ffmpeg..."`, `"Paused"`, `"Retrying in 30s"`. Already cleaned. It describes what is happening *now*, so **no terminal status ever carries a live line**: the server clears it at the terminal write. It is **always `null` when `status == "finished"`**, on every writer — the engine, a group's roll-up, the legacy importer and the schema migration that backfilled the rows an older build wrote. On `error` and `canceled` it is `null` too, unless something set an explicit terminal *note* that was never a progress line (the legacy importer writes one for a record whose status it could not map); the reason itself is in `error`. The clear arrives as an explicit `null` in the `delta`/`completed` frame, per §5.4. |
-| `error` | `WireError \| null` | `{ code, message, field, provider, provider_code }`, plus optional `retry_at` — the §1.5 object without `request_id`. Non-null when `status == "error"`, optionally when `canceled`, **and also on a `queued` item that has a pre-download problem** — an upcoming livestream, where `error.code == "not_yet_live"` and `error.message` is the scheduled-start text. That last case is not a failure. Subscription items with `auto_start: true` wait until the optional `retry_at` deadline; `auto_start: false` remains paused. The WebUI puts automatic waits in Scheduled and shows the next check in the browser's local time. |
-| `filename` | `string \| null` | the produced file, **relative** to its download root. `null` until known. The key always exists. |
-| `size` | `integer \| null` | bytes on disk |
-| `download_url` | `string \| null` | a ready-to-open, percent-encoded URL. `null` until the file exists. Audio items use the audio root automatically. **It is usually relative to `<p>` (e.g. `"download/My%20Video.mp4"`) but may be absolute** (e.g. `"https://cdn.example/My%20Video.mp4"`), because the operator can point the server's public file prefix at a CDN. The resolution rule is one line and covers both: **if the value parses as an absolute URL — it has a scheme — open it as-is; otherwise resolve it against your base URL plus `<p>`.** Never concatenate unconditionally. |
-| `chapter_files` | `[FileRef]` | always an array, possibly empty. Never `null`. |
-| `subtitle_files` | `[FileRef]` | same |
-| `selection` | `Selection` | `{ download_type, codec, format, quality }`, all four always strings |
-| `folder` | `string \| null` | the relative custom directory, or `null` for the base dir |
-| `request` | `RequestView` | the rest of the add request, echoed back: `{ custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, subtitle_language, subtitle_mode, ytdl_options_presets, ytdl_options_overrides }`. This is what makes "download again with the same options" and a request inspector possible. See below. |
-| `created_at` | `integer` | unix ms |
-| `started_at` | `integer \| null` | unix ms of the first `preparing` |
-| `finished_at` | `integer \| null` | unix ms of the terminal transition |
-| `attempt` | `integer` | 0 on the first try; incremented by a retry (manual or automatic) |
-| `source` | `SourceRef` | `{ kind, ref }` — see below |
-| `children_total` | `integer \| null` | groups only; the declared child count |
-| `children_done` | `integer \| null` | groups only; children with `status == "finished"` |
-| `children_error` | `integer \| null` | groups only |
-| `children_active` | `integer \| null` | groups only; children in `preparing`/`downloading`/`postprocessing` |
-| `children_inline` | `boolean \| null` | groups only. `true` = this group's children are present in the same payload. `false` = they were omitted because the group is large; fetch them with `GET api/v2/items?group_id=<id>` or a WebSocket `watch` frame. `null` on non-groups. Note that this bounds the **snapshot**, not the delta stream: you may still receive `delta` patches for children of a group you never received, and your apply step must ignore a patch for an unknown id (§5.4, §7). |
+| `id` | `string` | Immutable ULID; remains unchanged when an item becomes a group. |
+| `kind` | `"item"` \| `"group"` | Groups contain playlist, channel or season entries and produce no file themselves. |
+| `ord` | `integer` | Persistent sort key. Sort ascending, then by `id`. |
+| `group_id` | `string \| null` | Parent group ID, or null for a top-level record. |
+| `group_index` | `integer \| null` | One-based child position. |
+| `url` | `string` | Submitted source URL. |
+| `title` | `string` | The URL until a title is resolved. |
+| `status` | `Status` | One of the eight statuses in section 3. |
+| `auto_start` | `boolean` | For queued items, false means paused. |
+| `provider` | `string \| null` | Provider ID, such as `ytdlp`, `streamingcommunity` or `command:bandcamp`. |
+| `percent` | `number` | 0 before progress, 100 when finished. May decrease between video and audio phases. |
+| `speed` | `number \| null` | Bytes per second. |
+| `eta` | `integer \| null` | Seconds remaining. |
+| `downloaded_bytes` | `integer \| null` | Bytes downloaded. |
+| `total_bytes` | `integer \| null` | Known total size. |
+| `total_bytes_estimate` | `integer \| null` | Estimated total size. |
+| `fragment_index` | `integer \| null` | Current segment or fragment. |
+| `fragment_count` | `integer \| null` | Total segments or fragments. |
+| `phase` | `string \| null` | Display label such as `video`, `audio`, `remux` or `audio_sync`; allow unknown values. |
+| `phase_percent` | `number \| null` | Progress within the postprocessing phase. |
+| `msg` | `string \| null` | Live status text. Cleared at terminal transitions; imported error/canceled rows can retain a terminal note. |
+| `error` | `WireError \| null` | Wire error without `request_id`. Can also appear on queued `not_yet_live` items. |
+| `filename` | `string \| null` | Primary output path relative to its download root, when available. |
+| `size` | `integer \| null` | Output size in bytes. |
+| `download_url` | `string \| null` | Encoded absolute URL or a path relative to the configured server base URL. |
+| `chapter_files` | `[FileRef]` | Chapter outputs; empty array when absent. |
+| `subtitle_files` | `[FileRef]` | Subtitle outputs; empty array when absent. |
+| `selection` | `Selection` | Download type, codec, format and quality. |
+| `folder` | `string \| null` | Relative custom directory. |
+| `request` | `RequestView` | Original request options. Secrets in overrides are redacted. |
+| `created_at` | `integer` | Unix milliseconds. |
+| `started_at` | `integer \| null` | First preparation time in Unix milliseconds. |
+| `finished_at` | `integer \| null` | Terminal transition time in Unix milliseconds. |
+| `attempt` | `integer` | Starts at 0 and increases on retry. |
+| `source` | `SourceRef` | Original attribution; preserved through retries and restarts. |
+| `children_total` | `integer \| null` | Group child count. |
+| `children_done` | `integer \| null` | Finished child count. |
+| `children_error` | `integer \| null` | Failed child count. |
+| `children_active` | `integer \| null` | Preparing, downloading or postprocessing child count. |
+| `children_inline` | `boolean \| null` | True on groups in this build, null on items. Older terminal children can still fall outside the done window; page them by `group_id`. |
 
-**`selection`, `folder` and `request` are immutable for the record's life**, so they are guaranteed
-never to appear in a `delta` frame. Read them once from `added`/`snapshot` and never re-read them.
+`Selection` has four fields: `download_type`, `codec`, `format` and `quality`.
+Download types are `video`, `audio`, `captions` and `thumbnail`. Codecs are `auto`, `h264`,
+`h265`, `av1` and `vp9`. Format and quality values come from the catalog.
 
-`FileRef`:
+`RequestView` contains these nine fields:
 
-| Key | Type |
-|---|---|
-| `filename` | `string` |
-| `size` | `integer \| null` |
-| `download_url` | `string \| null` — same absolute-or-relative rule as `Item.download_url` |
-| `lang` | `string \| null` |
-
-`RequestView` — all nine keys always present:
-
-| Key | Type | Notes |
+| Field | Type | Meaning |
 |---|---|---|
-| `custom_name_prefix` | `string` | `""` when unset |
-| `playlist_item_limit` | `integer` | `0` = unlimited |
-| `auto_start` | `boolean` | the value that was **requested**. `Item.auto_start` is the *current* value, which a `pause` or a `start` changes. |
-| `split_by_chapters` | `boolean` | |
-| `chapter_template` | `string` | the effective template, never `null` |
-| `subtitle_language` | `string` | |
-| `subtitle_mode` | `string` | one of the four §4.1 values |
-| `ytdl_options_presets` | `[string]` | possibly empty, never `null` |
-| `ytdl_options_overrides` | `object` | the key set is exact; a **value** whose key looks like a secret (matching `(?i)(cookie\|password\|passwd\|token\|key\|secret\|proxy)`) is the string `"«redacted»"`. Show the keys, do not try to re-send the values verbatim — re-send only the ones you own. |
+| `custom_name_prefix` | string | Filename prefix; empty when unset. |
+| `playlist_item_limit` | integer | Requested entry limit; 0 means unlimited. |
+| `auto_start` | boolean | Original requested value. |
+| `split_by_chapters` | boolean | Whether separate chapter files were requested. |
+| `chapter_template` | string | Effective chapter template; never null. |
+| `subtitle_language` | string | Requested language tag. |
+| `subtitle_mode` | string | Requested subtitle preference. |
+| `ytdl_options_presets` | array of strings | Selected preset names; never null. |
+| `ytdl_options_overrides` | object | Requested overrides with secret values redacted. |
 
-`Selection` — all four keys always present, all four strings:
-`download_type` ∈ `"video" | "audio" | "captions" | "thumbnail"`;
-`codec` ∈ `"auto" | "h264" | "h265" | "av1" | "vp9"`;
-`format` and `quality` are catalog ids (§8), e.g. `"mp4"` and `"1080"`.
+`selection`, `folder` and `request` are immutable and do not appear in delta patches.
+`Item.auto_start` can change; `request.auto_start` records the original request.
 
-`SourceRef` — deliberately **flat**, two always-present keys, so it needs no custom decoder:
+`source` contains `kind` and nullable `ref`. Kinds are `api_v2`, `ios`, `telegram`, `subscription`,
+plus stored historical values `api_v1`, `restart` and `retry`. A ref can identify the chat,
+subscription or iOS installation. Attribution is preserved on retry and recovery.
 
-| Key | Type | Notes |
-|---|---|---|
-| `kind` | `string` | `"api_v2"` \| `"api_v1"` \| `"ios"` \| `"telegram"` \| `"subscription"` \| `"restart"` \| `"retry"` |
-| `ref` | `string \| null` | the chat id, the subscription id, the adding install's id (`kind == "ios"`, from `X-Aulos-Install`, §1.3), or a request id — whichever applies. `null` when there is nothing to reference. |
+### 2.4 Display rules
 
-**`source` records where the item came from, and it never changes afterwards.** A retry — manual
-or automatic — and a boot recovery both leave it exactly as it was, so a download that was asked
-for from Telegram still reports to that chat and one added from the iOS app still reaches that
-phone. `attempt` is what tells you an item has been retried; `source` is not.
-
-`"restart"` and `"retry"` are **legacy** values for that reason: older builds re-attributed an item
-to itself on a boot recovery or a retry, so rows written back then can still carry them and a
-client must still decode them. No row written by this build ever gets either value.
-
-`"ios"` is set by the `X-Aulos-Client` request header (§1.3); every other client of
-`POST api/v2/downloads` is `"api_v2"`. For an `"ios"` item `ref` is the adding install's id from
-`X-Aulos-Install` (§1.3), or `null` when the app did not send one.
-
-### 2.4 Rendering guidance
-
-- **Three sections** (In Progress / Completed / Failed) map to:
-  in progress = `status ∈ {queued, resolving, preparing, downloading, postprocessing}`;
-  completed = `status == "finished"`; failed = `status == "error"`.
-  Cancelled items (`status == "canceled"`) are yours to place — showing them in Failed with a
-  distinct icon, or in a fourth section, are both reasonable. They are never hidden by the server.
-- **Groups.** The simplest correct client renders a group row using `percent` and the
-  `children_*` counters and renders its children as ordinary rows (they sort naturally into place
-  by `ord`). If you want a collapsed group, hide rows whose `group_id` is a collapsed group's id.
-  You never need to compute a group's progress: the server does it byte-weighted where it can.
-  §3.3 gives the exact roll-up rules, including which statuses a group can hold — notably it is
-  never `resolving`, `preparing` or `postprocessing`, so a group whose children are all being
-  remuxed reads `downloading`.
-- **Row identity.** Key rows on `id` alone. Never on `"\(id)-\(status)"`: a status change is not a
-  new row, and rebuilding the view on every transition is a guaranteed visual pop.
-- **Progress bar.** Show `percent` for `preparing`/`downloading`. For `postprocessing`, show
-  `percent` (which will be at or near 100) plus `phase_percent` as a secondary indicator when it
-  is non-null; `msg` says what is happening.
-- **`msg` is a live line, not a summary.** Render it as the row's subtitle while the item is
-  running and it will read correctly, because the server clears it at the terminal write: a
-  `finished` item always has `msg == null`, and so does a row that failed or was cancelled while a
-  postprocessor was running. Do not cache the last non-null value you saw for a row — the clear is
-  delivered as an explicit `null` (§5.4), and treating it as "no change" is what makes a completed
-  download read as a job stuck in its final postprocessor. A `finished` row's subtitle is yours to
-  compose from `size`, `filename` and `finished_at`; a failed one's is `error.message`.
-- **`resolving`.** The item exists, has an `id`, and its `title` is still the URL. Show a spinner
-  and the URL. It will get a real title within a second or two, delivered as a `delta`.
-
----
+Use `msg` for live status and `error.message` for a failure. Apply explicit nulls when clearing
+those values. Progress may decrease when a job moves from video to audio. `phase_percent` is a
+separate postprocessing indicator. Group progress and counts are computed by the server.
 
 ## 3. Status
 
-### 3.1 The closed vocabulary
+### 3.1 Values
 
-Exactly these eight strings ever appear in `status`, on items and on groups alike:
-
-| Value | Meaning |
+| Status | Meaning |
 |---|---|
-| `queued` | accepted, not started. `auto_start == true` ⇒ waiting for a slot or a `not_yet_live` recheck deadline. `auto_start == false` ⇒ waiting for the user: either it was added with `auto_start: false`, or it was **paused**, or it has a pre-download problem (`error.code == "not_yet_live"`). |
-| `resolving` | metadata extraction is running. The item may become a group. |
-| `preparing` | the download process has been spawned but has produced no progress yet |
-| `downloading` | bytes are moving |
-| `postprocessing` | the bytes are down; ffmpeg / a remux / an audio re-encode is running |
-| `finished` | done. `percent == 100.0`, `filename` and `download_url` are non-null, and `msg` and `error` are both `null`. |
-| `error` | terminal failure. `error` is non-null and carries the reason; `msg` is `null` unless an importer left a terminal note (§2.3). |
-| `canceled` | terminal, cancelled by a user. `msg` follows the `error` rule above. |
+| `queued` | Waiting for a slot, scheduled recheck or user action. |
+| `resolving` | Extracting metadata. |
+| `preparing` | Preparing the download process. |
+| `downloading` | Download in progress. |
+| `postprocessing` | Processing downloaded media. |
+| `finished` | Successful terminal result; percent is 100 and live message is null. |
+| `error` | Terminal failure with an error object. |
+| `canceled` | Canceled terminal result. |
 
-There is no `pending` and no `done` in v2. If you decode an unknown value, treat it as an
-`unknown` case and render the row as inert — do **not** map it to `queued`, or a future status will
-silently look like something it is not.
+Groups have no primary file even when finished. Do not require a non-null filename for every
+finished record. Decode unknown statuses without treating them as queued.
 
 ### 3.2 Transitions
 
-```
-                       ┌──────────────────────────────────────────┐
-                       │                                          │
-   (POST downloads)    ▼                                          │
-        ──────────► resolving ──────────► queued ──────► preparing │
-                       │                    ▲               │     │
-                       │                    │               ▼     │
-                       │                    │          downloading │
-                       │                    │               │     │
-                       │                    │               ▼     │
-                       │                    │        postprocessing│
-                       │                    │               │     │
-                       │                    │               ▼     │
-                       │                    │            finished │
-                       │                    │                     │
-                       └────────┬───────────┴──── error ◄──────────┘
-                                │                  │
-                                │                  │ (retry: attempt += 1)
-                                ▼                  │
-                            canceled ──────────────┘
-                          (from ANY non-terminal)
+A typical item goes from resolving to queued, preparing, downloading, postprocessing and finished.
+Failures and cancellation can interrupt that path. Retries can return a terminal item to the queue.
 
-  finished | error | canceled ──► (record removed: delete, clear, or CLEAR_COMPLETED_AFTER)
-```
+Pause stops work and sets `queued` with `auto_start=false`, keeping resumable partial files.
+Start sets `auto_start=true`. Neither requires a separate paused status. Group expansion upserts
+the provisional item as a group and adds children.
 
-Notes that matter to a client:
+### 3.3 Groups
 
-- **`pause` and `start` move an item between the two flavours of `queued`**, and the status string
-  does not change: `pause` sets `auto_start` to `false` (killing the job first if one is running,
-  keeping its partial file), `start` sets it back to `true`. So a paused row stays in your
-  In-Progress section with a "Paused" treatment; there is no `paused` status to decode. Pausing a
-  running item does **not** increment `attempt`, and resuming it continues from the bytes already
-  on disk where the provider supports it.
-- A single-video add goes `resolving → queued → preparing → …`. You will see the title change on
-  the `resolving → queued` transition.
-- A playlist add goes `resolving`, then the **same record** becomes `kind: "group"` and its
-  children appear. The `id` and the `ord` do not change (§6.5).
-- `error` and `canceled` can transition back to `queued` on a retry, with `attempt` incremented.
-- No transition ever skips backwards through the download states.
+Group status is derived in this order:
 
-### 3.3 Groups: exactly what a group's fields mean
+1. `downloading` if any child is preparing, downloading or postprocessing.
+2. `queued` if any child is queued or resolving.
+3. `error` if any child failed.
+4. `canceled` if all children are terminal and at least one was canceled.
+5. `finished` otherwise.
 
-A group never downloads anything itself; every one of its progress fields is derived from its
-children, and the derivation is contractual so you can predict what you will render.
+Progress is byte-weighted when totals are available and count-weighted otherwise. Speed sums
+active child speeds. ETA uses remaining bytes and speed when available. Read these aggregates
+from the group instead of calculating them in the client.
 
-**`status` — a five-way decision, in this order:**
+## 4. REST
 
-```
-downloading    if any child is preparing | downloading | postprocessing
-else queued    if any child is queued | resolving
-else error     if any child is error
-else canceled  if every child is terminal and at least one is canceled
-else finished
-```
+### 4.1 Add downloads
 
-The consequence worth knowing: a group is **never** `resolving`, `preparing` or `postprocessing`.
-A group whose children are all being remuxed reads `downloading`, and a group that is still
-expanding reads `queued` or `downloading` depending on whether a child has started. Place a group
-row by that value, and pick its spinner from the `children_active` count rather than from a
-fine-grained status.
-
-**`percent` — byte-weighted where the server knows the totals, count-weighted otherwise:**
-
-```
-if every resolved child has a known total and their sum > 0:
-    percent = 100 × (bytes of finished children + bytes downloaded by active children) / that sum
-else:
-    percent = 100 × (finished child count + Σ over active children of child.percent/100)
-                    / max(children_total, 1)
-```
-
-The byte-weighted branch is why a playlist of 49 short clips plus one 4 GB file does not read 98 %
-while half the bytes are outstanding. You never need to compute either formula: read `percent`.
-
-**`speed`** is the sum over running children, or `null` when none is running.
-**`eta`** is remaining bytes ÷ `speed` when both are known, else `null`.
-**`downloaded_bytes`**/**`total_bytes_estimate`** are the corresponding sums; `total_bytes` on a
-group is always `null` (an exact total for a whole playlist is not knowable until it finishes).
-**`children_done`/`children_error`/`children_active`** are exact counts, always in step with
-`percent` in the same frame.
-
----
-
-## 4. REST — v2
-
-All paths are relative to `<p>`.
-
-### 4.1 `POST api/v2/downloads` — add
-
-Returns **before** any metadata extraction. This is the whole point.
-
-Single request body — only `url` is required; every other field defaults from
-`api/v2/capabilities.config`:
+`POST api/v2/downloads` accepts a single object or a batch. Only `url` is required for a single
+add. Acceptance returns before metadata extraction completes.
 
 ```json
-{ "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "download_type": "video",
-  "codec": "auto",
-  "format": "mp4",
-  "quality": "1080",
-  "folder": "Music/Live",
-  "custom_name_prefix": "",
-  "playlist_item_limit": 0,
-  "auto_start": true,
-  "split_by_chapters": false,
-  "chapter_template": null,
-  "subtitle_language": "en",
-  "subtitle_mode": "prefer_manual",
-  "ytdl_options_presets": ["sponsorblock"],
-  "ytdl_options_overrides": {},
-  "provider": null }
+{"url":"https://www.youtube.com/watch?v=aqz-KE-bpKQ","download_type":"video","format":"mp4","quality":"1080"}
 ```
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `url` | string | **required** | trimmed |
-| `download_type` | string | `"video"` | §8 |
+| `download_type` | string | `"video"` | See section 8 |
 | `codec` | string | `"auto"` | forced to `"auto"` for audio/captions/thumbnail |
 | `format` | string | per download type | validated against the selected provider's catalog |
 | `quality` | string | per format | likewise |
@@ -670,1515 +282,494 @@ Single request body — only `url` is required; every other field defaults from
 | `ytdl_options_overrides` | object | `{}` | rejected with `overrides_disabled` unless the server allows it |
 | `provider` | string \| null | `null` | force a provider id; normally leave it null |
 
-Batch body — `defaults` is merged **under** each item, so a share sheet can send three URLs with
-one selection:
-
-```json
-{ "items": [ { "url": "https://youtu.be/a" }, { "url": "https://youtu.be/b" } ],
-  "defaults": { "format": "mp4", "quality": "1080", "auto_start": true } }
-```
-
-Response `202`:
-
-```json
-{ "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
-  "ids": ["01JBQ7Z5T9K3M2R8V4XW6Y0AAA"],
-  "generation": 47,
-  "seq": 10241,
-  "duplicates": [ { "url": "https://youtu.be/x", "existing_id": "01JBQ6…" } ],
-  "warnings": [] }
-```
-
-| Key | Type | Notes |
-|---|---|---|
-| `id` | `string` | equals `ids[0]`, or the first `duplicates[].existing_id` when every URL deduped; present for convenience |
-| `ids` | `[string]` | one id per accepted URL, in request order. Batch callers use this. |
-| `generation` | `integer` | an opaque counter identifying **this add's** resolution work. Keep it if you want to be able to abort the add: `POST api/v2/downloads/cancel-resolve` with `{"generation": <this value>}` cancels the in-flight resolution and the not-yet-created children of this add only (§4.7). Two concurrent adds have different generations. |
-| `seq` | `integer` | the frame sequence at or before which the corresponding `added` frame arrives (§6.4) |
-| `duplicates` | `[{url, existing_id}]` | see below |
-| `warnings` | `[string]` | see below |
-
-- `id` is present for convenience and equals `ids[0]`. When **every** URL deduped, `ids` is
-  empty and `id` is the first `duplicates[].existing_id` instead, so it is always a string and
-  always something you can poll. Batch callers should use `ids`.
-- `duplicates` lists URLs that already have a non-terminal item with the same selection; the
-  existing id is returned instead of creating a second item. This is not an error.
-- `warnings` is an array of strings, one per **unknown request field**. Unknown fields are ignored,
-  never rejected: an App Store rollout runs mixed client and server versions for weeks, and the
-  first client to send a new optional field must not get a 400 on the whole add.
-- By the time this response arrives, the item is already in the state snapshot with
-  `status: "resolving"`, and an `added` frame either has arrived or will arrive within ~25 ms.
-- Send `X-Aulos-Client: ios/<version>` (§1.3) if you are the iOS app and want the items you add to
-  carry `source.kind == "ios"`. It is the only thing that sets that kind, it applies to the batch
-  body as well as the single one, and sending nothing is `"api_v2"` exactly as before.
-- Send `X-Aulos-Install: <id>` (§1.3) alongside it and the items carry
-  `source.ref == "<id>"` as well — the install that added them. It applies to the batch body too,
-  and it only ever refines the `"ios"` kind: with any other client the add is unchanged and
-  `source.ref` stays `null`. A value outside the documented shape, or no header at all, is
-  `source.ref == null`, which is what an older app build has always produced and what the server
-  reads as "every iOS device" when it routes the alert (§4.8).
-
-Errors: `400 validation_failed` (with `field`), `400 unknown_preset`, `400 overrides_disabled`,
-`400 folder_invalid`, `400 unsupported_url`, `413 payload_too_large`, `503 state_unavailable`.
-
-### 4.2 `POST api/v2/items/actions` — start / cancel / retry / delete
-
-```json
-{ "action": "cancel", "ids": ["01JBQ7…", "01JBQ8…"] }
-```
-
-`action` ∈ `"start" | "pause" | "cancel" | "retry" | "delete"`. For `"delete"` you may add
-`"delete_file": true | false` (the default follows the server's `DELETE_FILE_ON_TRASHCAN`).
-
-| Action | What it does |
-|---|---|
-| `start` | `queued` with `auto_start == false` → `auto_start = true`. On a **`resolving`** item it sets the same flag, so the item goes to the scheduler the moment resolution finishes — you may send it immediately after an `auto_start: false` add without waiting for the row to leave `resolving`. On a terminal item it is a `retry`. |
-| `pause` | The inverse. `queued(auto_start=true)` is un-scheduled; a `preparing`/`downloading`/`postprocessing` item is stopped and parked as `queued(auto_start=false)` with its partial file kept, so `start` resumes rather than restarts. `attempt` is unchanged. `resolving` and terminal items are `not_pausable`. |
-| `cancel` | Terminal. Stops the job, removes partials, `status = "canceled"`. Use this when the user means "stop and forget", and `pause` when they mean "not now". |
-| `retry` | `error`/`canceled` → `queued`, `attempt += 1`. |
-| `delete` | Removes the record (cancelling first if it is running), and optionally the files. |
-
-Read the server's supported set from `capabilities.actions` rather than hard-coding it.
-
-The **shipped web page and iOS app always send `"delete_file": false`** on both `delete` and
-`clear`, explicitly, so a delete from either never unlinks a file. That is a client convention, not
-a server rule: the parameter and `DELETE_FILE_ON_TRASHCAN` are unchanged and still do exactly what
-this table says for a `curl` or API caller.
-
-Response `200`:
-
-```json
-{ "applied": ["01JBQ7…"],
-  "skipped": [ { "id": "01JBQ8…", "reason": "already_terminal" } ],
-  "seq": 10250 }
-```
-
-`reason` ∈ `"not_found" | "already_terminal" | "not_cancelable" | "not_startable" |
-"not_retryable" | "not_pausable"`.
-Every action is **idempotent**: cancelling a cancelled item succeeds with it listed in `skipped`,
-and pausing an already-paused item succeeds the same way.
-
-`not_found` means the row is **gone**, not merely old: any id `GET api/v2/items` still lists is a
-valid target, however long ago it finished and however far it has dropped out of the `done` window
-of §4.3. A `delete` of such a row removes its files exactly as it would for a recent one.
-
-`DELETE api/v2/items/{id}?delete_file=true` is the single-item shorthand and returns `204`.
-
-Deleting a group cancels and deletes its children too.
-
-### 4.3 `GET api/v2/state` — snapshot or delta
-
-The polling counterpart to the WebSocket. Use it when you cannot hold a socket, or on foreground
-before the socket connects.
-
-`GET api/v2/state` (no `since`) returns the full snapshot:
-
-```json
-{ "mode": "snapshot",
-  "seq": 10251,
-  "boot_id": "01JBQ8YQ2E0000000000000000",
-  "server_time": 1757000000123,
-  "protocol": { "batch_ms": 250, "urgent_ms": 25, "replay_frames": 512,
-                "delta_semantics": "absent-key-means-unchanged" },
-  "counts": { "queued": 2, "resolving": 0, "preparing": 0, "downloading": 1,
-              "postprocessing": 0, "finished": 401, "error": 10, "canceled": 3 },
-  "done_total": 4211,
-  "truncated": { "done": true, "groups": ["01JBQ8AA0000000000000000GG"] },
-  "items": [ /* Item objects, ord ascending: non-terminal records plus groups */ ],
-  "done":  [ /* Item objects, ord ascending: the most recent completed window */ ],
-  "subscriptions": [ /* Subscription objects, §9 */ ],
-  "ytdl_options": { "ok": true, "msg": "", "update_time": 1757000200.412 },
-  "health": { "status": "ok", "components": { "pot": "ok", "store": "ok", "ytdl_options": "ok" } } }
-```
-
-`counts` is a histogram over **this response's own `items` + `done` arrays**, not over the
-database — see §5.3, which describes the one window both surfaces share. The terminal counters
-(`finished`, `error`, `canceled`) are therefore bounded by the in-memory done window
-(`AULOS_MEM_DONE_ITEMS`, 500 by default) and can read `0` while history holds thousands: 500 newer
-`canceled` rows push every `finished` row out of the window and take `counts.finished` with them.
-`done_total` is the honest total of terminal records; for an exact number **per** status, read
-`total` from `GET api/v2/items?status=finished` (§4.4), which is a store query.
-
-`ytdl_options` and `health` are the **current** state of the two things that are otherwise only
-announced on change (§5.9), so a client that connects while the options file is broken or the POT
-sidecar is down learns it here instead of having to also call `healthz` and `api/v2/ytdl-options`.
-`ytdl_options` is exactly the `ytdl_options` frame's payload minus `t`/`seq`; `health.components`
-is a flat `component → "ok" | "degraded" | "down" | "disabled"` map — the abridged form. Call
-`GET healthz` when you want the detail behind a non-`ok` value.
-
-`GET api/v2/state?since=10240&boot=01JBQ8YQ…` returns a delta when it can:
-
-```json
-{ "mode": "delta",
-  "seq": 10251,
-  "boot_id": "01JBQ8YQ2E0000000000000000",
-  "from": 10240,
-  "added": [ /* full Item objects */ ],
-  "completed": [ /* full Item objects */ ],
-  "removed": [ { "ids": ["01JBQ7…"], "reason": "deleted" },
-               { "ids": ["01JBQ5…"], "reason": "auto_cleared" } ],
-  "delta": { "items": [ { "id": "01JBQ7…", "percent": 43.9, "speed": 3210000.0, "eta": 61 } ] } }
-```
-
-`removed` is an **array of groups**, one per distinct `reason`, because a window can easily contain
-a user delete and a `CLEAR_COMPLETED_AFTER` expiry at once and `reason` is per-reason, not per-id
-(§5.7). Iterate the array; the order is `deleted`, `cleared`, `auto_cleared`, `group_cascade`, and
-absent reasons are simply not present. It is `[]`, never `null`, when nothing was removed.
-
-Apply in exactly this order: `added`, then `completed`, then every `removed` group in array order,
-then `delta`. This is the **same** order the server uses when it flushes a batch to the WebSocket
-(DESIGN §15.1) and the same order the `resume` fold emits (§6.3) — one ordering, three places, no
-exceptions.
-
-Two things depend on it:
-
-- `added` first, so no `completed` or `delta` entry references an id you have not yet seen.
-- `removed` **after** `added`, so a record created and deleted inside the same window ends up
-  absent rather than present. Applying `removed` first would discard an id you do not have yet
-  (a documented no-op) and then add it, leaving a row that will never change again.
-
-`delta` last is then free: a patch for a just-removed id is a guaranteed no-op, because your apply
-step never creates a record from a `delta`.
-
-`mode` ∈ `"snapshot" | "delta" | "up_to_date"`. You get `"snapshot"` when `since` is absent, when
-`boot` is absent, empty or not a ULID, when `boot` does not match `boot_id`, when `since` is older
-than the server's replay window, or when `since` is **greater** than the server's current `seq`
-(which happens after a restore). You get `"up_to_date"` — with no arrays at all — when
-`since == seq`. The three `boot` cases are one rule: a cursor whose origin the server cannot
-confirm is one it will not fold against (§6.2).
-
-`ETag` is `W/"<boot_id>-<seq>"`, where `seq` is **this response's own** `seq` — the one in the
-body, never a newer one the body does not reflect. Send it back as `If-None-Match` and an
-unchanged server answers `304` with an empty body, which makes pull-to-refresh nearly free.
-
-Query parameters: `since` (integer), `boot` (string — **required whenever you send `since`**;
-without it, or with a value that is not a ULID, you get a snapshot), `done` (boolean, default
-`true` — set `false` to omit the completed window entirely and get a very small snapshot).
-
-### 4.4 `GET api/v2/items` — paged list
-
-Query: `status` (comma list), `kind`, `group_id`, `q` (title substring), `order` (`ord` — the only
-value), `limit` (default 200, max 1000), `cursor`.
-
-```json
-{ "items": [ /* Item objects, ord ascending */ ],
-  "next_cursor": "b3JkOjk4MQ",
-  "total": 4211,
-  "seq": 10251 }
-```
-
-`next_cursor` is `null` on the last page. This is how you page history beyond the in-memory
-window, and how you fetch a large group's children (`?group_id=<id>`).
-
-`GET api/v2/items/{id}` returns a single `Item`, or `404 not_found`.
-
-`GET api/v2/items/{id}/file` returns `302` to the file route, or `404` when there is no file yet.
-
-### 4.5 `GET api/v2/capabilities`
-
-Everything a client needs to configure itself, in one cheap, `ETag`-able response. This replaces
-fetching `/version` on every reconnect and replaces any hard-coded format list.
-
-```json
-{ "version": "2026.09.04",
-  "yt_dlp": "2026.8.30.232658.dev0",
-  "url_prefix": "/",
-  "boot_id": "01JBQ8YQ2E0000000000000000",
-  "protocol": { "v2": true,
-                "ws_path": "ws", "ws_subprotocol": "aulos.v2",
-                "batch_ms": 250, "urgent_ms": 25,
-                "delta_semantics": "absent-key-means-unchanged" },
-  "features": ["async_add","stable_ids","deltas","since_resume","etag","retry","cancel",
-               "cancel_resolve","groups","subscriptions","file_serving","batch_add",
-               "postprocessing_status","per_url_catalog"],
-  "actions": ["start","pause","cancel","retry","delete"],
-  "formats": [
-    { "id": "any", "text": "Any", "download_type": "video",
-      "qualities": [ {"id":"best","text":"Best"}, {"id":"2160","text":"2160p"},
-                     {"id":"1440","text":"1440p"}, {"id":"1080","text":"1080p"},
-                     {"id":"720","text":"720p"}, {"id":"480","text":"480p"},
-                     {"id":"360","text":"360p"}, {"id":"240","text":"240p"},
-                     {"id":"worst","text":"Worst"} ] },
-    { "id": "mp4", "text": "MP4", "download_type": "video",
-      "qualities": [ {"id":"best","text":"Best"}, {"id":"best_remux","text":"Best (remux)"},
-                     {"id":"2160","text":"2160p"}, {"id":"1440","text":"1440p"},
-                     {"id":"1080","text":"1080p"}, {"id":"720","text":"720p"},
-                     {"id":"480","text":"480p"}, {"id":"360","text":"360p"},
-                     {"id":"240","text":"240p"}, {"id":"worst","text":"Worst"} ] },
-    { "id": "ios",  "text": "iOS",  "download_type": "video",
-      "qualities": [ {"id":"best","text":"Best"}, {"id":"2160","text":"2160p"},
-                     {"id":"1440","text":"1440p"}, {"id":"1080","text":"1080p"},
-                     {"id":"720","text":"720p"}, {"id":"480","text":"480p"},
-                     {"id":"360","text":"360p"}, {"id":"240","text":"240p"},
-                     {"id":"worst","text":"Worst"} ] },
-    { "id": "m4a",  "text": "M4A",  "download_type": "audio",
-      "qualities": [{"id":"best","text":"Best"},{"id":"192","text":"192 kbps"},{"id":"128","text":"128 kbps"}] },
-    { "id": "mp3",  "text": "MP3",  "download_type": "audio",
-      "qualities": [{"id":"best","text":"Best"},{"id":"320","text":"320 kbps"},
-                    {"id":"192","text":"192 kbps"},{"id":"128","text":"128 kbps"}] },
-    { "id": "opus", "text": "Opus", "download_type": "audio",    "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "wav",  "text": "WAV",  "download_type": "audio",    "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "flac", "text": "FLAC", "download_type": "audio",    "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "srt",  "text": "SRT",  "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "txt",  "text": "Text", "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "vtt",  "text": "VTT",  "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "ttml", "text": "TTML", "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "sbv",  "text": "SBV",  "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "scc",  "text": "SCC",  "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "dfxp", "text": "DFXP", "download_type": "captions", "qualities": [{"id":"best","text":"Best"}] },
-    { "id": "jpg",  "text": "Thumbnail", "download_type": "thumbnail", "qualities": [{"id":"best","text":"Best"}] }
-  ],
-  "download_types": ["video","audio","captions","thumbnail"],
-  "codecs": ["auto","h264","h265","av1","vp9"],
-  "subtitle_modes": ["auto_only","manual_only","prefer_manual","prefer_auto"],
-  "presets": ["sponsorblock","archive"],
-  "providers": [ { "id": "ytdlp", "state": "ready", "fallback": true },
-                 { "id": "streamingcommunity", "state": "ready", "slots": 1 },
-                 { "id": "command:bandcamp", "state": "degraded",
-                   "reason": "download.command[0] not executable" } ],
-  "config": { "custom_dirs": true,
-              "create_custom_dirs": true,
-              "allow_ytdl_options_overrides": false,
-              "default_option_playlist_item_limit": 0,
-              "subscription_default_check_interval": 60,
-              "output_template_chapter": "%(title)s - %(section_number)02d - %(section_title)s.%(ext)s",
-              "public_host_url": "download/",
-              "public_host_audio_url": "audio_download/",
-              "default_theme": "auto",
-              "max_concurrent_downloads": 3,
-              "delete_file_on_trashcan": false,
-              "clear_completed_after": 0,
-              "default_download_type": "video",
-              "default_format": "mp4",
-              "default_quality": "best" } }
-```
-
-`formats[]` is deliberately the flat `{ id, text, qualities: [{ id, text }] }` shape, so a client
-that already models a server-driven format list can consume it with no new types. `ETag` is a hash
-of the payload; a reconnect with `If-None-Match` is a `304`.
-
-**The array above is complete and is the legacy matrix exactly** — sixteen entries: three video
-formats, five audio, **seven** caption formats and one thumbnail, with `ios` carrying the same nine
-heights as `any` because legacy accepted `{video, ios, 1080}` and composed a real
-`[height<=1080]` selector for it. §8 restates the same matrix as a table; the two must agree, and a
-CI assertion pins this payload against it. Anything narrower would silently delete formats a
-legacy client could already request.
-
-`formats[]` is a flat list keyed by `download_type` for picker convenience. It intentionally does
-**not** carry `notice`, `flags`, `codecs` or `options` — those live on the richer per-URL catalog
-of §4.6, which is where you go once a URL is known.
-
-### 4.6 `GET api/v2/catalog` — the honest, per-URL picker
-
-`GET api/v2/catalog` returns the merged catalog for every registered provider.
-`GET api/v2/catalog?url=<url-encoded>` returns the catalog of the provider that **would actually
-be selected** for that URL:
-
-```json
-{ "etag": "9f2b41c0d7e5a318",
-  "provider": "streamingcommunity",
-  "match": { "score": 200, "reason": "host_contains" },
-  "runner_up": { "provider": "ytdlp", "score": 1 },
-  "naming": "provider",
-  "download_types": [
-    { "id": "video", "label": "Video", "default_format": "mp4",
-      "formats": [
-        { "id": "mp4", "label": "MP4",
-          "default_quality": "best",
-          "notice": "StreamingCommunity serves one source rendition; quality is ignored.",
-          "flags": { "advisory": true, "requires_ffmpeg": true, "lossy_remux": false, "slow": false },
-          "qualities": [ { "id": "best", "label": "Source", "notice": null } ],
-          "codecs": [] }
-      ],
-      "options": [] } ] }
-```
-
-This is what lets a share sheet be honest: paste a StreamingCommunity link and the quality picker
-collapses to a single "Source" entry with an explanation; paste a YouTube link and the full matrix
-appears — with no client release.
-
-A `?url=` that **nothing** matches is not an error: the answer is the merged catalog with
-`provider: "merged"` and `match: null`, so a picker always has something to render. A URL no
-provider will take is reported when you try to add it, as `unsupported_url` (§4.1).
-
-Use `capabilities.formats` for the picker's static defaults and `catalog?url=` to refine it once a
-URL is known.
-
-#### The complete catalog shapes
-
-Every key below is **always present**; the same "optional means `null`, never absent" rule as
-`Item` applies. `naming` and `match.reason` are the only closed enums.
-
-`Catalog` (the top level):
-
-| Key | Type | Notes |
-|---|---|---|
-| `etag` | `string` | also sent as the `ETag` header |
-| `provider` | `string` | the provider whose catalog this is, or the literal `"merged"` for a query with no `?url=`. `"merged"` is not a legal provider id, and `match` is `null` on that same payload, so the two facts together are unambiguous. |
-| `match` | `{ score: integer, reason: string }` | `reason` ∈ `"host_contains" \| "host_regex" \| "path_regex" \| "forced" \| "fallback"`; only present for `?url=` queries, `null` for the merged catalog |
-| `runner_up` | `{ provider: string, score: integer } \| null` | the provider that would have been chosen next |
-| `naming` | `"template" \| "provider"` | `"template"` = the file name comes from `OUTPUT_TEMPLATE*`, so `custom_name_prefix` and `chapter_template` are meaningful. `"provider"` = the provider names the file itself and ignores those templates (StreamingCommunity does), so a picker should grey them out. Those are the only two values. |
-| `download_types` | `[DownloadTypeSpec]` | never empty |
-
-`DownloadTypeSpec`:
-
-| Key | Type |
-|---|---|
-| `id` | `string` — one of `"video" \| "audio" \| "captions" \| "thumbnail"` |
-| `label` | `string` |
-| `default_format` | `string` — always an `id` present in `formats` |
-| `formats` | `[FormatSpec]` |
-| `options` | `[OptionSpec]` — extra request fields this download type accepts, see below |
-
-`FormatSpec`:
-
-| Key | Type | Notes |
-|---|---|---|
-| `id`, `label` | `string` | `id` is what you send as `format` |
-| `default_quality` | `string` | always an `id` present in `qualities` |
-| `qualities` | `[QualitySpec]` | never empty |
-| `codecs` | `[{ id: string, label: string }]` | **empty means `codec` does not apply** — send `"auto"` and hide the control. Non-empty only for `download_type: "video"`. |
-| `notice` | `string \| null` | display text about the format as a whole. Always safe to show verbatim. |
-| `flags` | `FormatFlags` | see below |
-
-`QualitySpec`: `{ "id": string, "label": string, "notice": string | null }`. `notice` is
-per-quality display text — this is where `worst` says *"This selector currently resolves to the
-best available stream"* and `best_remux` says *"Re-encodes audio after download (slower; fixes
-SponsorBlock drift)"*.
-
-`FormatFlags` — four booleans, all always present:
-
-| Flag | Meaning for the UI |
-|---|---|
-| `advisory` | The server will accept your choice but may not honour it (a provider with one rendition). Show the `notice`; do not treat a mismatch as an error. |
-| `requires_ffmpeg` | Needs ffmpeg in the image. If `healthz.components.ffmpeg` is not `ok`, warn before offering it. |
-| `lossy_remux` | The output is re-encoded, not stream-copied. Worth saying so next to a "best quality" label. |
-| `slow` | Expect a `postprocessing` phase of minutes. Set expectations in the confirmation, not after. |
-
-`OptionSpec` — **this is the mechanism that satisfies "richer add options advertised by the
-server"**, so that `folder`, `custom_name_prefix`, `playlist_item_limit` and friends can grow
-without a client release. Each entry describes one extra key you may put in the `POST
-api/v2/downloads` body:
-
-| Key | Type | Notes |
-|---|---|---|
-| `id` | `string` | the **request body key** to send, e.g. `"playlist_item_limit"` |
-| `label` | `string` | control label |
-| `kind` | `OptionKind` | see below — this is what control to render |
-| `default` | any JSON value | matches `kind`. Send nothing and the server uses this. |
-| `choices` | `[{ id: string, label: string }]` | non-empty **only** for `kind.type == "enum"`; `[]` otherwise |
-| `help` | `string \| null` | one line of explanatory text |
-
-`OptionKind` is an externally-tagged object with a `type` discriminator and exactly five values:
-
-```json
-{ "type": "bool" }
-{ "type": "int",  "min": 0, "max": 1000 }
-{ "type": "enum" }
-{ "type": "text", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,34}$" }
-{ "type": "path" }
-```
-
-`int` always carries `min` and `max`. `text` always carries `pattern`, which may be `null`; when it
-is non-null it is a regex you should validate against before sending, because the server will
-reject a violation with `400 validation_failed` and that `id` as `field`. `path` is a
-server-relative directory — offer the values from `GET api/v2/custom-dirs` rather than a free-text
-field. `enum` is the only kind with a non-empty `choices`.
-
-A worked `options` array, the one the `ytdlp` video catalog ships:
-
-```json
-"options": [
-  { "id": "folder", "label": "Folder", "kind": { "type": "path" },
-    "default": null, "choices": [], "help": "Subdirectory of the download root." },
-  { "id": "custom_name_prefix", "label": "Filename prefix",
-    "kind": { "type": "text", "pattern": "^[^/\\\\]*$" },
-    "default": "", "choices": [], "help": null },
-  { "id": "playlist_item_limit", "label": "Playlist limit",
-    "kind": { "type": "int", "min": 0, "max": 10000 },
-    "default": 0, "choices": [], "help": "0 downloads the whole playlist." },
-  { "id": "auto_start", "label": "Start immediately", "kind": { "type": "bool" },
-    "default": true, "choices": [], "help": null },
-  { "id": "split_by_chapters", "label": "Split by chapters", "kind": { "type": "bool" },
-    "default": false, "choices": [], "help": "Writes one file per chapter." },
-  { "id": "ytdl_options_presets", "label": "Presets", "kind": { "type": "enum" },
-    "default": [], "choices": [ { "id": "sponsorblock", "label": "sponsorblock" },
-                                { "id": "archive", "label": "archive" } ],
-    "help": "Named yt-dlp option bundles the operator configured." }
-]
-```
-
-The `captions` download type additionally advertises `subtitle_language`
-(`text`, pattern `^[A-Za-z0-9][A-Za-z0-9-]{0,34}$`) and `subtitle_mode` (`enum`, four choices).
-
-Two notes on what is deliberately **not** here: `playlist_strict_mode` is advertised by neither
-catalog, because this fork never implemented it (it exists upstream and was never merged);
-`ytdl_options_overrides` is not an `OptionSpec` either, because it is a free-form object gated by
-the server's `allow_ytdl_options_overrides` flag in `capabilities.config`, not a control.
-
-**Rendering rule for an unknown `kind.type`:** skip the option entirely and do not send its key.
-The list is `non_exhaustive` on the server, and silently omitting a control you cannot render is
-always correct because every option has a server-side default.
-
-### 4.7 The rest of v2
-
-| Method | Path | Body / query | Success | Errors |
-|---|---|---|---|---|
-| GET | `healthz` | `?probe=deep` | `200` (see DESIGN §16.3); `"status"` ∈ `ok` \| `degraded` \| `down`, and each `components.<name>.status` additionally may be `starting` or `disabled`; `items` is the §5.3 `counts` object and is windowed the same way | `503` when the store is unusable |
-| GET | `livez` | — | `200 {"ok":true}` | — |
-| GET | `api/v2/subscriptions` | — | `200 {"subscriptions":[Subscription]}` | — |
-| POST | `api/v2/subscriptions` | an add body plus `check_interval_minutes` and an optional `name` (blank or absent means "name it after the channel") | `201 Subscription` | 400, 409 `conflict` |
-| PATCH | `api/v2/subscriptions/{id}` | `{name?, enabled?, check_interval_minutes?}` | `200 Subscription` | 400, 404 |
-| DELETE | `api/v2/subscriptions/{id}` | — | `204` | 404 |
-| POST | `api/v2/subscriptions/check` | `{"ids":[…]}` or `{}` | `202 {"job_id":"01JC…","count":3}` | 400 |
-| POST | `api/v2/subscriptions/{id}/check` | — | `202 {"job_id":…,"count":1}` | 404 |
-| POST | `api/v2/downloads/cancel-resolve` | `{"generation": 47}` or `{}` | `200 {"canceled":12,"generation":47,"seq":…}` | 400 |
-| GET | `api/v2/presets` | — | `200 {"presets":["sponsorblock","archive"]}` | — |
-| GET | `api/v2/custom-dirs` | — | `200 {"download_dir":["","Music"],"audio_download_dir":[…]}` | 404 when custom dirs are off |
-| GET | `api/v2/cookies` | — | `200 {"has_cookies":true,"bytes":1234,"updated_at":…}` | — |
-| POST | `api/v2/cookies` | `multipart/form-data`, field **`cookies`** | `200 {"has_cookies":true,"bytes":1234}` | 400, 413 |
-| DELETE | `api/v2/cookies` | — | `204` | 400 |
-| GET | `api/v2/ytdl-options` | — | `200 {"ok":true,"msg":"","update_time":1757000200.412,"keys":[…],"presets":[…]}` (values are redacted) | — |
-| POST | `api/v2/ytdl-options/reload` | — | `200 {"ok":true,"msg":"","update_time":…}` | — |
-| GET | `api/v2/import-report` | — | `200` the importer's report (DESIGN §7.6.6) | 404 when nothing was imported |
-| POST | `api/v2/items/clear` | `{"where":"done"}` or `{}`, optionally `{"delete_file": bool}` | `200 {"removed":[ids],"seq":…,"warnings":[…]}` | 400 |
-| GET | `api/v2/providers` | — | `200 {"providers":[{id,state,reason,version,capabilities,limits,argv}],"warnings":[…]}` | — |
-| POST | `api/v2/plugins/reload` | — | `200 {"added":[],"updated":[],"removed":[],"failed":[],"warnings":[]}` | — |
-| GET | `api/v2/resolve-preview` | `?url=` | `200 {"provider":…,"score":…,"reason":…,"runner_up":{…}}` | 400 |
-| GET | `api/v2/debug/options` | `?item_id=` or an add body | `200` the merged yt-dlp option dict, each key annotated with the layer it came from | 404 |
-| GET | `<p>download/*`, `<p>audio_download/*` | — | the file, with `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `Content-Type`, `X-Content-Type-Options: nosniff` | 404 |
-| GET | `<p>robots.txt` | — | text | — |
-| GET | `<p>` | — | `200 {"name":"aulos-server","version":…,"url_prefix":…,"protocol":"v2"}` — **unless** the `Accept` list contains `text/html`, which gets the web UI's `index.html` instead (§1.1). The only content-negotiated route; both branches carry `Vary: Accept` | — |
-| GET | `<p>assets/{app.css,app.js,icon.svg,icon-180.png}` | — | the web UI's assets, with `ETag`, `Cache-Control: no-cache`, `nosniff`, `no-referrer`; `304` on `If-None-Match` | 404 when `AULOS_WEB_UI=false` |
-| GET | `<p>manifest.webmanifest` | — | `200 application/manifest+json`, the PWA manifest | 404 when `AULOS_WEB_UI=false` |
-| GET | `<p>metrics` | — | Prometheus text, when enabled | 404 |
-
-`POST api/v2/downloads/cancel-resolve` is the v2 counterpart of the legacy `cancel-add`, and it is
-how you abort a 500-item playlist add that is still resolving. With `{"generation": n}` — the value
-from that add's `202` body (§4.1) — it cancels only that add's in-flight resolution and its
-not-yet-created children. With `{}` (or an absent/`null` `generation`) it cancels **every**
-in-flight resolution, which is exactly what the legacy route did. `canceled` is the number of
-resolution tasks and pending expansions it stopped; items already created keep their state, so
-follow it with a `delete` if you want them gone. Whether it is available is advertised as the
-`cancel_resolve` feature in `capabilities.features`.
-
-`POST api/v2/items/clear` is how a v2 client clears history in one call — the counterpart of the
-v1 `POST <p>delete {"where":"done"}`. Without it a v2-only deployment would have to delete rows one
-id at a time. `{"where":"done"}` and `{}` both mean "every terminal row" — `"done"` is the only accepted
-scope, and any other value is a `400 validation_failed` naming `where`. The optional
-`delete_file` (boolean) overrides `DELETE_FILE_ON_TRASHCAN` for this call; omitted or `null`
-means "follow the server configuration", and the shipped clients send an explicit `false` here as
-they do on `delete` (§4.2). It applies to **every** row the call removes, including the history
-that is far outside the `done` window — a clear never leaves a file behind with no row naming it.
-The response lists the ids that went, and each one
-also arrives as a `removed` frame with `reason: "cleared"` (§5.7).
-
-`api/v2/debug/options` is worth knowing about: it answers "why did my `YTDL_OPTIONS` not take
-effect?" by showing the fully merged dict with a per-key `source` label
-(`env` / `file` / `preset:<name>` / `request` / `aulos`).
-
-`api/v2/providers`' `warnings` and `plugins/reload`'s are the **non-fatal** problems of the last
-plugin scan, as `<dir>: <key>: <message>` — a clamped `limits.max_concurrent`, an auto-anchored
-`host_regex`, a `{cookies_file}` with nothing to point at. The fatal ones are elsewhere: a
-directory that produced nothing at all is in `failed`, and a manifest that produced only a matcher
-is a `degraded` entry in `providers`. `healthz` carries the same list as `plugin_warnings`.
-
-The file routes support `Range` and `If-Range`, so a client can stream or resume. A single byte
-range that cannot be satisfied is `416` with `Content-Range: bytes */<len>`; a `Range` header
-the server cannot parse, whose unit it does not know, or that asks for **several** ranges is
-ignored and the whole file comes back `200` (RFC 9110 §14.2). They are behind the same auth as
-everything else.
-
-Every file is served with `X-Content-Type-Options: nosniff`. Audio, video, images and the two
-subtitle types keep their real `Content-Type` and render inline; **anything else** — an
-`.html`, an `.svg`, a stray text file — is served as `application/octet-stream` with
-`Content-Disposition: attachment`, because the download tree shares an origin with this API.
-Media playback and `Range` are unaffected.
-
----
-
-### 4.8 Devices — push registration
-
-Four routes, all behind the same auth as the rest of `api/v2`, all idempotent, all answering
-`204 No Content` with an empty body. They are the whole write surface the iOS client needs for
-APNs: one call when the app receives a device token, one when it starts a Live Activity for a
-download, and the two deletes that undo them.
-
-| Method | Path | Body | Success | Errors |
-|---|---|---|---|---|
-| PUT | `api/v2/devices/{token}` | the registration object below | `204` | 400, 401 |
-| DELETE | `api/v2/devices/{token}` | — | `204` (also for a token that was never registered) | 400, 401 |
-| PUT | `api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}` | `204` | 400, 401, **404** when the device is unknown |
-| DELETE | `api/v2/devices/{token}/live-activities/{item_id}` | — | `204` (also when nothing was registered) | 400, 401 |
-
-The registration body:
+Batch fields override shared defaults:
 
 ```json
 {
-  "platform": "ios",
-  "bundle_id": "com.tatoalo.aulos",
-  "environment": "sandbox",
-  "alerts": true,
-  "live_activity_start_token": "<hex>",
-  "install_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
-  "app_version": "1.0.0 (3)"
+  "items": [{"url":"https://example.org/a"},{"url":"https://example.org/b"}],
+  "defaults": {"format":"mp4","quality":"1080"}
 }
 ```
+
+The `202` response contains:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `platform` | string, required | `"ios"`. Anything else is `400 validation_failed`. |
-| `bundle_id` | string, required | the app's bundle identifier, which is also the `apns-topic` the server pushes with. It must be the server's `APNS_TOPIC` (default `com.tatoalo.aulos`) or an extension of it — `<APNS_TOPIC>.something`, which is how a widget or App Clip is named. Anything else is `400 validation_failed` on `bundle_id`: the field decides which app the operator's provider key signs a push for, so the server has an opinion about it. |
-| `environment` | string, required | `"sandbox"` or `"production"` — which APNs gateway minted the token. A Debug/simulator build is `sandbox`, a TestFlight/App Store build is `production`. Getting it wrong makes every push fail inside APNs, so it is validated. |
-| `alerts` | boolean, optional | whether completion/failure alerts are wanted. Absent or `null` means `true`. |
-| `live_activity_start_token` | string or `null`, optional | the Live Activity **push-to-start** token (iOS 17.2+), when the app has one. `null` clears a previously reported one. |
-| `install_id` | string or `null`, optional | **which installation of the app this device is** — the same value you send as `X-Aulos-Install` (§1.3), same shape: 8–64 characters of `[A-Za-z0-9._-]`. Absent or `null` is "this build does not report one". Unlike the header, a malformed value here is a `400 validation_failed` on `install_id`: a header a proxy mangled must not break an add, but a device registered under the wrong install would just go quiet weeks later with nothing in any log. |
-| `app_version` | string or `null`, optional | free-form, for the server's logs. At most 64 characters. |
+| `id` | string | First new ID, or first existing duplicate ID. |
+| `ids` | array of strings | Newly accepted IDs in request order. |
+| `generation` | integer | Resolution generation for cancel-resolve. |
+| `seq` | integer | Response cursor hint; see section 6.4. |
+| `duplicates` | array | Objects with `url` and `existing_id`. |
+| `warnings` | array of strings | Ignored request fields and other validation warnings. |
 
-**A registered device is not pushed for every download.** The server *starts* an activity and sends
-an alert for items whose `source.kind` is `"ios"` — i.e. the ones added with
-`X-Aulos-Client: ios/<version>` (§1.3) — and for nothing else, so a Telegram add is announced by the
-bot and a web add by nobody. `alerts` is a further filter on top of that, not an override. An
-operator can widen it server-side with `APNS_PUSH_ALL=true`; there is no client-visible way to ask
-for it, and none is needed, because a client that wants a push simply sends the header on its adds.
+The default dedupe mode returns an existing active item with the same URL and selection.
+An entirely deduplicated batch has an empty `ids` array. `strict` mode can return `409`.
 
-**And not every registered device is pushed for an iOS download.** When the item carries an install
-in `source.ref` (`X-Aulos-Install`, §1.3), the alert and the push-to-start go only to the devices
-registered with a matching `install_id` — so a download started on the phone does not light up the
-iPad. The two legacy shapes both mean "every alerting device", which is the behaviour that shipped
-before either field existed: a `source.ref` of `null` (an app build that did not send the header),
-and `APNS_PUSH_ALL=true`. A device whose registration has no `install_id` therefore hears about
-every `null`-ref item and about none of the items a header-sending build added — send the field and
-the header together, from every target of the app, and the question does not arise.
-**Updating and ending a Live Activity are never filtered:** an activity registered through the
-route below is updated and then closed whatever added the item — the registration is the request —
-and an item that had one also gets the completion alert, because a `PUT` here is the app saying it
-is watching that download.
+The accepted row is persisted before acknowledgment. Its published snapshot and `added` event
+follow asynchronously. Reconcile by ID; do not require the row to appear in the first state read.
 
-`{token}` and the two token fields are **hexadecimal, 32 to 200 characters**. They are lowercased
-on the way in, so a `DELETE` whose token a client happened to uppercase still finds the row it
-registered. `{item_id}` is validated as a ULID but **need not name an item that exists** — the app
-starts a Live Activity the moment the user taps download, which can beat the server's own row.
+For iOS attribution, send `X-Aulos-Client: ios/<version>` and the install header. The same install
+ID belongs in device registration. Other clients use `source.kind=api_v2`.
 
-`PUT api/v2/devices/{token}` is an upsert keyed on the token: a repeat call refreshes every field
-except the server's record of when the token was *first* seen. That is the call the app makes on
-every launch. `DELETE api/v2/devices/{token}` forgets the device **and every Live Activity
-registered under it**; deleting an item likewise forgets the Live Activity registrations for it and
-for its children, so a client never has to clean those up itself.
+### 4.2 Actions
 
-The `PUT` on a live activity is the one route here that can `404`: without a registered device the
-server does not know which gateway to push to, so the registration would be undeliverable. Register
-the device first. The matching `DELETE` is a `204` even then — the caller wants the registration
-gone and it is gone.
-
-Because the success answer is `204`, there is nowhere to return a `warnings` list: a field this
-build does not know is ignored (and logged), never a `400`. §4.1's forward-compatibility rule
-therefore still holds — a newer client is never rejected for saying more than the server
-understands.
-
-#### Live Activity content state
-
-The server sends Live Activity pushes for items that have a registration: a `start` when the item
-first leaves `queued` for an active status, `update`s as it progresses, and an `end` when it
-settles. Every one of them carries the same `content-state` object, and an app's
-`ActivityAttributes.ContentState` must decode exactly these seven keys — all of them always
-present, `camelCase`, `null` where the value is unknown:
+`POST api/v2/items/actions`:
 
 ```json
-{
-  "status": "downloading",
-  "percent": 42.5,
-  "speed": 2100000.0,
-  "eta": 68,
-  "downloadedBytes": 123,
-  "totalBytes": 456,
-  "message": "Merging formats"
-}
+{"action":"cancel","ids":["01JBQ7Z5T9K3M2R8V4XW6Y0AAA"]}
 ```
 
-| Key | Type | Meaning |
+| Action | Effect |
+|---|---|
+| `start` | Start queued/resolving work; retry failed or canceled work. Finished items are skipped. |
+| `pause` | Stop and park eligible work, keeping partial files. Resolving and terminal items are skipped. |
+| `cancel` | Stop eligible work, remove scratch files and mark canceled. |
+| `retry` | Requeue an eligible failed or canceled item and increase its attempt count. |
+| `delete` | Remove the record, canceling active work first. Optionally remove its files. |
+
+For delete, `delete_file` overrides `DELETE_FILE_ON_TRASHCAN`. Send an explicit false to preserve
+files. Deleting a group deletes its children. Archived history IDs remain valid action targets.
+
+The `200` response has `applied` IDs, `skipped` objects with `id` and `reason`, and `seq`.
+Skip reasons are `not_found`, `already_terminal`, `not_cancelable`, `not_startable`,
+`not_retryable` and `not_pausable`.
+
+`DELETE api/v2/items/{id}?delete_file=false` is the single-item form and returns `204`.
+
+### 4.3 State
+
+`GET api/v2/state` returns a snapshot. It contains:
+
+| Field | Type | Meaning |
 |---|---|---|
-| `status` | string | the v2 status word (§3.1). |
-| `percent` | number | `0`–`100`, always a number. |
-| `speed` | number or `null` | bytes per second. |
-| `eta` | integer or `null` | seconds remaining. |
-| `downloadedBytes` | integer or `null` | bytes written so far. |
-| `totalBytes` | integer or `null` | the expected total. |
-| `message` | string or `null` | the live stage line — the same text as `item.msg` (§2.3). |
+| `mode` | string | `snapshot`. |
+| `seq` | integer | Published state cursor. |
+| `boot_id` | string | Server process ID. |
+| `server_time` | integer | Unix milliseconds. |
+| `protocol` | object | `batch_ms`, `urgent_ms`, `replay_frames`, `delta_semantics`. |
+| `counts` | object | Counts by each of the eight statuses in the published window. |
+| `done_total` | integer | Total terminal records, including older history. |
+| `truncated` | object | `done` indicates older history; `groups` is empty in this build. |
+| `items` | array of Item | Active records and group records. |
+| `done` | array of Item | Recent terminal window. |
+| `subscriptions` | array of Subscription | Current subscriptions. |
+| `ytdl_options` | object | `ok`, `msg`, `update_time`. |
+| `health` | object | Roll-up `status` and component-name to status map. |
 
-The push envelopes themselves are APNs concerns rather than protocol ones (`event` is `start`,
-`update` or `end`; the `end` push carries a `dismissal-date`), and the attributes a `start` push
-declares are `AulosDownloadAttributes` with `itemId`, `url` and `title`.
+`done=false` omits terminal window entries, but `counts` still describes the published window.
+Use `GET api/v2/items?status=<status>` and its `total` for database-wide status counts.
 
-Two Apple-side keys ride on an **`update`** envelope and nowhere else. They are not this protocol's
-wire fields — iOS consumes them before your code sees the payload — but an app's widget is written
-against them, so they are named here:
+`GET api/v2/state?since=<seq>&boot=<boot_id>` returns one of:
 
-- **`stale-date`**, unix seconds, `now + 45`. iOS flips `ActivityViewContext.isStale` at that
-  instant; a widget should then render a muted "waiting for the server" state instead of a number
-  it can no longer vouch for. The server refreshes a moving download about every five seconds, so
-  a stale activity means nine frames in a row did not land.
-- **`relevance-score`**, `0.0`–`1.0`, the item's `percent / 100`. iOS orders concurrent live
-  activities by it, so the download closest to finishing sorts first.
+- `snapshot`: the cursor cannot be resumed.
+- `up_to_date`: the cursor equals the head; the body also has `seq` and `boot_id`.
+- `delta`: the body has `seq`, `boot_id`, `from`, `added`, `completed`, `removed` and
+  `delta: {items: [...]}`.
 
-An `update` carries the freshest progress the server has published for the item, not the numbers
-that happened to accompany a status change — a download whose status has not moved for a minute
-still reports a moving `percent`.
+For a delta response, apply added items, completed items, removal groups, then patches.
+`removed` is an array of `{ids, reason}` objects. REST catch-up folds item changes; fetch
+subscriptions, options and health separately when polling those surfaces.
 
----
+The state ETag is `W/"<boot_id>-<seq>"` for that response's cursor.
+An unchanged `If-None-Match` request returns `304` with no body.
+
+### 4.4 Items and history
+
+`GET api/v2/items` accepts `status` (comma-separated), `kind`, `group_id`, `q` (title substring),
+`order` (`ord`), `limit` (default 200, maximum 1000), and opaque `cursor`.
+
+The response contains `items`, nullable `next_cursor`, database-wide `total`, and `seq`.
+Continue until `next_cursor` is null. Use `group_id` to fetch children beyond the terminal window.
+
+`GET api/v2/items/{id}` returns a full item or `404`.
+`GET api/v2/items/{id}/file` returns a `302` file redirect or `404` if no output is known.
+
+### 4.5 Capabilities
+
+`GET api/v2/capabilities` returns server identity, configuration for clients and discovery data.
+It supports ETag validation.
+
+| Field | Contents |
+|---|---|
+| `version`, `yt_dlp` | Server version and nullable yt-dlp version. |
+| `url_prefix`, `boot_id` | Effective prefix and current process ID. |
+| `protocol` | `v2`, `ws_path`, `ws_subprotocol`, `batch_ms`, `urgent_ms`, `delta_semantics`. |
+| `features` | Supported feature names. |
+| `actions` | `start`, `pause`, `cancel`, `retry`, `delete`. |
+| `formats` | Flat `{id, text, download_type, qualities: [{id, text}]}` entries. |
+| `download_types`, `codecs`, `subtitle_modes` | Supported values. |
+| `presets` | Preset names. |
+| `providers` | Provider summaries, including state and degradation reason. |
+| `config` | Public request defaults and UI settings listed below. |
+
+Config keys are `custom_dirs`, `create_custom_dirs`, `allow_ytdl_options_overrides`,
+`default_option_playlist_item_limit`, `subscription_default_check_interval`,
+`output_template_chapter`, `public_host_url`, `public_host_audio_url`, `default_theme`,
+`max_concurrent_downloads`, `delete_file_on_trashcan`, `clear_completed_after`,
+`default_download_type`, `default_format` and `default_quality`.
+
+Formats are assembled from registered catalogs. Use the per-URL catalog when the URL is known.
+
+### 4.6 Catalog
+
+`GET api/v2/catalog` returns a merged catalog. Add `?url=<encoded-url>` to select the matching
+provider. An unmatched URL gets the merged catalog; malformed URLs are rejected.
+
+| Field | Type |
+|---|---|
+| `etag` | string |
+| `provider` | provider ID or `merged` |
+| `match` | `{score: integer, reason: string}` or null |
+| `runner_up` | `{provider: string, score: integer}` or null |
+| `naming` | `template` or `provider` |
+| `download_types` | array of DownloadTypeSpec |
+
+Match reasons include `host_contains`, `host_regex`, `path_regex`, `forced` and `fallback`.
+`naming=provider` means the provider controls filenames instead of output templates.
+
+| Type | Fields |
+|---|---|
+| DownloadTypeSpec | `id`, `label`, `default_format`, `formats`, `options` |
+| FormatSpec | `id`, `label`, `default_quality`, `qualities`, `codecs`, nullable `notice`, `flags` |
+| QualitySpec | `id`, `label`, nullable `notice` |
+| FormatFlags | Boolean `advisory`, `requires_ffmpeg`, `lossy_remux`, `slow` |
+| OptionSpec | `id`, `label`, `kind`, `default`, `choices`, nullable `help` |
+
+IDs and labels are strings. Collections are arrays. `codecs` and `choices` contain `{id, label}`
+objects. Empty codecs mean the selection uses `auto`. Default format and quality values name
+entries in the corresponding arrays.
+
+Option kinds use a `type` discriminator: `bool`, `int` with `min` and `max`, `enum`, `text` with
+nullable regex `pattern`, or `path`. Option IDs are add-request field names. Unknown option kinds
+can be omitted because the server supplies defaults. Display relevant notices and flags.
+
+### 4.7 Other routes
+
+| Method | Path | Input | Success |
+|---|---|---|---|
+| GET | `healthz` | Optional `probe=deep` | Component health; 503 if the store is unusable. |
+| GET | `livez` | None | `200 {"ok":true}`. |
+| GET | `api/v2/subscriptions` | None | `200 {"subscriptions":[...]}`. |
+| POST | `api/v2/subscriptions` | Add options, optional name and interval | `201 Subscription`. |
+| PATCH | `api/v2/subscriptions/{id}` | `name`, `enabled`, `check_interval_minutes` | `200 Subscription`. |
+| DELETE | `api/v2/subscriptions/{id}` | None | `204`. |
+| POST | `api/v2/subscriptions/check` | `{}` or `{"ids":[...]}` | `202 {"job_id":"...","count":1}`. |
+| POST | `api/v2/subscriptions/{id}/check` | None | `202` with job ID and count. |
+| POST | `api/v2/downloads/cancel-resolve` | Optional `generation` | `200` with `canceled`, `generation`, `seq`. |
+| GET | `api/v2/presets` | None | `200 {"presets":[...]}`. |
+| GET | `api/v2/custom-dirs` | None | Download and audio directory arrays; 404 if disabled. |
+| GET | `api/v2/cookies` | None | `has_cookies`, `bytes`, `updated_at`. |
+| POST | `api/v2/cookies` | Multipart field `cookies` | `200` with `has_cookies` and `bytes`. |
+| DELETE | `api/v2/cookies` | None | `204`. |
+| GET | `api/v2/ytdl-options` | None | `ok`, `msg`, `update_time`, `keys`, `presets`. |
+| POST | `api/v2/ytdl-options/reload` | None | `200` with `ok`, `msg`, `update_time`. |
+| GET | `api/v2/import-report` | None | Stored import report, or 404 if absent. |
+| POST | `api/v2/items/clear` | `{}` or `where: "done"`; optional `delete_file` | `200` with removed IDs, `seq`, `warnings`. |
+| GET | `api/v2/providers` | None | Provider details and scan warnings. |
+| POST | `api/v2/plugins/reload` | None | `added`, `updated`, `removed`, `failed`, `warnings`. |
+| GET | `api/v2/resolve-preview` | `url` query | Provider match and runner-up. |
+| GET | `api/v2/debug/options` | Optional `item_id` query | Layered user options with values and source labels. |
+
+Cancel-resolve without a generation cancels all active resolution. It does not delete items
+already created. Clear removes terminal history, including rows outside the published window.
+Send `delete_file=false` to preserve files. The server default otherwise applies.
+
+Debug options are redacted and describe user-option layering. They are not the complete final
+provider or shim invocation. Provider reloads affect new provider jobs; hooks require restart.
+
+File routes are `download/*` and `audio_download/*`. They support `Range`, `If-Range`, ETag and
+Last-Modified. An unsatisfiable single range returns `416` with `Content-Range: bytes */<size>`.
+Malformed and multiple ranges are ignored and return the full file. Content outside the inline
+media allowlist is served as an attachment.
+
+The root, `robots.txt`, `assets/*` and `manifest.webmanifest` are described in sections 1.1 and
+1.4. UI assets return `404` when the UI is disabled. `/metrics` always returns `404`.
+
+### 4.8 Devices
+
+These routes support push for the iOS app (private alpha). All require normal API authentication.
+Successful calls return `204` without a body.
+
+| Method | Path | Input |
+|---|---|---|
+| PUT | `api/v2/devices/{token}` | Registration below. |
+| DELETE | `api/v2/devices/{token}` | None; also removes that device's activities. |
+| PUT | `api/v2/devices/{token}/live-activities/{item_id}` | `{"update_token":"<hex>"}`. |
+| DELETE | `api/v2/devices/{token}/live-activities/{item_id}` | None. |
+
+Registration fields:
+
+| Field | Type | Rule |
+|---|---|---|
+| `platform` | string | Required; `ios`. |
+| `bundle_id` | string | Required; `APNS_TOPIC` or an extension under that prefix. |
+| `environment` | string | Required; `sandbox` or `production`, matching the token's gateway. |
+| `alerts` | boolean or null | Defaults to true. |
+| `live_activity_start_token` | string or null | Push-to-start token. Null clears it. |
+| `install_id` | string or null | Same format as `X-Aulos-Install`; invalid values are rejected. |
+| `app_version` | string or null | At most 64 characters. |
+
+Tokens contain 32 to 200 hexadecimal characters and are normalized to lowercase. Item IDs must
+be ULIDs but need not exist yet. Register the device before its activity; an unknown device on
+activity PUT returns `404`. Deletes are idempotent.
+
+PUT replaces device registration fields while preserving its first-seen time. Unknown fields are
+ignored. Device and activity tokens reported invalid by APNs are pruned.
+
+By default, iOS-origin items target devices with a matching install ID. A null item install ID
+allows all eligible devices. `APNS_PUSH_ALL` widens routing. Existing activities are updated and
+ended regardless of origin filters. See [push setup](integrations.md#ios-push-notifications).
+
+Live Activity `content-state` uses these seven keys:
+
+```json
+{"status":"downloading","percent":42.5,"speed":2100000.0,"eta":68,"downloadedBytes":123,"totalBytes":456,"message":null}
+```
+
+`status` is a string and `percent` is a number. Speed, ETA, byte counts and message may be null.
+Start attributes use `AulosDownloadAttributes` with `itemId`, `url` and `title`.
+Update envelopes set `stale-date` to 45 seconds ahead and `relevance-score` to percent divided by
+100. Progress updates use the current published snapshot. End pushes include a dismissal date.
 
 ## 5. WebSocket
 
 ### 5.1 Connecting
 
-```
-GET <p>ws
-Upgrade: websocket
-Sec-WebSocket-Protocol: aulos.v2
-Cookie: <your session cookies>
-```
+Connect to `<base>/ws` with subprotocol `aulos.v2`. Use `since` and `boot` together to resume.
+`done=false` omits the terminal window from snapshots. The `groups` parameter is accepted but
+ignored. Authentication is covered in section 1.4.
 
-Query parameters, all optional:
+Server application frames are JSON text with `t` and integer `seq`. The server sends transport
+pings every 20 seconds and closes after 60 seconds without a pong or data. Compression is not
+negotiated.
 
-| Param | Type | Meaning |
-|---|---|---|
-| `since` | integer | resume from this `seq` instead of taking a fresh snapshot |
-| `boot` | string | the `boot_id` your `since` came from. **Required whenever you send `since`**: absent, empty, not a ULID, or simply not this server's `boot_id` all force a snapshot (§6.2). |
-| `done` | boolean, default `true` | include the completed window in the snapshot |
-| `groups` | comma list of ids | pre-subscribe to these groups' children |
-| `token` | string | the bearer token, when the proxy cannot forward cookies |
+Close codes include `1001` for shutdown, `1013` for overload or a slow consumer, and `1009` for a
+client frame over 1 MiB. Reconnect with backoff.
 
-Text frames only, one JSON object per frame. Every server frame has `t` (the type) and `seq` (a
-`u64`).
+### 5.2 Frame types
 
-The server sends a WebSocket-level `Ping` every 20 s and closes the connection if it sees no `Pong`
-or data for 60 s. Close codes you may see: `1001` (server shutting down — reconnect),
-`1013` (you were too slow, or there are too many clients — back off and reconnect),
-`1009` (you sent a frame larger than 1 MiB).
-
-Compression is not negotiated. Frames are 200–900 bytes; you do not need it.
-
-### 5.2 Frame catalogue
-
-| `t` | Cadence | Payload |
-|---|---|---|
-| `snapshot` | once on connect, and after the server detects you fell behind | the complete state, same `Item` shape as REST |
-| `resume` | once instead of `snapshot`, when your `since` was resumable | a summary of what follows |
-| `delta` | every `batch_ms` (250 ms default) for numeric changes; within `urgent_ms` (25 ms) when a text field (`msg`, `title`, `phase`) changed | changed fields only |
-| `added` | prompt, within `urgent_ms` (25 ms) | full `Item` objects (an **upsert**) |
-| `completed` | prompt | full `Item` objects, terminal |
-| `removed` | prompt | ids and a reason; **one frame per distinct reason** in a flush (§5.7) |
-| `subscription` / `subscription_removed` | prompt | the envelopes are in §5.9; the `Subscription` object itself is §9 |
-| `ytdl_options` | prompt | the options-file reload result |
-| `providers` | prompt | a plugin reload report |
-| `notice` | prompt | a human-readable warning (stall, timeout, POT) |
-| `health` | on a component status change only | what changed |
-| `pong` | on demand | your RTT probe, echoed |
-| `error` | on demand | a protocol or auth error, usually followed by a close |
-
-`seq` **never decreases** on a socket, and a jump of more than 1 does not mean you lost anything —
-every broadcast frame is delivered in order, and gaps only appear across a reconnect.
-
-It is *strictly* increasing across the ten **broadcast** kinds only: `delta`, `added`, `completed`,
-`removed`, `subscription`, `subscription_removed`, `ytdl_options`, `providers`, `notice`, `health`.
-Those are the frames the server publishes once, to every socket, and each one consumes exactly one
-`seq` from the shared counter and goes into the replay ring that `?since=` reads.
-
-The other four kinds are **per-connection**: they are written to your socket only, they are not in
-the ring, and they therefore **restate a cursor rather than allocating one**. Two of them in a row
-with nothing happening in between carry the *same* number, and that is not a bug:
-
-| `t` | The `seq` it carries |
+| Type | Payload |
 |---|---|
-| `snapshot` | the cursor the snapshot's own generation is current as of — the `seq` in its body |
-| `resume` | `to`, the end of the folded window (or `since` itself when you were already current) |
-| the frames folded **inside** a `resume` (§6.3) | the same `to` as the `resume` that announced them — they replay a window, they are not new frames |
-| `pong`, `error` | the server's current head, the same number `X-Aulos-Seq` reports on a REST call at that instant |
+| `snapshot` | Current state. |
+| `resume` | Summary of the catch-up frames that follow. |
+| `added` | Full item upserts and a reason. |
+| `completed` | Full terminal item upserts. |
+| `removed` | IDs and a removal reason. |
+| `delta` | Changed item fields. |
+| `subscription` | Full subscription upsert. |
+| `subscription_removed` | Subscription IDs. |
+| `ytdl_options` | Options reload status. |
+| `providers` | Provider reload report. |
+| `notice` | Warning or information. |
+| `health` | Component status changes. |
+| `pong` | Echoed ping value and server time. |
+| `error` | Connection protocol error. |
 
-So `resume{to:1203}` followed by `added seq 1203` and `delta seq 1203`, or `completed 1240` then
-`pong 1240` then `error 1240`, is exactly the contract. Allocating fresh numbers for these would be
-worse, not better: a per-connection frame would consume a global `seq` every time any client
-pinged, and a resuming client's fold would end at a cursor that disagreed with the `to` §6.3 tells
-it to store.
+Broadcast frames allocate sequence numbers. Snapshots, resume summaries, folded catch-up frames,
+pong and error frames can reuse a cursor. Do not discard a frame just because its cursor equals
+the preceding one.
 
-**The client rule is one line:** advance your stored cursor to `max(stored, frame.seq)` and never
-treat `frame.seq == stored` as a duplicate to drop.
+### 5.3 Snapshot
 
-### 5.3 `snapshot`
+A WebSocket snapshot uses the state fields from section 4.3 with `t: "snapshot"` and without
+`mode`. It also includes `server` identity. Replace local item and subscription state when it
+arrives, including after a lag resync.
 
-```json
-{ "t": "snapshot",
-  "seq": 10251,
-  "mode": "snapshot",
-  "boot_id": "01JBQ8YQ2E0000000000000000",
-  "server_time": 1757000000123,
-  "server": { "version": "2026.09.04", "yt_dlp": "2026.8.30.232658.dev0",
-              "url_prefix": "/", "started_at": 1756956799000 },
-  "protocol": { "batch_ms": 250, "urgent_ms": 25, "replay_frames": 512,
-                "delta_semantics": "absent-key-means-unchanged" },
-  "counts": { "queued": 486, "resolving": 0, "preparing": 0, "downloading": 3,
-              "postprocessing": 0, "finished": 401, "error": 10, "canceled": 3 },
-  "done_total": 4211,
-  "truncated": { "done": true, "groups": ["01JBQ8AA0000000000000000GG"] },
-  "items": [ /* Item objects, ord ascending: everything non-terminal, plus groups */ ],
-  "done":  [ /* Item objects, ord ascending: the most recent completed/failed/cancelled */ ],
-  "subscriptions": [ /* Subscription objects, §9 */ ],
-  "ytdl_options": { "ok": true, "msg": "", "update_time": 1757000200.412 },
-  "health": { "status": "ok", "components": { "pot": "ok", "store": "ok", "ytdl_options": "ok" } } }
-```
+Active group children are included. `truncated.groups` is always empty in this build. Terminal
+history is still bounded by `AULOS_MEM_DONE_ITEMS` and is paged through REST.
 
-- `mode` is always `"snapshot"`, and is the same key `GET api/v2/state` answers with (§4.3). It is
-  on the frame too so that one decoder handles both surfaces: a REST caller branches on `mode`, a
-  socket caller branches on `t`, and the body is otherwise byte-for-byte the same object.
-- `items` and `done` are two arrays purely so the completed window can be omitted with
-  `?done=false`. **They hold the same object type.** Concatenate them if you want one list.
-- `counts` is a histogram over `items` + `done` — **this snapshot's own arrays**, not the database.
-  `items` holds every non-terminal record, so `queued`, `resolving`, `preparing`, `downloading` and
-  `postprocessing` are exact. The three terminal counters are not: they only count what is inside
-  the in-memory done window, which holds the most recent `AULOS_MEM_DONE_ITEMS` terminal records
-  (500 by default) across *all* terminal statuses. Five hundred newer `canceled` rows evict every
-  `finished` row from the window, and `counts.finished` goes to `0` while
-  `GET api/v2/items?status=finished` still answers `"total": 30`. Use `done_total` for the total
-  number of terminal records and `GET api/v2/items?status=…`'s `total` when you need an exact
-  per-status number; `counts` is what the window says, cheaply, and it is what `healthz.items`
-  reports too.
-- `truncated.done: true` means `done` is a window, not the whole history: there are `done_total`
-  completed records and you are seeing the most recent ones. Page the rest with
-  `GET api/v2/items?status=finished,error,canceled&cursor=…` when the user scrolls.
-- `truncated.groups` lists the ids of groups whose children were **not** included because the
-  group is large. Those groups have `children_inline: false`. Fetch their children on demand with
-  `GET api/v2/items?group_id=<id>` or with a `watch` frame (§5.11).
-- `ytdl_options` and `health` are the **current** values of the two things that are otherwise only
-  announced on change (§5.9). They are in the snapshot because both frames are transition-only:
-  without them, a client connecting while the POT sidecar is down or the options file is broken
-  would see nothing on the socket and would have to additionally call `GET healthz` and
-  `GET api/v2/ytdl-options`. (The legacy server pushed `ytdl_options_changed` on connect for
-  exactly this reason.) `ytdl_options` is the `ytdl_options` frame's payload minus `t`/`seq`;
-  `health` is the abridged form — `status` plus a flat
-  `component → "starting" | "ok" | "degraded" | "down" | "disabled"` map. `"starting"` means
-  the component is initializing and has no probe result yet; it is neutral and must not show a
-  failure warning. `"disabled"` means the component is
-  **not configured** rather than unwell — `jellyfin`, `nfo` and `telegram` report it when their
-  integration is switched off — and it never drags the roll-up `status` below `ok`, so treat it
-  exactly like `ok` unless you are drawing the component list itself. The roll-up `status` stays
-  `ok | degraded | down`. Call `GET healthz` for the detail behind a non-`ok` component. Both keys
-  are always present.
-- `protocol` is self-describing on purpose: read `batch_ms` if you want to size an animation, and
-  read `delta_semantics` to assert you and the server agree.
-
-### 5.4 `delta`
+### 5.4 Delta
 
 ```json
-{ "t": "delta", "seq": 10252, "ts": 1757000000373,
-  "items": [
-    { "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
-      "percent": 43.9, "speed": 3210000.0, "eta": 61, "downloaded_bytes": 45613056 },
-    { "id": "01JBQ9BBEEEE0000000000000C",
-      "status": "postprocessing", "percent": 100.0, "speed": null, "eta": null,
-      "phase": "remux", "msg": "Merging formats" }
-  ] }
+{"t":"delta","seq":42,"ts":1794900000000,"items":[{"id":"01JBQ7Z5T9K3M2R8V4XW6Y0AAA","percent":43.9,"msg":null}]}
 ```
 
-**Merge rules — this is the contract:**
+Find the item by ID and replace only present keys. An explicit null clears the value. Ignore
+patches for unknown IDs. A delta never creates a record and never changes immutable request
+fields. Numeric changes use `batch_ms`; text and status changes use the urgent cadence. An idle
+server emits no deltas.
 
-| On the wire | Meaning |
+### 5.5 Added
+
+An `added` frame has `items` containing full objects and a `reason`: `created`, `expanded`,
+`retried` or `recovered`. Upsert by ID regardless of reason. Group promotion preserves the ID and
+order of the provisional item and arrives as an upsert, without a removal.
+
+### 5.6 Completed
+
+A `completed` frame has `items` containing full objects with `finished`, `error` or `canceled`
+status. Upsert them. Read status to determine the outcome.
+
+### 5.7 Removed
+
+```json
+{"t":"removed","seq":43,"ids":["01JBQ7Z5T9K3M2R8V4XW6Y0AAA"],"reason":"deleted"}
+```
+
+Reasons are `deleted`, `cleared`, `auto_cleared` and `group_cascade`. A flush can contain one frame
+for each reason, in that order. Remove IDs that exist locally and ignore unknown IDs.
+
+### 5.8 Notice
+
+Notice fields are `level`, `code`, nullable item `id`, and `message`. Levels are `info`, `warning`
+and `error`. Codes include `stalled`, `job_timeout`, `pot_down`, `provider_degraded`,
+`import_warning` and `plugin_note`. Notices do not change item state. Allow new codes.
+
+### 5.9 Other broadcast payloads
+
+| Type | Fields besides `t` and `seq` |
 |---|---|
-| key absent | the field is **unchanged** since the last frame that mentioned this id |
-| key present, non-null | the new value |
-| key present, `null` | the field changed **to** null (e.g. `speed` cleared when a job leaves `downloading`) |
+| `subscription` | `subscription`: full object from section 9. Upsert by ID. |
+| `subscription_removed` | `ids`: array of subscription IDs. |
+| `ytdl_options` | `ok`, `msg`, `update_time` (epoch seconds or null). |
+| `providers` | `added`, `updated`, `removed`, `failed`, and scan warnings when included. Refresh catalogs. |
+| `health` | Roll-up `status`, plus `changed` entries with `component`, `from`, `to`, `detail`. |
 
-`id` is always present. Every other key is optional. So the merge is: for each object in `items`,
-find your record by `id` and overwrite exactly the keys that are present. In Swift, decode a
-delta into a dictionary-shaped intermediate (or a struct of double-optionals) — **not** into your
-`Item` type, because your `Item` type cannot distinguish "absent" from "null".
+Component health values are `ok`, `degraded`, `down`, `starting` and `disabled`.
+Starting and disabled components do not worsen the roll-up. Health frames are emitted on changes.
 
-A `delta` never contains an id you have not seen, **with exactly one exception**: additions always
-arrive in an `added` frame first, because the server's flush order is
-`added → completed → removed → delta` (§4.3). A `delta` never adds or removes records.
-
-The exception is the children of a large group. Frames are serialised once and shared by every
-connected client, so the server does not filter them per connection: a running child of a group
-whose `children_inline` is `false` (§5.3, §2.3) produces a `delta` that reaches you even though you
-never received an `added` for it. This costs you nothing — the apply step in §7 already skips a
-patch whose id it does not know, which is the correct behaviour — and it is why that `guard … else
-{ continue }` line is not defensive padding. If you want those rows, `watch` the group (§5.11);
-the `added` frames you get back then make the subsequent patches applicable.
-
-A `delta` also never contains `selection`, `folder` or `request`: those are fixed at insert and are
-carried only by `added`/`completed`/`snapshot`. Nor does it contain `id`-adjacent identity fields
-(`kind` does change — exactly once, on a group promotion — but that arrives as an `added` upsert,
-§5.5, not as a patch).
-
-**Text fields are prompt, not batched.** A change to `msg`, `title` or `phase` is flushed within
-`urgent_ms` (25 ms) like a status change, not held for the next 250 ms tick. That matters because
-`msg` is the only feedback during a long pre-download phase — e.g. StreamingCommunity's
-`"Starting N_m3u8DL-RE download..."` then `"N_m3u8DL-RE failed, retrying with ffmpeg..."` — so you
-can render those the moment they arrive without a client-side timer. Purely numeric changes
-(`percent`, `speed`, `eta`, byte and fragment counters, `phase_percent`) are the batched ones.
-
-An idle server sends **no `delta` frames at all**. Silence means nothing changed.
-
-### 5.5 `added` — an upsert, and the in-place group promotion
+### 5.10 Pong and error
 
 ```json
-{ "t": "added", "seq": 10253, "reason": "created",
-  "items": [ { /* full Item */ }, { /* full Item */ } ] }
+{"t":"pong","seq":44,"server_time":1794900000000,"c":123}
 ```
 
-`reason` ∈ `"created"` (a user added these) | `"expanded"` (a playlist resolved into a group and
-children) | `"retried"` (an item was requeued) | `"recovered"` (the server just restarted and
-re-published its recovered working set to seed the snapshot — nothing new happened).
+`c` echoes the JSON value from the client ping. An error frame has `code` and `message`, for example
+`bad_frame` for an unknown application frame.
 
-All four are the same upsert: `reason` is advisory, and a client that ignores it and upserts on
-`id` is correct. `"recovered"` exists for a subscriber that *reacts* to an add — a notifier that
-would otherwise announce the whole recovered history on every boot; a UI has no reason to treat it
-differently from `"created"`. Decode `reason` as a free string with a fallback, as §5 says for
-every enum on the wire.
+### 5.11 Client frames
 
-**Treat `added` as an upsert keyed on `id`, not as an insert.** This matters because of how a
-playlist resolves:
-
-1. You `POST` a playlist URL and get back `id = 01JBQ8AA…GG`.
-2. You receive `added` with one item: `{id: 01JBQ8AA…GG, kind: "item", status: "resolving", ord: 982}`.
-   You render one spinner row.
-3. Resolution finishes. You receive **one** frame:
-
-```json
-{ "t": "added", "seq": 10260, "reason": "expanded",
-  "items": [
-    { "id": "01JBQ8AA0000000000000000GG", "kind": "group", "ord": 982,
-      "title": "Lo-fi beats", "status": "queued",
-      "children_total": 500, "children_done": 0, "children_error": 0, "children_active": 0,
-      "children_inline": false, "…": "the rest of the full Item" },
-    { "id": "01JBQ8AB…01", "kind": "item", "ord": 983, "group_id": "01JBQ8AA0000000000000000GG",
-      "group_index": 1, "…": "…" }
-  ] }
-```
-
-The group has **the same `id` and the same `ord`** as the row you already have. Its `kind` flipped
-from `"item"` to `"group"`. There is **no `removed` frame**. If you upsert by id, the row morphs in
-place: it does not blink, it does not move, and the id you got from `POST` still addresses it.
-
-Children arrive in this and subsequent `added` frames, batched (roughly 50–100 per frame, at least
-25 ms apart). A 500-item playlist produces around ten frames, not five hundred.
-
-### 5.6 `completed`
-
-Prompt, terminal, and carries the **full** `Item`, so you never need a follow-up fetch.
-
-```json
-{ "t": "completed", "seq": 10261,
-  "items": [
-    { "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA", "status": "finished", "percent": 100.0,
-      "filename": "Rick Astley - Never Gonna Give You Up.mp4", "size": 103809024,
-      "download_url": "download/Rick%20Astley%20-%20Never%20Gonna%20Give%20You%20Up.mp4",
-      "finished_at": 1757000060000, "error": null, "…": "the rest of the full Item" } ] }
-```
-
-`completed` fires for **all three** terminal statuses: `finished`, `error` and `canceled`. Read
-`status` to decide which section the row moves to. For `error`, `error` is non-null and carries a
-code you can branch on.
-
-### 5.7 `removed`
-
-```json
-{ "t": "removed", "seq": 10262, "ids": ["01JBQ7Z5T9K3M2R8V4XW6Y0AAA"], "reason": "deleted" }
-```
-
-`reason` ∈ `"deleted"` (a user deleted it) | `"cleared"` (a user cleared completed) |
-`"auto_cleared"` (`CLEAR_COMPLETED_AFTER` expired) | `"group_cascade"` (its group was deleted).
-
-**The reason is per frame, and a flush can emit more than one `removed` frame.** The server tracks a
-reason per id, but the frame carries one reason for all of its ids, so when a 250 ms window contains
-removals with different reasons — a user delete plus a `CLEAR_COMPLETED_AFTER` expiry, say — the
-server groups by reason and emits **one `removed` frame per distinct reason**, in the fixed order
-`deleted`, `cleared`, `auto_cleared`, `group_cascade`, all of them in the `removed` position of the
-flush order. So a flush contains between zero and four `removed` frames, each with a homogeneous
-`ids` array. This is the one place where "at most one frame of each kind per flush" does not hold,
-and it is stated identically in §4.3 (where the REST delta expresses it as an array of groups), in
-§6.3 (the resume fold) and in DESIGN §15.1.
-
-Remove by `id`. There is no url-based removal and no bare-string payload. A `removed` for an id you
-do not have is not an error — ignore it. If you do not care why a record went away, concatenate the
-`ids` arrays and ignore `reason` entirely.
-
-### 5.8 `notice`
-
-```json
-{ "t": "notice", "seq": 10270, "level": "warning", "code": "stalled",
-  "id": "01JBQ7Z5T9K3M2R8V4XW6Y0AAA",
-  "message": "No progress for 900s" }
-```
-
-`level` ∈ `"info" | "warning" | "error"`. `code` ∈ `"stalled" | "job_timeout" | "pot_down" |
-"provider_degraded" | "import_warning" | "plugin_note"` and may grow — treat it as an open set with
-a fallback. `id` may be `null` (a server-wide notice). Show it, or ignore it — nothing in the item
-state depends on it.
-
-`plugin_note` is the one code whose `message` comes from outside the server: a `command` provider
-can print `{"t":"note","message":"…"}` while resolving (DESIGN §6.5.3) and the server forwards it
-verbatim under this single code. The plugin does **not** get to choose the code — the wire's `code`
-set stays closed and server-owned — so if you branch on `code`, `plugin_note` is simply "display
-this text".
-
-### 5.9 `subscription`, `subscription_removed`, `ytdl_options`, `providers`, `health`
-
-```json
-{ "t": "subscription", "seq": 10275,
-  "subscription": { "id": "9c1f2d84-1c6e-4a1b-9f0e-2b7a1c3d4e5f", "name": "Veritasium",
-                    "url": "https://www.youtube.com/@veritasium", "enabled": true,
-                    "check_interval_minutes": 60, "download_type": "video", "codec": "auto",
-                    "format": "any", "quality": "best", "folder": "",
-                    "last_checked": 1757000100000, "seen_count": 317, "error": null,
-                    "next_due": 1757003700000, "consecutive_failures": 0, "checking": false } }
-```
-
-| Key | Type | Notes |
-|---|---|---|
-| `t` | `"subscription"` | |
-| `seq` | `integer` | |
-| `subscription` | `Subscription` | the **whole** object of §9, nested under this key — never inlined into the envelope. It is an upsert keyed on `subscription.id`: the same frame type carries a creation, an edit, and the result of every check (which is what makes `last_checked`, `seen_count`, `error` and `checking` move). |
-
-```json
-{ "t": "subscription_removed", "seq": 10276, "ids": ["9c1f2d84-1c6e-4a1b-9f0e-2b7a1c3d4e5f"] }
-```
-
-| Key | Type | Notes |
-|---|---|---|
-| `t` | `"subscription_removed"` | |
-| `seq` | `integer` | |
-| `ids` | `[string]` | always an array, even for a single deletion. Remove by id; an unknown id is not an error. |
-
-```json
-{ "t": "ytdl_options", "seq": 10280, "ok": false,
-  "msg": "YTDL_OPTIONS_FILE contents is invalid", "update_time": 1757000200.412 }
-```
-
-`update_time` is a float of epoch **seconds** (or `null`) — the one place in the protocol that is
-not integer milliseconds, kept for legacy payload compatibility.
-
-```json
-{ "t": "providers", "seq": 10281,
-  "added": ["command:bandcamp"], "updated": [], "removed": [],
-  "failed": [ { "name": "kinotek", "error": "download.command[0] not executable" } ] }
-```
-
-Refetch `api/v2/capabilities` and/or `api/v2/catalog` when you see this.
-
-```json
-{ "t": "health", "seq": 10290, "status": "degraded",
-  "changed": [ { "component": "pot", "from": "ok", "to": "down",
-                 "detail": "3 consecutive probe failures" } ] }
-```
-
-Emitted **only** on a component transition, never periodically. `status` is the roll-up,
-`ok | degraded | down`; `from` and `to` are per-component and may additionally be `"starting"`
-or `"disabled"`. Both are neutral states (§5.3) and never make the roll-up worse.
-Health transitions also advance the published snapshot cursor on the next flush, even when no
-items changed, so refreshing an idle queue does not replay warnings from before that snapshot.
-
-### 5.10 `pong` and `error`
-
-```json
-{ "t": "pong", "seq": 10291, "server_time": 1757000300000, "c": 1757000299871 }
-{ "t": "error", "seq": 10292, "code": "bad_frame", "message": "unknown frame type \"subscribe\"" }
-```
-
-`c` echoes whatever you sent in your `ping`, so you can measure RTT.
-
-### 5.11 Client → server frames
-
-All optional. A client that only reads is fully functional, and **mutations are never sent over
-the socket** — they stay on REST, where auth, idempotency and the error envelope live.
-
-| Frame | Purpose |
+| Frame | Behavior |
 |---|---|
-| `{"t":"hello","client":"aulos-ios/1.2","topics":["items","subscriptions","health"]}` | identify yourself and narrow what you receive. Send it within 100 ms of connecting or the server assumes all topics. |
-| `{"t":"ping","c":1757000299871}` | RTT probe → `pong` |
-| `{"t":"ack","seq":10261}` | tells the server how far you have consumed. **Advisory only:** it is used for lag reporting and slow-consumer logging, and it never trims anything. The replay ring is shared by every client, so one client's `ack` cannot be allowed to shorten another client's `?since=` window; retention is bounded solely by the server's `replay_frames` and its byte cap. Send it or do not — nothing observable changes. |
-| `{"t":"resume","since":10240,"boot":"01JBQ8YQ…"}` | ask for a merged catch-up on an already-open socket (normally you pass `?since=` at connect time instead) |
-| `{"t":"watch","groups":["01JBQ8AA…GG"],"done":true}` | subscribe to a collapsed group's children — the groups listed in `snapshot.truncated.groups`. The server replies with `added` frames containing them, paged at roughly 50–100 per frame. **`done`** (boolean, default `true`) selects *which* children you get: `true` = all of them, `false` = only the non-terminal ones, which is what you want for a 500-episode group where 480 children are already `finished` and you only care about what is still moving. It has no effect on anything else, and it does not filter later frames. |
-| `{"t":"unwatch","groups":["01JBQ8AA…GG"]}` | stop receiving further `added` pages for them. Note that unwatching does not suppress `delta` patches for children the server is already emitting globally (§5.4); it only ends the subscription that produced the `added` frames. The server drops all of a connection's watches by itself when the socket closes, and after a fresh `snapshot` (which re-states `truncated.groups`) you must `watch` again. |
+| `{"t":"ping","c":123}` | Replies with pong. |
+| `{"t":"resume","since":42,"boot":"01JBQ8YQ2E0000000000000000"}` | Requests catch-up or a fresh snapshot. |
+| `{"t":"hello","client":"example/1"}` | Logs client identity. Topics do not filter delivery. |
+| `ack`, `watch`, `unwatch` | Accepted but ignored. |
 
----
+Use REST for mutations. A read-only socket client needs no application messages.
 
-## 6. `seq`, `boot_id` and resume
+## 6. Cursors and resume
 
-### 6.1 The two identifiers
+### 6.1 Identifiers
 
-| | Meaning |
-|---|---|
-| `seq` | A `u64` frame counter, strictly increasing across all frame types. It is **durable**: the server reserves blocks of sequence numbers before handing any out, so a crash skips values but never re-issues one. |
-| `boot_id` | A ULID minted once per server process. It appears in `snapshot`, `state`, `capabilities` and `healthz`. |
+`seq` is a durable frame cursor. Allocation can leave gaps. `boot_id` identifies one server
+process. `ord` orders records and is unrelated to the frame cursor.
 
-`ord` is a **different** number: it orders *records*, `seq` orders *frames*. Never sort by `seq`.
+### 6.2 Resume conditions
 
-### 6.2 The resume algorithm
+Reconnect with the last fully applied `(seq, boot_id)`. The server sends a snapshot when either
+value is missing or unusable, the boot differs, or the cursor is outside the retained replay
+window, including a cursor above the current head.
 
-Persist `(seq, boot_id)` from the last frame you successfully applied. On reconnect:
-
-```
-connect with ?since=<seq>&boot=<boot_id>
-  → you receive `snapshot`   ⇒ discard your local state and replace it wholesale
-  → you receive `resume`     ⇒ keep your state and apply what follows
-```
-
-You get a `snapshot` — and must discard — when any of these is true, and the server decides, not
-you:
-
-- you sent no `since`;
-- you sent a `since` with **no `boot`**, or with a `boot` that is empty or not a ULID — the server
-  cannot confirm which boot the cursor came from, so it will not fold against it;
-- your `boot` does not match the server's `boot_id` (the server restarted, or a backup was
-  restored);
-- your `since` is older than the server's replay window;
-- your `since` is **greater** than the server's current `seq` (a restore rolled the server back).
-
-The middle two are why `boot` matters, and why it is required rather than encouraged. Without it a
-client could present a cursor above the head and be told "you are up to date" when it had in fact
-missed everything — and a client that sent a *corrupted* boot would get the same wrong answer as
-one that sent none, which is the worst of both. Both rules hold on `<p>ws` (at connect, and on the
-`resume` client frame of §5.11) and on `GET api/v2/state`.
-
-### 6.3 `resume`
+### 6.3 Catch-up
 
 ```json
-{ "t": "resume", "seq": 10261, "from": 10240, "to": 10261,
-  "merged": { "added": 2, "completed": 1, "removed": 1, "delta_items": 3 } }
+{"t":"resume","seq":50,"from":42,"to":50,"merged":{"added":2,"completed":1,"removed":1,"delta_items":3}}
 ```
 
-Immediately after it, the server sends **at most one `added`, at most one `completed`, at most one
-`removed` per distinct reason, and at most one `delta`**, in that order — the same order and the
-same per-reason `removed` grouping as §4.3 and as the live flush (§5.7) — with all the intervening
-changes folded together: per `(id, field)` the last value wins, an `added` that was later `removed`
-is dropped entirely, and a `completed` supersedes any earlier delta for that id. A client that was
-away 45 seconds gets a handful of small frames, not 180 frames of stale numbers.
+The server sends folded item frames in this order: added, completed, removed groups, delta.
+Last field values win. It then replays other retained event kinds, such as subscription and health
+changes. Folded frames share the `to` cursor. `merged.removed` counts IDs, not frames.
 
-`merged` counts what went into the fold, so `merged.removed` is a **total id count** across the
-reasons, not a frame count.
+Apply every frame in order. Keep the previous durable cursor until the catch-up is fully applied.
+The summary counts cover item changes, not the other event kinds, and there is no separate end
+marker. If a connection drops during catch-up and the client cannot prove it applied the whole
+window, reconnect from the previous cursor or request a fresh snapshot.
 
-Apply them in the order received. Then your `seq` is `to`.
+### 6.4 Mutation correlation
 
-### 6.4 Correlating a mutation with its frame
+Response `seq` fields and `X-Aulos-Seq` are cursor samples, not transaction IDs. An unrelated event
+can advance the cursor and publication can follow acknowledgment. Reconcile mutations using their
+item IDs and resulting state. A numeric cursor comparison alone does not prove a mutation has
+appeared in the stream.
 
-Every REST response carries `X-Aulos-Seq`, and mutating responses also carry `seq` in the body.
-The WebSocket frame caused by that mutation has a `seq` **at or above** it. So:
+## 7. Applying updates
 
-- Optimistic UI: apply your change locally, remember the returned `seq`, and reconcile when you see
-  a frame with `seq >= that`.
-- You do **not** need to remove items locally "because events are unreliable". A `cancel` or
-  `delete` that returned `200` will produce a `completed` or `removed` frame. If you want to be
-  eager anyway, doing so is now safe and idempotent because everything is keyed on `id`.
+1. Replace item and subscription maps on a snapshot. Store its boot ID and cursor.
+2. Upsert full items from added and completed frames.
+3. Remove records by ID.
+4. Apply present keys from delta patches, including nulls, to known records only.
+5. Upsert or remove subscriptions by their IDs.
+6. Apply options, provider and health changes independently.
+7. Save only a cursor whose associated changes have been applied. Handle catch-up as section 6.3
+   describes.
+8. Render items ordered by `ord`, then `id`.
 
----
-
-## 7. Applying frames — the complete client algorithm
-
-```
-state = { itemsById: [String: Item], seq: UInt64, bootId: String }
-
-on connect:
-    send ?since=state.seq&boot=state.bootId   (omit both on a cold start)
-
-on "snapshot":
-    state.itemsById = index(frame.items + frame.done, by: \.id)
-    state.seq       = frame.seq
-    state.bootId    = frame.boot_id
-    remember frame.truncated, frame.done_total, frame.counts, frame.protocol
-
-on "resume":
-    state.seq = frame.to        // then apply the following frames in order
-
-on "added":                     // UPSERT, never insert-at-index
-    for item in frame.items { state.itemsById[item.id] = item }
-    state.seq = frame.seq
-
-on "completed":
-    for item in frame.items { state.itemsById[item.id] = item }
-    state.seq = frame.seq
-
-on "removed":                   // may arrive several times per flush, one per reason
-    for id in frame.ids { state.itemsById.removeValue(forKey: id) }
-    state.seq = frame.seq
-
-on "delta":
-    for patch in frame.items {
-        guard var item = state.itemsById[patch.id] else { continue }   // never create here
-        for key in patch.presentKeys { item[key] = patch[key] }        // absent = unchanged
-        state.itemsById[patch.id] = item
-    }
-    state.seq = frame.seq
-
-on "subscription":              // UPSERT by frame.subscription.id
-    state.subsById[frame.subscription.id] = frame.subscription
-    state.seq = frame.seq
-
-on "subscription_removed":      // frame.ids is always an array
-    for id in frame.ids { state.subsById.removeValue(forKey: id) }
-    state.seq = frame.seq
-
-on "ytdl_options" / "providers" / "health" / "notice":
-    handle, then state.seq = frame.seq
-
-rendering:
-    let all = state.itemsById.values.sorted { ($0.ord, $0.id) < ($1.ord, $1.id) }
-    inProgress = all.filter { [.queued, .resolving, .preparing, .downloading, .postprocessing]
-                                .contains($0.status) }
-    completed  = all.filter { $0.status == .finished }
-    failed     = all.filter { $0.status == .error }
-    canceled   = all.filter { $0.status == .canceled }
-
-    // within inProgress, three sub-treatments, all read off fields you already have:
-    //   .queued && !autoStart && error?.code == "not_yet_live"  -> "Scheduled", show error.message
-    //   .queued && !autoStart                                   -> "Paused",  offer Start
-    //   .queued &&  autoStart                                   -> "Waiting", offer Pause
-```
-
-Things this algorithm deliberately does not do, and you should not add:
-
-- no client-side throttle or debounce — the server batches at 250 ms and sends nothing when idle;
-- no title sort — `ord` is the sort key, and it is stable;
-- no insertion at index 0 — everything is keyed by `id` and ordered by `ord`;
-- no `GET /history` on connect — the `snapshot` *is* that, in the same shape;
-- no dual-key (`id` or `url`) lookup — there is one key;
-- no flexible numeric decoding — types are fixed;
-- no `"ERROR: "` prefix stripping — messages are already clean.
-
----
+For scheduled work, check `queued` plus `error.code=not_yet_live` and optional `retry_at`.
+`auto_start=false` means the record remains paused even if it has a scheduled-release error.
 
 ## 8. Format and quality selection
 
-Two endpoints, two purposes:
+Use capabilities for initial choices and the catalog to refine them for a URL. The built-in
+yt-dlp catalog includes:
 
-| Use | Endpoint |
-|---|---|
-| Build the picker before a URL is known (settings, defaults) | `GET api/v2/capabilities` → `formats[]`, the flat `{id, text, qualities:[{id, text}]}` shape |
-| Refine the picker once a URL is known (share sheet, add form) | `GET api/v2/catalog?url=<encoded>` → the selected provider's catalog, with `notice` text and `flags` |
-
-Cache `capabilities` with its `ETag` and refresh it on `providers` frames or on a `304`-checked
-reconnect. `catalog?url=` is cheap and needs no caching.
-
-The legacy matrix, which `capabilities.formats` reproduces exactly:
-
-| `download_type` | `format` values | `quality` values |
+| Download type | Format | Quality |
 |---|---|---|
-| `video` | `any` | `best`, `2160`, `1440`, `1080`, `720`, `480`, `360`, `240`, `worst` |
-| `video` | `mp4` | the above **plus `best_remux`** |
-| `video` | `ios` | the same nine as `any` |
-| `audio` | `m4a` | `best`, `192`, `128` |
-| `audio` | `mp3` | `best`, `320`, `192`, `128` |
-| `audio` | `opus`, `wav`, `flac` | `best` |
-| `captions` | `srt`, `txt`, `vtt`, `ttml`, `sbv`, `scc`, `dfxp` | `best` |
-| `thumbnail` | `jpg` | `best` |
+| video | any | best, 2160, 1440, 1080, 720, 480, 360, 240, worst |
+| video | mp4 | best, best_remux, 2160, 1440, 1080, 720, 480, 360, 240, worst |
+| video | ios | best, 2160, 1440, 1080, 720, 480, 360, 240, worst |
+| audio | m4a | best, 192, 128 |
+| audio | mp3 | best, 320, 192, 128 |
+| audio | opus, wav, flac | best |
+| captions | srt, txt, vtt, ttml, sbv, scc, dfxp | best |
+| thumbnail | jpg | best |
 
-`codec` applies to `video` only and is forced to `"auto"` otherwise. `ios` is a real video format
-with the full height list, not a single-quality shortcut: `{video, ios, 1080}` composes an
-H.264/HEVC + AAC selector bounded to 1080p, exactly as the legacy server did.
-
-Two honesty notes the catalog carries and you should surface:
-
-- `best_remux` has `flags.slow` and a notice: it re-encodes audio after downloading, to undo
-  SponsorBlock stream-copy drift. Expect a `postprocessing` phase of minutes on a long video.
-- `worst` has a notice saying the selector currently resolves to the best available stream. That is
-  the historical behaviour, preserved deliberately; the catalog now says so instead of lying.
-
----
+Non-video selections use codec `auto`. The `ios` format is a video encoding preset and does not
+require the iOS app. `best_remux` may re-encode audio and adds postprocessing. The current `worst`
+selector resolves to the best available stream; the catalog includes a notice for this behavior.
+StreamingCommunity advertises one source rendition. Read notices instead of assuming every
+provider can honor every quality choice.
 
 ## 9. Subscriptions
 
-The `Subscription` object, as returned by `GET api/v2/subscriptions`, `POST/PATCH` responses, the
-`snapshot`, and the `subscription` frame:
-
-```json
-{ "id": "9c1f2d84-1c6e-4a1b-9f0e-2b7a1c3d4e5f",
-  "name": "Veritasium",
-  "url": "https://www.youtube.com/@veritasium",
-  "enabled": true,
-  "check_interval_minutes": 60,
-  "download_type": "video",
-  "codec": "auto",
-  "format": "any",
-  "quality": "best",
-  "folder": "",
-  "last_checked": 1757000100000,
-  "seen_count": 314,
-  "error": null,
-  "next_due": 1757003700000,
-  "consecutive_failures": 0,
-  "checking": false }
-```
+Subscriptions appear in REST responses, snapshots and subscription frames. Their fields are:
 
 | Key | Type | Notes |
 |---|---|---|
-| `id` | `string` | a ULID for new subscriptions; imported ones keep their original UUID string. Opaque — do not parse it. |
+| `id` | `string` | a ULID for new subscriptions; imported ones keep their original UUID string. Treat as opaque. |
 | `name` | `string` | |
 | `url` | `string` | unique across subscriptions |
 | `enabled` | `boolean` | |
 | `check_interval_minutes` | `integer` | minimum 1 |
 | `download_type`, `codec`, `format`, `quality` | `string` | the selection applied to new items |
 | `folder` | `string` | `""` means the base directory |
-| `last_checked` | `integer \| null` | unix **ms** (v1 emits float seconds) |
+| `last_checked` | `integer \| null` | unix **ms** |
 | `seen_count` | `integer` | how many media ids have been marked seen |
 | `error` | `string \| null` | the last check's error text; cleared by a successful check |
 | `next_due` | `integer \| null` | unix ms of the next scheduled check |
 | `consecutive_failures` | `integer` | drives exponential backoff, up to 6 hours |
 | `checking` | `boolean` | a check is running right now |
 
-`POST api/v2/subscriptions` takes the same body as an add plus `check_interval_minutes`. It
-resolves the URL synchronously enough to reject a single-video URL with
-`400 validation_failed` and the message *"This URL points to a single video, not a channel or
-playlist. Use Download instead."*, and to reject a duplicate with `409 conflict` and *"This URL is
-already subscribed"*. On success every currently visible item is marked **seen without being
-downloaded** (except upcoming livestreams), so subscribing does not backfill a channel's entire
-history.
+Creation accepts add options plus an optional name and `check_interval_minutes`. It checks that
+the URL represents a channel or playlist. A single-video URL returns `400 validation_failed`;
+a duplicate subscription URL returns `409 conflict`.
 
-`POST api/v2/subscriptions/check` returns `202` immediately with a `job_id`; watch `checking` and
-`last_checked` on the `subscription` frames to see progress.
+Existing visible entries are marked seen instead of downloaded, except upcoming livestreams.
+Later checks add unseen entries. A check request returns `202`; observe `checking`, `last_checked`
+and `error` through subscription frames or REST. Failed checks use bounded backoff.
 
----
+YouTube subscription checks skip Shorts. Live broadcasts wait for a recording before downloading.
+These restrictions do not apply to explicit downloads.
 
-## 10. Retired v1 surface
+## 10. Supported surface
 
-As of the October 2026 retirement release, only Aulos v2 is supported. These legacy paths
-return `404 not_found`: `add`, `history`, `delete`, `start`, `cancel-add`, `presets`, `subscribe`,
-`subscriptions`, `subscriptions/update`, `subscriptions/delete`, `subscriptions/check`,
-`upload-cookies`, `delete-cookies`, `cookie-status`, `version`, and `socket.io/` (including children).
-The `AULOS_V1_ENABLED`, `AULOS_V1_ADD_RESOLVE_WAIT_MS`, and `AULOS_V1_HISTORY_MAX` settings
-have been removed. Capabilities and health no longer advertise `v1_shim` or `socketio` flags.
+Only v2 routes are supported. MeTube v1 routes, `/version` and `/socket.io/` return `404`.
+Raw Authorization tokens are not accepted; use the Bearer scheme.
+Existing stored source values remain decodable. Legacy JSON can be imported through the explicit
+[CLI procedure](operations.md#importing-metube-state).
 
-Use `api/v2/downloads`, `api/v2/state`, `api/v2/items/actions`, the v2 subscription/cookie routes,
-and `api/v2/capabilities`. Token authentication requires the `Bearer` scheme; the documented
-WebSocket token mechanisms remain supported.
+## 11. Client checklist
 
-The embedded web UI, prefix redirects, `robots.txt`, and authenticated download file routes
-remain available. Existing SQLite rows retain their stored source and error values. MeTube
-JSON data can still be migrated with the explicit `aulos-server import` command; ordinary server
-startup no longer performs that import. See [the migration instructions](../README.md#importing-legacy-metube-state).
+- Use the configured prefix for REST, WebSocket and relative file URLs.
+- Keep item identity separate from source URLs.
+- Preserve the distinction between omitted and null delta values.
+- Handle snapshots after reconnect even when resume was requested.
+- Treat full objects as upserts and unknown enum values as unsupported values.
+- Use explicit file-deletion flags in destructive API calls.
 
----
+## 12. Reference sources
 
-## 11. A worked Swift sketch
-
-Not prescriptive — it is here to prove the protocol needs no tricks. No `AnyCodable`, no fallback
-parsers, no flexible numeric decoders, no `CodingKeys` heroics beyond snake_case mapping.
-
-```swift
-// MARK: - Enums
-
-enum ItemKind: String, Codable { case item, group }
-
-enum Status: String, Codable {
-    case queued, resolving, preparing, downloading, postprocessing, finished, error, canceled
-    // Forward compatibility: decode unknown values into `.unknown` rather than guessing.
-    case unknown
-    init(from d: Decoder) throws {
-        let raw = try d.singleValueContainer().decode(String.self)
-        self = Status(rawValue: raw) ?? .unknown
-    }
-    var isActive: Bool {
-        switch self {
-        case .queued, .resolving, .preparing, .downloading, .postprocessing: return true
-        default: return false
-        }
-    }
-}
-
-// MARK: - Item
-
-struct WireError: Codable, Equatable, Hashable {
-    let code: String
-    let message: String
-    let field: String?
-    let provider: String?
-    let providerCode: String?
-}
-
-struct FileRef: Codable, Equatable, Hashable {
-    let filename: String
-    let size: Int64?
-    let downloadURL: String?
-    let lang: String?
-    enum CodingKeys: String, CodingKey {
-        case filename, size, lang
-        case downloadURL = "download_url"
-    }
-}
-
-struct Selection: Codable, Equatable, Hashable {
-    let downloadType: String
-    let codec: String
-    let format: String
-    let quality: String
-    enum CodingKeys: String, CodingKey {
-        case downloadType = "download_type"
-        case codec, format, quality
-    }
-}
-
-/// The rest of the add request, echoed back. Immutable for the record's life, so it never
-/// appears in a `delta` and you can read it once.
-struct RequestView: Codable, Equatable, Hashable {
-    let customNamePrefix: String
-    let playlistItemLimit: Int
-    let autoStart: Bool
-    let splitByChapters: Bool
-    let chapterTemplate: String
-    let subtitleLanguage: String
-    let subtitleMode: String
-    let ytdlOptionsPresets: [String]
-    let ytdlOptionsOverrides: [String: JSONValue]   // secret-looking values are "«redacted»"
-    enum CodingKeys: String, CodingKey {
-        case customNamePrefix = "custom_name_prefix"
-        case playlistItemLimit = "playlist_item_limit"
-        case autoStart = "auto_start"
-        case splitByChapters = "split_by_chapters"
-        case chapterTemplate = "chapter_template"
-        case subtitleLanguage = "subtitle_language"
-        case subtitleMode = "subtitle_mode"
-        case ytdlOptionsPresets = "ytdl_options_presets"
-        case ytdlOptionsOverrides = "ytdl_options_overrides"
-    }
-}
-
-struct SourceRef: Codable, Equatable, Hashable {
-    let kind: String
-    let ref: String?
-}
-
-struct Item: Codable, Equatable, Identifiable, Hashable {
-    let id: String
-    let kind: ItemKind
-    let ord: Int64
-    let groupID: String?
-    let groupIndex: Int?
-    let url: String
-    let title: String
-    let status: Status
-    let autoStart: Bool
-    let provider: String?
-
-    let percent: Double            // never nil
-    let speed: Double?
-    let eta: Int?
-    let downloadedBytes: Int64?
-    let totalBytes: Int64?
-    let totalBytesEstimate: Int64?
-    let fragmentIndex: Int?
-    let fragmentCount: Int?
-    let phase: String?
-    let phasePercent: Double?
-
-    let msg: String?
-    let error: WireError?
-
-    let filename: String?
-    let size: Int64?
-    let downloadURL: String?
-    let chapterFiles: [FileRef]    // never nil
-    let subtitleFiles: [FileRef]   // never nil
-
-    let selection: Selection
-    let folder: String?
-    let request: RequestView
-
-    let createdAt: Int64
-    let startedAt: Int64?
-    let finishedAt: Int64?
-    let attempt: Int
-    let source: SourceRef
-
-    let childrenTotal: Int?
-    let childrenDone: Int?
-    let childrenError: Int?
-    let childrenActive: Int?
-    let childrenInline: Bool?
-
-    // Use a JSONDecoder with .convertFromSnakeCase and this whole block disappears.
-    enum CodingKeys: String, CodingKey {
-        case id, kind, ord, url, title, status, provider, percent, speed, eta
-        case phase, msg, error, filename, size, selection, folder, request, attempt, source
-        case groupID = "group_id", groupIndex = "group_index", autoStart = "auto_start"
-        case downloadedBytes = "downloaded_bytes", totalBytes = "total_bytes"
-        case totalBytesEstimate = "total_bytes_estimate"
-        case fragmentIndex = "fragment_index", fragmentCount = "fragment_count"
-        case phasePercent = "phase_percent"
-        case downloadURL = "download_url"
-        case chapterFiles = "chapter_files", subtitleFiles = "subtitle_files"
-        case createdAt = "created_at", startedAt = "started_at", finishedAt = "finished_at"
-        case childrenTotal = "children_total", childrenDone = "children_done"
-        case childrenError = "children_error", childrenActive = "children_active"
-        case childrenInline = "children_inline"
-    }
-}
-
-// MARK: - Frames
-
-enum Frame {
-    case snapshot(Snapshot)
-    case resume(Resume)
-    case delta(Delta)
-    case added(items: [Item], reason: String, seq: UInt64)
-    case completed(items: [Item], seq: UInt64)
-    case removed(ids: [String], reason: String, seq: UInt64)   // one case per reason; §5.7
-    case subscription(Subscription, seq: UInt64)
-    case subscriptionRemoved(ids: [String], seq: UInt64)
-    case ytdlOptions(ok: Bool, msg: String, updateTime: Double?, seq: UInt64)
-    case providers(ProvidersReport, seq: UInt64)
-    case notice(Notice, seq: UInt64)
-    case health(Health, seq: UInt64)
-    case pong(serverTime: Int64, c: Int64?, seq: UInt64)
-    case error(code: String, message: String, seq: UInt64)
-    case unknown(type: String, seq: UInt64)
-}
-
-// A `delta` patch cannot be decoded into `Item`, because `Item` cannot distinguish
-// "key absent" (unchanged) from "key present and null" (cleared). Decode it as a
-// dictionary of JSON values and apply key by key.
-struct DeltaPatch: Decodable {
-    let id: String
-    let fields: [String: JSONValue]      // only the keys that were present
-    init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode([String: JSONValue].self)
-        guard case let .string(id)? = raw["id"] else {
-            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "delta without id"))
-        }
-        self.id = id
-        var f = raw; f.removeValue(forKey: "id")
-        self.fields = f
-    }
-}
-
-// `JSONValue` is a 6-case enum (null/bool/int/double/string/array/object). It is used ONLY for
-// delta patches, and only because absent-vs-null is meaningful there. Nothing else needs it.
-```
-
-The one place the protocol asks for care is the delta patch, and that is inherent to any
-changed-fields-only protocol: `Optional<T>` in Swift cannot express three states. Decoding a patch
-as `[String: JSONValue]` and applying present keys is ten lines and covers it completely.
-
----
-
-## 12. Quick reference
-
-| I want to… | Do this |
-|---|---|
-| add a URL | `POST api/v2/downloads` → `202 {id}`. The item is already visible as `resolving`. |
-| add several URLs with one selection | `POST api/v2/downloads` with `{items, defaults}` |
-| abort an add that is still resolving (a 500-item playlist) | `POST api/v2/downloads/cancel-resolve` with `{"generation": <the value from the add's 202>}`, or `{}` to abort every in-flight resolution |
-| get the whole state | `GET api/v2/state` (polling) or connect the WebSocket (live) |
-| refresh cheaply | `GET api/v2/state?since=<seq>&boot=<boot_id>` with `If-None-Match` |
-| show live progress | connect `<p>ws`, apply `snapshot` then the frames per §7 |
-| start / pause / cancel / retry / delete | `POST api/v2/items/actions` (read the supported set from `capabilities.actions`) |
-| delete one item and its file | `DELETE api/v2/items/{id}?delete_file=true` |
-| open the produced file | if `item.download_url` is already absolute (it has a scheme) open it as-is; otherwise resolve it against base + prefix |
-| stop a download without losing it | `POST api/v2/items/actions` with `"action": "pause"`; `"start"` resumes it |
-| page old history | `GET api/v2/items?status=finished,error,canceled&cursor=…` |
-| get a large group's children | `GET api/v2/items?group_id=<id>` or a WS `watch` frame |
-| build the format picker | `GET api/v2/capabilities` → `formats[]` |
-| make the picker honest for a URL | `GET api/v2/catalog?url=<encoded>` |
-| know the server's prefix and version | `GET api/v2/capabilities` (`url_prefix`, `version`, `yt_dlp`) |
-| see whether the server is healthy | `GET <p>healthz` |
-| understand why a download failed | `item.error.code`, then `item.error.message` |
-| understand why an option did not apply | `GET api/v2/debug/options?item_id=<id>` |
-| receive push notifications | `PUT api/v2/devices/{token}` with the registration body (§4.8) on every launch; `DELETE` the same path to stop |
-| drive a Live Activity from the server | `PUT api/v2/devices/{token}/live-activities/{item_id}` with `{"update_token":"<hex>"}`; `DELETE` it when the activity ends |
+The route definitions are in [v2/mod.rs](../crates/aulos-api/src/v2/mod.rs).
+[ItemView](../crates/aulos-core/src/item.rs) defines full item fields.
+[ws.rs](../crates/aulos-api/src/ws.rs) handles connections and client messages.
+[API tests](../crates/aulos-api/tests) cover requests, authentication and WebSocket behavior.

@@ -15,9 +15,7 @@ To regenerate against a legacy source checkout with its Python dependencies inst
 METUBE_POT_ROOT=/path/to/metube_pot PYTHON=/path/to/metube_pot/.venv/bin/python tools/capture/run_capture.sh
 ```
 
-The script runs `dump_formats.py`, `dump_progress_vectors.py`, then `verify.py`. It does not
-start a legacy HTTP server. `_legacy.py` supplies source-loading and canonical JSON helpers.
-The old HTTP capture tool, seed helper and `tests/v1_golden` corpus have been removed.
+The script runs `dump_formats.py`, `dump_progress_vectors.py`, then `verify.py`. `_legacy.py` supplies source-loading and canonical JSON helpers.
 
 CI validates fixture shape, selector coverage, option invariants and progress vectors offline:
 

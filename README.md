@@ -1,526 +1,86 @@
-# Aulos Server
+# Aulos
 
-Aulos is a native Rust download server: you hand it a URL, it works out what is behind it, queues
-it, downloads it with `yt-dlp` (or StreamingCommunity, or a plugin you wrote), and tells every
-connected client what is happening while it happens. It serves the Aulos v2 REST and native
-WebSocket APIs for the iOS app and web UI, supervises the BgUtils POT sidecar, and runs
-post-completion hooks (Jellyfin refresh, NFO writing, audio sync) plus community plugins.
+Aulos is a self-hosted download server written in Rust. It queues URLs, downloads media through
+yt-dlp, StreamingCommunity or command plugins, and streams progress to connected clients.
 
-Existing Aulos SQLite state and deployment paths continue to work. MeTube clients using the v1
-API are no longer supported. Migrating from MeTube JSON state requires the explicit
-[`import` command](#importing-legacy-metube-state) before starting the server.
+The server includes a web UI, a v2 REST API and a WebSocket API. The companion iOS app is
+currently in private alpha.
+
+## Features
+
+- Video, audio, subtitles and thumbnails through yt-dlp.
+- Playlists, channel subscriptions, pause, retry and persistent download history.
+- StreamingCommunity downloads with N_m3u8DL-RE and ffmpeg.
+- Telegram notifications, Jellyfin refresh, NFO files and optional iOS push notifications.
+- Command plugins for additional providers and completion hooks.
 
 ## Quickstart
 
+The published Docker image targets `linux/amd64`. It includes the download tools and the
+BgUtils POT sidecar. Other architectures require amd64 emulation.
+
+Save this as `compose.yml`:
+
 ```yaml
-# docker-compose.yml — see docker/compose.example.yml for the full annotated version.
 services:
   aulos:
     image: ghcr.io/tatoalo/aulos:latest
-    container_name: aulos
+    platform: linux/amd64
     restart: unless-stopped
-    ports: ["8081:8081"]
-    # Must exceed the serial shutdown chain -- AULOS_SHUTDOWN_GRACE_SECS (20) + engine shutdown (5s)
-    # + WS close (2s) + engine drain (2s) + consumer drain (2s) + tracker (10s) = 41s -- which runs
-    # *before* the WAL checkpoint. Docker's 10 s default would SIGKILL mid-shutdown.
+    ports:
+      - "127.0.0.1:8081:8081"
     stop_grace_period: 60s
     environment:
       PUID: "1000"
       PGID: "1000"
       UMASK: "022"
       DOWNLOAD_DIR: /downloads
-      AUDIO_DOWNLOAD_DIR: /downloads/audio
-      STATE_DIR: /downloads/.metube          # stable location for the SQLite database
-      TEMP_DIR: /downloads/.aulos-tmp
-      MAX_CONCURRENT_DOWNLOADS: "3"
-      YTDL_OPTIONS_FILE: /config/ytdl-options.json
-      # Optional integrations, all off unless enabled:
-      # JELLYFIN_SYNC_ENABLED / JELLYFIN_URL / JELLYFIN_API_KEY / JELLYFIN_PATH_MAP
-      # TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_CHAT_IDS
-      # APNS_ENABLED / APNS_KEY_FILE / APNS_KEY_ID / APNS_TEAM_ID  (iOS push, docs/DESIGN.md §25)
-      # A download reports on the channel that added it: the bot announces its own adds (and every
-      # subscription), the phone announces its own. Two knobs widen that, both off by default:
-      # AULOS_TELEGRAM_WATCH_ALL: "true"  -- the bot also reports web/curl/iOS adds
-      # APNS_PUSH_ALL: "true"             -- the phone is also pushed for non-iOS adds
+      STATE_DIR: /downloads/.metube
     volumes:
-      - /srv/media:/downloads
-      - /srv/aulos/config:/config
+      - ./downloads:/downloads
+      - ./config:/config
 ```
+
+Set `PUID` and `PGID` to the user and group that should own downloaded files. Check them with
+`id -u` and `id -g`. The `.metube` directory name is retained for existing deployments; Aulos
+stores its SQLite database there.
 
 ```sh
 docker compose up -d
-curl -s localhost:8081/healthz | python3 -m json.tool
-curl -s -X POST localhost:8081/api/v2/downloads \
-  -H 'content-type: application/json' \
+docker compose ps
+curl --fail http://localhost:8081/healthz
+```
+
+Open [localhost:8081](http://localhost:8081) to add a download. The quickstart binds to localhost.
+For access from other devices, configure authentication and a reverse proxy as described in
+[operations](docs/operations.md#authentication-and-network-access).
+
+To add a download through the API:
+
+```sh
+curl --fail http://localhost:8081/api/v2/downloads \
+  -H 'Content-Type: application/json' \
   -d '{"url":"https://www.youtube.com/watch?v=aqz-KE-bpKQ","download_type":"video"}'
 ```
 
-`POST api/v2/downloads` answers `202 {"id": …}` immediately — extraction happens on the queue —
-and the WebSocket at `/ws` then carries `added` → `delta` → `completed` for that id.
-
-Before the first real run, two subcommands are worth a minute:
-
-```sh
-docker compose run --rm aulos check-config   # the effective config, secrets redacted; exit 1 if invalid
-docker compose run --rm aulos doctor         # ffmpeg, ffprobe, N_m3u8DL-RE, deno, python3, yt-dlp, bgutil-pot
-```
-
-Optional tool version checks allow 30 seconds. At startup, timeouts are reported as `SLOW`
-and other transient failures as `FAILED`; both leave the component degraded and retry in the
-background after 5, 15, 30 and 60 seconds, then every 5 minutes. Recovery updates health and
-connected web clients automatically. `MISSING` means the executable was not found or could not
-be executed due to permissions; those failures remain degraded until restart. `doctor` runs
-one check per tool without background retries.
-
-## Configuration
-
-Every setting is an environment variable, and every legacy MeTube-POT variable keeps its name,
-meaning and default. The **complete table** — roughly ninety variables, each marked as legacy
-(`L`), legacy-with-a-behaviour-note (`L*`) or new (`AULOS_*`) — is
-**[`docs/DESIGN.md` §17.3](docs/DESIGN.md)**. `yt-dlp` options themselves come from
-`YTDL_OPTIONS` / `YTDL_OPTIONS_FILE` (hot-reloaded on change), not from env vars.
-
-Two keys in that file outrank the per-download format picker, so Aulos logs one WARN naming them
-each time the options are loaded or reloaded:
-
-- **`format`** replaces the selector for *every* job. The format and quality chosen in the web UI,
-  the Telegram bot and the API are then ignored — a leftover `bv[vcodec^=avc1]+ba` makes every
-  download 1080p H.264 no matter what was asked for. The single exception is video / mp4 /
-  `best_remux`, which pops the key back out.
-- **`merge_output_format`** works the other way: it names the container for every job *except*
-  video/mp4 downloads, where Aulos sets `"mp4"` over it so a video asked for as mp4 is always
-  remuxed into one (never re-encoded).
-
-### Redirects
-
-`AULOS_RESOLVE_MAX_DEPTH` limits successive extractor redirects, with a default of `3`.
-For a legitimately longer chain, set it to `10` in the container environment and restart Aulos.
-Repeated URLs still fail as a redirect loop. This setting does not control HTTP redirects
-followed internally by yt-dlp, or StreamingCommunity's site-version probe.
-
-Downloads use the resolved video URL while keeping the submitted URL on the item.
-Each yt-dlp item enforces `noplaylist`, including items queued before upgrading and when
-user options set it to `false`. Submit a playlist URL to download its entries as a group.
-
-The image includes yt-dlp's Requests HTTP transport. If a URL still fails, include the item
-error, Aulos version and redacted proxy/extractor options in the report. A loop error and an
-extractor-depth error describe different failures; raising the depth does not repair a loop.
-
-### StreamingCommunity
-
-The official image includes the StreamingCommunity provider and its download tools. Supported
-links contain `/watch/`, `/titles/` or `/season-`. For a mirror whose hostname does not contain
-`streamingcommunity`, set `AULOS_SC_EXTRA_HOSTS` to its actual hostname and restart Aulos.
-
-Check `/api/v2/providers`, `aulos-server doctor` and the item's error when diagnosing a failure.
-A ready provider means its local setup is available; it does not guarantee a particular mirror,
-proxy or current site layout works.
-
-### Jellyfin
-
-`JELLYFIN_SYNC_ENABLED=true` with a `JELLYFIN_URL` and a `JELLYFIN_API_KEY` asks Jellyfin to scan
-its libraries when a download finishes. Completions inside a 30 s window
-(`AULOS_JELLYFIN_DEBOUNCE_SECS`) are coalesced into one request, capped at 5 minutes
-(`AULOS_JELLYFIN_MAX_WAIT_SECS`), so a 50-item playlist costs one scan rather than fifty.
-
-By default that request is `POST /Library/Refresh` — a **global** scan. It is the only endpoint on
-any Jellyfin version that discovers a file the server has never seen; a new file has no item yet,
-so nothing scoped to an item or a library can find it. `docs/reference/jellyfin-refresh-experiment.md`
-has the measurements.
-
-- **`JELLYFIN_LIBRARY_ID` does nothing.** It is still accepted so no deployment fails to boot over
-  it, but Jellyfin exposes no per-library scan, so an id cannot narrow the work. Setting it logs
-  one WARN at boot and shows `library_id_ignored: true` in `/healthz`.
-- **`JELLYFIN_PATH_MAP` is how you get a targeted scan.** Set it to comma-separated
-  `aulos_prefix=jellyfin_prefix` pairs — e.g. `JELLYFIN_PATH_MAP=/downloads=/data/videos` when the
-  same media is mounted at `/downloads` in this container and `/data/videos` in Jellyfin's. Aulos
-  then sends `POST /Library/Media/Updated` naming the finished files in Jellyfin's own spelling,
-  and only the containing folder is rescanned. The longest matching source prefix wins. Anything
-  the map does not cover, and any request Jellyfin does not accept, falls back to the global scan,
-  so a wrong map costs latency and never silence. Note the trade-off: the targeted call is handled
-  by Jellyfin's library monitor, which waits out its own `LibraryMonitorDelay` (60 s by default)
-  before it scans, whereas a global scan starts within a second or two. Leave the map unset unless
-  full scans are actually costing you something.
-
-`GET /healthz` reports `components.jellyfin` with `mode` (`global_scan` or `media_updated`),
-`last_request_at`, `last_status` (the HTTP code Jellyfin returned) and the usual
-`runs_total` / `failures_total`. `mode` and `last_status` together are how you tell a working
-sync from one that is being politely accepted and ignored.
-
-### Push notifications (iOS)
-
-The Aulos iOS app can be told about a download it is not looking at: one alert when a top-level
-item or a playlist finishes or fails, and a Live Activity that runs the progress ring on the lock
-screen from the moment bytes start moving. Both go through Apple's push service, so the server
-needs a signing key of your own — there is no shared one.
-
-1. **Create an APNs auth key.** In the [Apple Developer portal](https://developer.apple.com/account)
-   → *Certificates, Identifiers & Profiles* → *Keys* → **+**, tick **Apple Push Notifications
-   service (APNs)** and register it. You get a one-time `AuthKey_XXXXXXXXXX.p8` download and a
-   **Key ID**; your **Team ID** is in the top-right of the same page. One key covers both the
-   sandbox and the production gateway, and every app in the team.
-2. **Put the key where the container can read it, and nowhere else.** It is the only secret of the
-   four settings — the key id and the team id are identifiers. Keep it out of the image and out of
-   git; mount it read-only:
-
-   ```yaml
-   environment:
-     APNS_ENABLED: "true"
-     APNS_KEY_FILE: /config/AuthKey_ABCD1234EF.p8
-     APNS_KEY_ID: ABCD1234EF
-     APNS_TEAM_ID: TEAM123456
-   volumes:
-     - /srv/aulos/apns/AuthKey_ABCD1234EF.p8:/config/AuthKey_ABCD1234EF.p8:ro
-   ```
-
-   `APNS_TOPIC` defaults to `com.tatoalo.aulos` and only matters for a device that registers
-   without reporting its own bundle id, which the shipped app always does.
-3. **Register the phone.** Nothing else to do on the server: the app `PUT`s its device token to
-   `<prefix>api/v2/devices/{token}` on launch and the server starts pushing. The routes are behind
-   the same auth as the rest of v2 (`docs/PROTOCOL.md` §4.8).
-
-**Which downloads actually push.** Only the ones you added *from the app* — the share sheet
-included. A download you started from Telegram is announced by the bot, one you started from the
-web UI or `curl` is announced by nothing, and a subscription's auto-downloads go to Telegram, which
-is the only push channel background work has. The server tells them apart by the
-`X-Aulos-Client: ios/<version>` header the app sends on every add, recorded once on the item and
-never rewritten — so a retried or resumed download still reaches the phone that asked for it.
-
-Set `APNS_PUSH_ALL=true` if you would rather the phone hear about everything; its mirror image is
-`AULOS_TELEGRAM_WATCH_ALL=true`, which puts every download on the bot's board. Both default to
-`false`, which is what keeps one download from ringing twice. Neither affects a Live Activity the
-app is already showing: it keeps its progress and is always closed at the end, whatever the knobs
-say, and the download it tracks does ring the phone when it finishes.
-
-`GET /healthz` reports `components.apns`:
-
-| `status` | What it means |
-|---|---|
-| `disabled` | `APNS_ENABLED` is `false`. Nothing is wired, and this is not a failure. |
-| `ok` | The key parsed and the last push (if any) was accepted. |
-| `degraded` | Either the key file is missing/unreadable/not an ES256 `.p8` — check `last_error` and the ERROR line at boot — or Apple rejected the provider token, which means `APNS_KEY_ID`/`APNS_TEAM_ID` do not match the key. |
-
-The detail also carries `devices`, `live_activities`, `sent_total`, `failed_total`,
-`pruned_tokens_total`, `last_error` and `last_sent_at`. A misconfigured key **never stops the
-server**: it logs one ERROR, reports `degraded` and serves everything else normally. Tokens Apple
-tells us are dead (`410 Unregistered`, `400 BadDeviceToken`) are forgotten automatically, which is
-what `pruned_tokens_total` counts — an app deleted from a phone cleans itself up.
-
-## The web UI
-
-Opening the server in a browser gives you the built-in UI: the queue, the add form, per-item
-progress and the completed history. It is compiled into the binary — no static root to mount, no
-Node, no CDN — and it is served at the same address as the API, under `URL_PREFIX`.
-
-`GET <prefix>` is content-negotiated, so nothing that already talks to the server changes: a
-request whose `Accept` list contains `text/html` (every browser, on a document navigation) gets
-the page, and everything else — `Accept: application/json`, the bare `*/*` that `curl` sends, no
-`Accept` header at all — gets the same JSON identity document it always did.
-
-- `AULOS_WEB_UI=false` turns the UI off entirely: `GET <prefix>` is then the identity document for
-  every `Accept`, and the assets and the manifest answer `404`.
-- `DEFAULT_THEME` (`auto` | `light` | `dark`) is the theme the page *starts* in; a viewer's own
-  choice is remembered in their browser, never in a cookie the server sets.
-- The page, its assets and its manifest are served **without** authentication even when
-  `AULOS_API_TOKEN` or `AULOS_TRUSTED_PROXY_AUTH_HEADER` is configured — they contain nothing
-  secret, and a browser cannot attach a bearer token to a document navigation. Every API route
-  keeps its auth: the page asks for the token when the API answers `401`, and stores it locally.
-  Put the whole thing behind your reverse proxy's auth if you want the UI itself gated.
-- It installs as a PWA (`<prefix>manifest.webmanifest`), which is what makes it usable full-screen
-  from an iPhone home screen.
-
-Under 640 px it becomes a phone layout — a bottom add sheet, 44 px targets, safe-area padding —
-from the same stylesheet, so there is no second URL and no app to install. The design source is
-`docs/design/web-ui/` (see [its README](docs/design/web-ui/README.md)); the full specification,
-including the routes, the CSP and the front-end architecture, is
-**[`docs/DESIGN.md` §24](docs/DESIGN.md)**.
-
-Screenshots are **not** checked in — they are generated, not authored. Every run of the browser
-smoke below regenerates five of them into `tools/web/screenshots/` (desktop light and dark, phone
-light and dark, the phone add sheet), and CI's `web` job uploads that directory as the
-`web-screenshots` artifact on every run, so the current look is always one download away from a
-build page.
-
-## Talking to it
-
-- **[`docs/PROTOCOL.md`](docs/PROTOCOL.md)** is the wire contract: the v2 REST surface (§4), the
-  WebSocket snapshot/delta/resume model (§5), the item and group shapes, the error envelope, and
-  the compatibility rules a client can rely on across versions.
-- Only Aulos v2 is supported. Legacy routes, `/version`, and `/socket.io/` return `404`.
-  Read versions from `GET api/v2/capabilities`; use `Authorization: Bearer <token>` when token
-  authentication is configured (a raw token in the Authorization header is no longer accepted).
-- `GET api/v2/catalog?url=…` tells you which provider would take a URL and what it can do with it,
-  before you queue anything.
-
-## Adding a community plugin
-
-A plugin is **one directory with one `plugin.toml`** inside `AULOS_PLUGINS_DIR` (default
-`/config/plugins`, i.e. `/srv/aulos/config/plugins` in the compose above). It is picked up at boot,
-on `SIGHUP`, on `POST api/v2/plugins/reload`, and about a second after you save the file — no
-recompile, no restart, and the executables can be in any language.
-
-A directory can declare a **provider** (`[match]` + `[download]` — support for a new site) or one
-or more **hooks** (`[[hook]]` tables — something that happens after a download), or both.
-
-```toml
-manifest_version = 1
-name    = "Bandcamp"
-version = "0.3.1"
-
-[match]
-hosts      = ["bandcamp.com"]
-path_regex = '^/(album|track)/'
-
-[capabilities]
-resolve = true
-
-[download]
-command = ["python3", "download.py",
-           "--url", "{url}", "--quality", "{quality}",
-           "--out", "{out_path}", "--tmp", "{tmp_dir}"]
-expect_output = "result_frame"
-```
-
-Start from the two worked examples in **[`plugins/examples/`](plugins/examples/)** —
-`bandcamp/` (a provider, with a real `resolve.py` and `download.py`) and `media-server-hooks/`
-(hook-only). The reference is **[`docs/DESIGN.md` §6.5](docs/DESIGN.md)** for the provider manifest
-(the complete key table, the placeholder vocabulary, the progress-parsing spec) and
-**§13.4** for the `[[hook]]` manifest. A manifest that fails to parse degrades that one plugin with
-a reason surfaced in `GET api/v2/providers` and `healthz.plugin_warnings`; it never fails the
-startup and never fails silently.
-
-### Coming from MeTube-POT's Jellyfin sync
-
-MeTube called `POST /Library/Refresh` unconditionally and never read `JELLYFIN_LIBRARY_ID`, so
-carrying your env file across changes nothing about which endpoint gets called: aulos calls the
-same one. Two notes for anyone who read the earlier cutover note or the earlier docs:
-
-- **Unsetting `JELLYFIN_LIBRARY_ID` is no longer necessary.** Between the cutover and 2026-09-06 a
-  set id put aulos on `POST /Items/{id}/Refresh`, which cannot discover a new file and answers
-  `204` while doing nothing — downloads landed on disk and never appeared. That path is gone; the
-  id is inert and merely warns. If you unset it as a workaround, you can leave it unset or put it
-  back, it makes no difference now.
-- **Set `JELLYFIN_PATH_MAP` if you want a targeted scan**, per the Jellyfin section above. That is
-  the only supported way to narrow the work, and it needs the paths as Jellyfin sees them — which,
-  in the usual compose, are not the paths aulos writes to.
-
-## Importing legacy MeTube state
-
-Stop the old server and back up its state before running the commands below. Normal startup
-opens and migrates Aulos SQLite only; it never imports legacy JSON automatically. If it finds
-legacy JSON beside an empty database, it stops with the explicit import command instead of
-silently presenting an empty queue.
-
-The importer reads `queue.json`, `pending.json`, `completed.json`, `subscriptions.json`, and
-`telegram_bot_config.json`. It preserves history and subscription data, records the report in
-SQLite, and writes `.aulos-imported`. Existing Aulos databases need no manual import.
-
-```sh
-# Rehearse in a temporary database; leave the destination and legacy files unchanged.
-docker compose run --rm aulos import \
-  --state-dir /downloads/.metube --db /downloads/.metube/aulos.db --dry-run
-
-# For real.
-docker compose run --rm aulos import \
-  --state-dir /downloads/.metube --db /downloads/.metube/aulos.db
-```
-
-`--force` imports even when the destination already holds items; `--skip-corrupt` skips
-unparseable records instead of aborting. Only `schema_version: 2` JSON is supported — the legacy
-pickle/shelve state is out of scope. The report lists every error and warning; a clean run reports
-`errors: []`.
-
-### Exec postprocessors carried over from MeTube
-
-Aulos defaults `TEMP_DIR` to `<DOWNLOAD_DIR>/.aulos-tmp`, for both yt-dlp partials and
-StreamingCommunity segments. Explicit `TEMP_DIR` settings still win; remove an old override
-that points at the library root to use the hidden default. Each job owns its entire ULID
-subdirectory, including files a media scanner may have created inside it, and removes it before
-completion hooks run. Failed and canceled jobs are cleaned too; paused yt-dlp jobs keep their
-partials so they can resume.
-
-`AULOS_CLEAN_ORPHAN_TEMP=true` also removes scratch directories belonging to terminal or
-unknown items on startup. It remains opt-in and scans only the configured `TEMP_DIR`; switching
-to the new default does not sweep leftovers in an old temp root.
-
-Aulos downloads into a per-job scratch directory (`/downloads/.aulos-tmp/<ULID>/`) and moves the finished
-file to its destination at the end of the job — MeTube downloaded straight into `DOWNLOAD_DIR`.
-That matters for a `YTDL_OPTIONS` entry many MeTube setups carry:
-
-```json
-{ "key": "Exec", "exec_cmd": "python3 /config/jellyfin_nfo_generator.py %(filepath)q" }
-```
-
-A postprocessor's default `when` is `post_process`, which yt-dlp runs **before** the move, so
-`%(filepath)q` is a path inside the scratch directory. Aulos keeps every sidecar it writes — the
-`.info.json`, the `.description`, thumbnails, subtitles — next to the media in that directory,
-and moves the whole set together with anything a postprocessor of yours *wrote* there. So a hook
-that reads a sidecar relative to `%(filepath)q`, or writes its output next to it, works: it sees
-the file set it expects, and what it produces reaches `DOWNLOAD_DIR`.
-
-Four things to know:
-
-- The path an `Exec` hook is handed is the **pre-move** one. If your script needs the final path
-  (to hand it to another service, say), add `"when": "after_move"` to the postprocessor entry —
-  yt-dlp then runs it with `%(filepath)q`, and Aulos with `%(infojson_filename)q`, already
-  pointing at `DOWNLOAD_DIR`.
-- **Remove the `jellyfin_nfo_generator.py` entry** rather than carrying it over.
-  `AULOS_NFO_ENABLED=true` writes the same `.nfo` in-process for **every** provider — not just
-  yt-dlp — with no grandchild process per download, and deletes the `.info.json` it rendered from
-  once the `.nfo` is on disk, exactly as the script did.
-  Set `AULOS_NFO_PROVIDERS` (a comma-separated list of provider ids, empty by default, meaning
-  all) to narrow it. Running **both** is worse than running either: the script deletes the
-  `.info.json` as soon as it has read it, so the built-in hook — which runs after the download —
-  finds no metadata at all and, exactly as the script itself does in that situation, writes
-  nothing. Whichever `.nfo` you end up with is then the script's, wherever its `when` left it. If
-  you would rather keep the script, leave `AULOS_NFO_ENABLED` off.
-- The built-in hook renders from the `.info.json`, so yt-dlp has to be writing one: keep
-  `"writeinfojson": true` in your `YTDL_OPTIONS` (a MeTube setup that ran the NFO script already
-  has it). Without a sidecar — and without one of the providers that store their metadata in the
-  queue row, such as StreamingCommunity — there is nothing to render from, and the hook writes no
-  file rather than a title-and-empty-plot stub that Jellyfin would adopt as that video's metadata.
-  `GET /healthz` counts those runs as `components.nfo.wrote_nothing_total`.
-- A **cancelled** download takes its sidecars with it. The scratch directory is removed on cancel
-  (it is removed on delete either way), and since the `.info.json` now lives there until the
-  move, a cancelled job no longer leaves one orphaned in `DOWNLOAD_DIR` with no video beside it.
-
-## Development
-
-Requires Rust 1.95 (edition 2024). The four gates, which are what CI runs:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p aulos-workspace-tests      # DESIGN §3 dependency rules + packaging gates
-```
-
-The web UI has its own suite, in Node rather than Rust, and it is fully offline — it drives a mock
-server that speaks the same protocol, so it needs neither a built binary nor the network:
-
-```sh
-cd tools/web
-npm ci
-npx playwright install chromium
-
-npx playwright test        # the smoke: ~38 tests, chromium, a few seconds
-npm run serve              # a mock on http://127.0.0.1:8099/ to hand-drive the page
-```
-
-This is what CI's `web` job runs, along with the 70 KB budget check on `app.js` + `app.css`. To
-point the *serving* half of the same suite at a real binary instead — the manual check that the two
-sides of the contract meet — start a server and set `AULOS_WEB_BASE` to its base URL **including
-`URL_PREFIX`**; everything that needs the mock's scripted queue skips itself:
-
-```sh
-cargo build -p aulos-server
-DOWNLOAD_DIR=/tmp/dl STATE_DIR=/tmp/state PORT=8091 HOST=127.0.0.1 ./target/debug/aulos-server &
-cd tools/web && AULOS_WEB_BASE=http://127.0.0.1:8091/ npx playwright test
-```
-
-[`tools/web/README.md`](tools/web/README.md) has the mock's flags and what each mode covers.
-
-Docker CI builds and smoke-tests PRs that change `docker/`, `.dockerignore`, `.cargo/`, Cargo
-manifests/lockfiles, Rust toolchains/build scripts, the packaged Python shim or plugin examples,
-or the Docker workflow itself. Other PRs keep the regular CI checks and skip the image build.
-Add the `docker-build` label to request an image build on any PR; subsequent pushes also build
-while that label is present. `main` and `v*` tags still build and publish, and manual dispatch
-can build and smoke-test without publishing (`push=false`).
-
-The end-to-end suite runs the **real image** against a real Creative-Commons video, so it is gated
-behind an env var and never runs under `cargo test`:
-
-```sh
-docker build -f docker/Dockerfile -t aulos-server:dev .
-AULOS_E2E=1 tests/e2e/run.sh
-```
-
-The release architecture is `linux/amd64`. To run the suite against *that* image from an arm64 Mac
-— OrbStack runs amd64 under Rosetta — set the platform:
-
-```sh
-AULOS_E2E=1 AULOS_E2E_PLATFORM=linux/amd64 AULOS_E2E_BUILD=1 tests/e2e/run.sh
-```
-
-**This suite is a developer-machine gate and is deliberately not run in CI**: it downloads a real
-video, and YouTube answers GitHub's datacenter ranges with "Sign in to confirm you're not a bot".
-CI builds the image and smokes it offline instead; the one network check there is the three-daily
-`mode=extract` in `update-yt-dlp.yml`.
-
-The suite asserts the things only a container can be asked: the `healthz` roll-up with the POT sidecar
-supervised, `202`-before-extraction, the WebSocket sequence, `PUID`/`PGID`/`UMASK` on the produced
-file, `Range` requests on the file routes, retired-route rejection, a restart mid-download resuming rather than
-stranding the item, a clean `docker logs` ERROR sweep, and a second profile that imports a real
-legacy `STATE_DIR`. Knobs: `AULOS_IMAGE`, `AULOS_E2E_BUILD`, `AULOS_E2E_URL`, `AULOS_E2E_PORT`, `AULOS_E2E_PLATFORM`,
-`AULOS_E2E_KEEP`.
-
-### Layout
-
-| Path | What lives there |
-|---|---|
-| `crates/aulos-core` | Domain types, status vocabulary, ids, events, config, health registry |
-| `crates/aulos-store` | SQLite (WAL) store actor + legacy JSON importer |
-| `crates/aulos-provider` | `Provider` trait, registry, progress sink, `command` plugins |
-| `crates/aulos-provider-ytdlp` | yt-dlp provider and its Python shim |
-| `crates/aulos-provider-sc` | StreamingCommunity provider |
-| `crates/aulos-queue` | Scheduler, slots, resolution pool, cancellation, realtime aggregator |
-| `crates/aulos-api` | axum: v2 REST + WebSocket, health, file serving, the embedded web UI |
-| `crates/aulos-api/web` | The shipped page itself — HTML, CSS, one ES module, two icons, the manifest |
-| `crates/aulos-telegram` | teloxide bot |
-| `crates/aulos-subscriptions` | Subscription manager and scheduler |
-| `crates/aulos-hooks` | Jellyfin, NFO, audio-sync and community hooks |
-| `crates/aulos-apns` | Apple push: alerts and Live Activities for the iOS app |
-| `crates/aulos-server` | The binary: wiring, POT sidecar supervisor, config watcher, signals |
-| `docker/` | `Dockerfile`, `entrypoint.sh`, `compose.example.yml` |
-| `plugins/examples/` | Worked example plugins |
-| `tools/web/` | Dev-only: the protocol mock and the Playwright smoke for the page (nothing here ships) |
-| `tests/e2e/` | The container end-to-end suite |
-
-### CLI
-
-```
-aulos-server [serve | check-config | import | doctor | healthcheck]
-```
-
-The subcommand is optional and defaults to `serve`, because the entrypoint ends in
-`exec … aulos-server "$@"`. `healthcheck` is what the image's `HEALTHCHECK` runs; it loads the same
-config as `serve`, so `URL_PREFIX` normalisation applies, and it exits non-zero against a server
-that is not running — which is the point.
-
-## Releases
-
-Add the `release` label before merging a PR into `main` to publish a release. The merge is
-tagged `vYYYY.MM.DD` using its UTC date, with `.1`, `.2`, etc. for additional releases that day.
-The tag triggers the existing GitHub release (binary, checksums and generated notes) and GHCR
-image workflows. Rerunning the tag job reuses the existing tag for that merge.
-
-This requires the repository's `AULOS_REPO_PAT` secret with permission to create tags: tags
-created with `GITHUB_TOKEN` do not trigger the downstream workflows. Ordinary merges keep
-publishing the usual dated and `latest` container images without a GitHub release.
-
-Published images carry OCI version, commit revision, build time and source labels. The version
-label matches the image's `AULOS_VERSION` and `METUBE_VERSION` defaults; iOS displays the server's
-version from `/api/v2/capabilities`. A container updater that copies the old container's environment
-can preserve a stale version even after pulling a newer image. Compare the image defaults with
-the running container's environment before treating this as a build problem:
-
-```sh
-docker image inspect "$(docker inspect -f '{{.Image}}' aulos)" \
-  -f '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(AULOS|METUBE)_VERSION='
-docker inspect aulos \
-  -f '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(AULOS|METUBE)_VERSION='
-```
-
-If they differ, recreate the service from its Compose configuration without explicit version
-environment overrides so it inherits the new image defaults.
+The response is `202 Accepted` with an item ID. Extraction and downloading run in the background.
+Progress is available in the web UI, at `/api/v2/state`, and through `/ws`.
+
+Use [docker/compose.example.yml](docker/compose.example.yml) for a deployment with separate audio
+and configuration directories.
 
 ## Documentation
 
-- [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture, and the env var table (§17.3).
-- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the v2 wire contract for clients.
-- [`docs/BRIEF.md`](docs/BRIEF.md) — binding decisions and the v1.0 scope trims.
-- [`docs/PLAN.md`](docs/PLAN.md) / [`docs/STATUS.md`](docs/STATUS.md) — work packages and state.
-- [`docs/design/web-ui/`](docs/design/web-ui/README.md) — the web UI's design artboards, and how
-  their tokens map onto the shipped CSS.
-- [`docs/INTEGRATION-NOTES.md`](docs/INTEGRATION-NOTES.md) — where the implementation deviates
-  from DESIGN, and why.
+| Task | Guide |
+|---|---|
+| Set environment variables and yt-dlp options | [Configuration](docs/configuration.md) |
+| Deploy, upgrade, back up or troubleshoot | [Operations](docs/operations.md) |
+| Set up Telegram, Jellyfin or iOS push | [Integrations](docs/integrations.md) |
+| Write a provider or hook plugin | [Plugins](docs/plugins.md) |
+| Build an API client | [Protocol v2](docs/PROTOCOL.md) |
+| Understand the server | [Architecture](docs/DESIGN.md) |
+| Build, test or release changes | [Development](docs/development.md) |
+
+Aulos supports v2 clients only. MeTube v1 routes and Socket.IO are not supported. Existing Aulos
+SQLite databases migrate at startup. To move from MeTube JSON state, use the explicit
+[legacy import procedure](docs/operations.md#importing-metube-state).
