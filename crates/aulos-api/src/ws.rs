@@ -78,6 +78,9 @@ pub const CLOSE_TOO_BIG: u16 = 1009;
 /// `1001 Going Away` — the server is shutting down.
 pub const CLOSE_GOING_AWAY: u16 = 1001;
 
+// A full send buffer can also block the close frame. Drop the socket after this grace period.
+const CLOSE_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// The `<p>ws` route.
 pub fn router(state: ApiState) -> axum::Router {
     let p = state.cfg.url_prefix.clone();
@@ -462,12 +465,14 @@ async fn send(state: &ApiState, socket: &mut WebSocket, message: Message) -> Res
 
 /// Sends a close frame, best effort.
 async fn close(socket: &mut WebSocket, code: u16, reason: &str) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
+    let _ = tokio::time::timeout(
+        CLOSE_SEND_TIMEOUT,
+        socket.send(Message::Close(Some(CloseFrame {
             code,
             reason: Utf8Bytes::from(reason.to_owned()),
-        })))
-        .await;
+        }))),
+    )
+    .await;
 }
 
 /// A JSON value as a text frame.
