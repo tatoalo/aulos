@@ -157,6 +157,8 @@ pub struct EntryHints {
     pub filesize_approx: Option<u64>,
     /// A thumbnail URL, for the NFO hook and for a future rich client.
     pub thumbnail: Option<Box<str>>,
+    /// Source publication date as YYYY-MM-DD, when known.
+    pub published_date: Option<Box<str>>,
     /// Uploader / channel name.
     pub uploader: Option<Box<str>>,
 }

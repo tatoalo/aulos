@@ -282,6 +282,7 @@ async fn the_install_id_column_is_added_to_a_database_that_already_has_devices()
 
     // Rewind to the schema `0003` left: the row stays, the column goes.
     let conn = Connection::open(support::db_path(dir.path())).unwrap();
+    drop_download_history(&conn);
     conn.execute_batch("ALTER TABLE devices DROP COLUMN install_id")
         .unwrap();
     conn.pragma_update(None, "user_version", 3).unwrap();
@@ -313,7 +314,12 @@ async fn the_install_id_column_is_added_to_a_database_that_already_has_devices()
 /// DDL and fail with "table devices already exists". A test that wants a pre-`0002` database has
 /// to undo what came after it, so this drops `0003`'s objects too — and with them `0004`'s column,
 /// which lives on `0003`'s table. **Every migration that creates DDL adds its undo here.**
+fn drop_download_history(conn: &Connection) {
+    conn.execute_batch("DROP TRIGGER remember_inserted_download; DROP TRIGGER remember_finished_download; DROP TABLE download_history;").unwrap();
+}
+
 fn rewind_to_0001(conn: &Connection) {
+    drop_download_history(conn);
     conn.execute_batch(
         "DROP INDEX IF EXISTS devices_start_token; \
          DROP INDEX IF EXISTS live_activities_item; \

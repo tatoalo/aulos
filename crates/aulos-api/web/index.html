@@ -203,6 +203,18 @@
   </div>
 </div>
 
+<div class="sheet releasesheet" id="releases-sheet" role="dialog" aria-modal="true" aria-labelledby="releases-title" hidden>
+  <div class="sheet-hd"><h2 id="releases-title">Existing releases</h2><button class="text-btn" id="releases-close" type="button">Done</button></div>
+  <div class="release-intro"><p id="releases-sub"></p><p class="note">Choose what to download. New releases will arrive automatically.</p></div>
+  <div class="release-tools"><button class="link" id="releases-select" type="button">Select available</button><label><input id="releases-show" type="checkbox"> Show downloaded</label></div>
+  <p class="note" id="releases-status" role="status"></p>
+  <button class="text-btn" id="releases-reload" type="button" hidden>Reload releases</button>
+  <div id="releases-list" class="release-list"></div>
+  <button class="text-btn" id="releases-more" type="button" hidden>Load more</button>
+  <p class="add-err" id="releases-error" role="alert" hidden></p>
+  <div class="release-footer"><p class="note">Download history is kept even after files are deleted.</p><button class="btn-block" id="releases-download" type="button" disabled>Download selected</button><button class="text-btn" id="releases-future" type="button">Future releases only</button></div>
+</div>
+
 <div class="menu" id="menu" role="menu" hidden></div>
 <div class="toasts" id="toasts" role="region" aria-label="Notifications"></div>
 

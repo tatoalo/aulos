@@ -10,7 +10,7 @@ use crate::options::StoreOptions;
 
 /// `meta.schema_version` — written for human inspection alongside `user_version`, which
 /// `rusqlite_migration` owns (DESIGN §7.3).
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Migration `0001_init.sql`, embedded so a fresh container needs no data files.
 const M0001: &str = include_str!("../migrations/0001_init.sql");
@@ -26,12 +26,20 @@ const M0003: &str = include_str!("../migrations/0003_devices.sql");
 /// (PROTOCOL §1.3, §4.8; DESIGN §25.2).
 const M0004: &str = include_str!("../migrations/0004_device_install_id.sql");
 
+const M0005: &str = include_str!("../migrations/0005_download_history.sql");
+
 /// The forward-only migration set. Additive, one up-only file per migration.
 ///
 /// A migration may be **data-only**: `0002` changes no DDL, so it leaves the checked-in
 /// `schema.sql` dump untouched and only rewrites rows an older build wrote wrong.
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(M0001), M::up(M0002), M::up(M0003), M::up(M0004)])
+    Migrations::new(vec![
+        M::up(M0001),
+        M::up(M0002),
+        M::up(M0003),
+        M::up(M0004),
+        M::up(M0005),
+    ])
 }
 
 /// Applies the DESIGN §7.1 pragma set to a read-write connection.

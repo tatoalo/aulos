@@ -120,14 +120,13 @@ jobs:
       - run: node --test .github/scripts/tag-release.test.cjs
       - run: npx playwright install --with-deps chromium
         working-directory: tools/web
-      - name: the shipped page stays under the 96 KB budget
+      - name: the shipped page stays under the 104 KB budget
         run: |
           set -eu
-          # Raised from 70 KB when the Subscriptions panel landed (design D6); the page is still
-          # dependency-free, unbundled and served straight from the binary (~90 KB of the 96).
+          # Includes the subscription release picker. No framework or external assets.
           n=$(cat crates/aulos-api/web/app.js crates/aulos-api/web/app.css | wc -c)
           echo "app.js + app.css = $n bytes"
-          test "$n" -lt 98304 || { echo "::error::the shipped page is over the 96 KB budget"; exit 1; }
+          test "$n" -lt 106496 || { echo "::error::the shipped page is over the 104 KB budget"; exit 1; }
       - run: npx playwright test
         working-directory: tools/web
       - uses: actions/upload-artifact@v4

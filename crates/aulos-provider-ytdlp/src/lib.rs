@@ -39,6 +39,7 @@
 //! the two halves of that decision, and `tests/shim.rs` has the regression test for it.
 
 pub mod catalog;
+mod dates;
 pub mod errmap;
 pub mod formats;
 pub mod frames;

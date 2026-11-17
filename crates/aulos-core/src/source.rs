@@ -67,10 +67,7 @@ impl std::fmt::Display for SourceKind {
     }
 }
 
-/// `Item.source` on the wire: `{ kind, ref }`, both keys always present.
-///
-/// The subscription *name* and the Telegram *message id* are deliberately not here — they are in
-/// the database row and in the logs, which is where they are actually used.
+/// Item attribution. Subscription names are captured when the download is added.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SourceRef {
     /// Which surface created the item.
@@ -78,6 +75,9 @@ pub struct SourceRef {
     /// The chat id, subscription id or request id — always *the key*, may be `null`.
     #[serde(rename = "ref")]
     pub reference: Option<Arc<str>>,
+    /// Display name at creation time. Kept if the subscription is renamed or deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Arc<str>>,
 }
 
 impl SourceRef {
@@ -87,6 +87,7 @@ impl SourceRef {
         Self {
             kind,
             reference: None,
+            name: None,
         }
     }
 
@@ -96,7 +97,15 @@ impl SourceRef {
         Self {
             kind,
             reference: Some(reference.into()),
+            name: None,
         }
+    }
+
+    /// Attach a display name without changing the routing reference.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<Arc<str>>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 

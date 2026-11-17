@@ -8,16 +8,80 @@
 //! an optional `name`, so it reuses the add parser rather than re-deriving a selection: the two
 //! bodies cannot drift, and a new add field is available to a subscription the day it lands.
 
+use aulos_core::subscription::{ReleaseDownloadResult, SubscriptionReleases};
 use aulos_core::{CheckJob, SubChanges, SubCmd, SubError, SubId, SubscriptionView};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
 use crate::ApiState;
 use crate::error::{ApiError, Json};
+use crate::v2::Q;
 use crate::v2::{json_body, optional_json_body, parse_bool, parse_str, parse_u32, unknown_fields};
+
+/// Release scan bounds.
+#[derive(Deserialize, Default)]
+pub struct ReleaseQuery {
+    /// Number of entries to request. Defaults to 100, capped at 1000.
+    pub limit: Option<u32>,
+}
+
+/// Resolve current releases without changing the queue or seen state.
+pub async fn releases(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Q(query): Q<ReleaseQuery>,
+) -> Result<Json<SubscriptionReleases>, ApiError> {
+    let id = parse_id(&id)?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    send(&state, |ack| SubCmd::Releases { id, limit, ack })
+        .await
+        .map(Json)
+}
+
+/// Queue selected releases. An empty selection keeps future releases only.
+pub async fn download_releases(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<ReleaseDownloadResult>, ApiError> {
+    let root = json_body(&headers, &body)?;
+    let preview_id = root
+        .get("preview_id")
+        .ok_or_else(|| ApiError::invalid("preview_id", "A release list is required"))?;
+    let preview_id = Box::from(parse_str("preview_id", preview_id)?);
+    let ids = match root.get("ids") {
+        Some(Value::Array(ids)) if ids.len() <= 1000 => ids
+            .iter()
+            .map(|id| parse_str("ids", id).map(Box::from))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(ApiError::invalid(
+                "ids",
+                "ids must be an array of at most 1000 media IDs",
+            ));
+        }
+    };
+    let force = root
+        .get("force")
+        .map(|value| parse_bool("force", value))
+        .transpose()?
+        .unwrap_or(false);
+    let id = parse_id(&id)?;
+    send(&state, |ack| SubCmd::DownloadReleases {
+        id,
+        preview_id,
+        ids,
+        force,
+        ack,
+    })
+    .await
+    .map(Json)
+}
 
 /// `GET api/v2/subscriptions`.
 pub async fn list(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {

@@ -25,6 +25,7 @@ tokio-util = { workspace = true, features = ["codec", "rt"] }
 nix = { workspace = true, features = ["signal", "process"] }
 command-fds = { workspace = true, features = ["tokio"] }
 url = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

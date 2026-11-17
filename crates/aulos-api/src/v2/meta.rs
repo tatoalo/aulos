@@ -33,7 +33,7 @@ use crate::{ApiState, DirsCache};
 /// `cancel_resolve` is in the list because `POST api/v2/downloads/cancel-resolve` exists: without
 /// the route a v2-only deployment would lose a capability legacy had — aborting a 500-item
 /// playlist add (PLAN WP-14).
-pub const FEATURES: [&str; 14] = [
+pub const FEATURES: [&str; 15] = [
     "async_add",
     "stable_ids",
     "deltas",
@@ -44,6 +44,7 @@ pub const FEATURES: [&str; 14] = [
     "cancel_resolve",
     "groups",
     "subscriptions",
+    "subscription_releases",
     "file_serving",
     "batch_add",
     "postprocessing_status",
@@ -883,7 +884,7 @@ mod tests {
             SUBTITLE_MODES,
             ["auto_only", "manual_only", "prefer_manual", "prefer_auto"]
         );
-        assert_eq!(FEATURES.len(), 14);
+        assert_eq!(FEATURES.len(), 15);
         assert!(FEATURES.contains(&"cancel_resolve"));
     }
 

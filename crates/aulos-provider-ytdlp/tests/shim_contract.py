@@ -239,6 +239,20 @@ def test_protocol_mismatch():
     check(frames[1]["t"] == "error", "the mismatch is an error frame")
 
 
+def test_publication_dates_reach_flat_entries():
+    print("publication dates")
+    with tempfile.TemporaryDirectory() as tmp:
+        dates = {"upload_date": "20261116", "release_date": "20261117", "timestamp": 1794873600}
+        scenario = scenario_file(tmp, {"extract": {"id": "dated", **dates}})
+        code, frames, _, _ = run_job({
+            "v": 1, "protocol": 1, "mode": "extract", "url": "https://stub.test/dated",
+            "extract": {"flat": True},
+        }, scenario=scenario)
+    check(code == 0, "dated extraction succeeds")
+    entry = next(f for f in frames if f["t"] == "entry")["entry"]
+    check(all(entry.get(k) == v for k, v in dates.items()), "source dates survive the flat-entry allow-list")
+
+
 def test_extract_streams_entries():
     """A playlist streams one ``entry`` frame per child and honours ``max_entries``."""
     print("extract")
@@ -870,6 +884,7 @@ def main():
         test_bad_jobs,
         test_protocol_mismatch,
         test_extract_streams_entries,
+        test_publication_dates_reach_flat_entries,
         test_premieres_wait_for_the_recording,
         test_subscription_shorts_are_blocked_before_writing_media,
         test_info_frame_drops_the_format_tables,

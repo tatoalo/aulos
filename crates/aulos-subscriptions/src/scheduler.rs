@@ -56,6 +56,8 @@ impl TaskParams {
 /// What a task reports back to the manager.
 #[derive(Debug)]
 pub enum CheckMsg {
+    /// An explicit release selection changed the seen count without changing the schedule.
+    ReleasesAdded(SubId),
     /// A permit was acquired and the check has begun — the manager flips `checking: true`.
     Started(SubId),
     /// The check finished. The manager persists, recomputes `next_due` and publishes.

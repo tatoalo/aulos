@@ -203,7 +203,9 @@ Download types are `video`, `audio`, `captions` and `thumbnail`. Codecs are `aut
 
 `source` contains `kind` and nullable `ref`. Kinds are `api_v2`, `ios`, `telegram`, `subscription`,
 plus stored historical values `api_v1`, `restart` and `retry`. A ref can identify the chat,
-subscription or iOS installation. Attribution is preserved on retry and recovery.
+subscription or iOS installation. Optional `name` captures the subscription name when the item
+is added. The name survives subscription renames and deletion. Attribution is preserved on retry
+and recovery.
 
 ### 2.4 Display rules
 
@@ -455,6 +457,8 @@ can be omitted because the server supplies defaults. Display relevant notices an
 | DELETE | `api/v2/subscriptions/{id}` | None | `204`. |
 | POST | `api/v2/subscriptions/check` | `{}` or `{"ids":[...]}` | `202 {"job_id":"...","count":1}`. |
 | POST | `api/v2/subscriptions/{id}/check` | None | `202` with job ID and count. |
+| GET | `api/v2/subscriptions/{id}/releases` | Optional `limit` query | `200 SubscriptionReleases`. |
+| POST | `api/v2/subscriptions/{id}/releases` | `preview_id`, `ids`, optional `force` | `200` with queued media IDs, skips and errors. |
 | POST | `api/v2/downloads/cancel-resolve` | Optional `generation` | `200` with `canceled`, `generation`, `seq`. |
 | GET | `api/v2/presets` | None | `200 {"presets":[...]}`. |
 | GET | `api/v2/custom-dirs` | None | Download and audio directory arrays; 404 if disabled. |
@@ -745,11 +749,50 @@ the URL represents a channel or playlist. A single-video URL returns `400 valida
 a duplicate subscription URL returns `409 conflict`.
 
 Existing visible entries are marked seen instead of downloaded, except upcoming livestreams.
-Later checks add unseen entries. A check request returns `202`; observe `checking`, `last_checked`
+Clients can then open the release picker to select older entries. Later checks add unseen entries
+unless the same media and download type have already been downloaded successfully. A check request returns `202`; observe `checking`, `last_checked`
 and `error` through subscription frames or REST. Failed checks use bounded backoff.
 
 YouTube subscription checks skip Shorts. Live broadcasts wait for a recording before downloading.
 These restrictions do not apply to explicit downloads.
+
+### 9.1 Existing releases
+
+The `subscription_releases` capability enables the picker. `GET .../{id}/releases?limit=100`
+resolves the current feed without changing the queue or seen state. Limits are clamped to
+1 through 1000. The response contains `preview_id`, `subscription_id`, `items`, `limit` and
+`has_more`. Increase the limit to load more. `has_more` means the scan reached its limit;
+it is not an exact total.
+
+Each release has `id` (provider media ID), `url`, `title`, nullable `duration` in seconds,
+nullable `channel`, nullable `published_date` (YYYY-MM-DD, as reported by the source),
+`waiting_for_release`, nullable `downloaded_at` in Unix milliseconds and
+nullable `queued_item_id`. Downloaded status applies to the subscription's download type.
+
+Submit `{"preview_id":"...","ids":["media-id"],"force":false}` to download selected releases.
+An empty ID array means future releases only. Unselected listed releases are marked seen,
+except live or upcoming broadcasts. The response has `queued` (media IDs), `skipped`
+(objects with `id` and `reason`) and `errors` (messages). Skip reasons are `already_downloaded`
+and `already_queued`. The server rechecks history and active items before queueing.
+
+`force:true` allows a successful download to be repeated. It does not bypass active-item
+protection. Previews expire after 10 minutes and the server keeps at most 16. An expired,
+evicted or mismatched preview returns `400 validation_failed`; reload the list before retrying.
+
+### 9.2 Seen items and download history
+
+`subscription_seen` records discovery and accepted queue entries per subscription. It does
+not prove that a download succeeded. During scheduled checks, failed queue validation leaves
+an entry eligible for a later check. The set is bounded by `SUBSCRIPTION_MAX_SEEN_IDS` and deleted with its subscription.
+
+`download_history` records successful downloads by canonical media identity and download type.
+It survives queue cleanup, subscription deletion and files removed from Jellyfin or disk.
+It applies across subscriptions and manual downloads. Audio and video have separate histories.
+Manual adds and the picker's explicit Download again action remain available.
+
+The migration imports successful items still in the database. Downloads cleared before the
+upgrade cannot be recovered. Aulos does not inspect Jellyfin to determine whether an item
+was watched or removed.
 
 ## 10. Supported surface
 

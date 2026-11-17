@@ -1521,3 +1521,54 @@ async fn the_catalog_body_etag_is_the_etag_header() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn release_routes_validate_the_selection_and_preserve_force() {
+    for_each_prefix(|prefix| async move {
+        let rig = Rig::start(prefix).await;
+        let (_, sub) = rig
+            .post(
+                "api/v2/subscriptions",
+                &json!({ "url": "https://youtube.com/@lectures" }),
+            )
+            .await;
+        let path = format!(
+            "api/v2/subscriptions/{}/releases",
+            sub["id"].as_str().unwrap()
+        );
+        let (status, listing) = rig.get(&format!("{path}?limit=5000")).await;
+        assert_eq!(status, 200);
+        assert_eq!(listing["limit"], 1000);
+        for ids in [json!([]), json!(["one", "two"])] {
+            let (status, result) = rig
+                .post(
+                    &path,
+                    &json!({ "preview_id": "preview-1", "ids": ids, "force": true }),
+                )
+                .await;
+            assert_eq!(status, 200);
+            assert_eq!(result["queued"], ids);
+        }
+        assert!(
+            rig.subs
+                .release_selections
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, _, force)| *force)
+        );
+        for body in [
+            json!({"ids": []}),
+            json!({"preview_id": "p", "ids": "wrong"}),
+            json!({"preview_id": "p", "ids": [], "force": "invalid"}),
+        ] {
+            let (status, result) = rig.post(&path, &body).await;
+            assert_eq!(status, 400, "{result}");
+        }
+        assert_eq!(
+            rig.get("api/v2/subscriptions/missing/releases").await.0,
+            404
+        );
+    })
+    .await;
+}

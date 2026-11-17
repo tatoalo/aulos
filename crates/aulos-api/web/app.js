@@ -93,6 +93,8 @@ function icon(name, size = 16, stroke = 2) {
 /* ---------------------------------------------------------- 3. formatting */
 
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+const addedDateFormat = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+const publishedDateFormat = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 function bytes(n) {
   if (n === null || n === undefined || !isFinite(n)) return '';
   let v = Math.max(0, n), i = 0;
@@ -152,6 +154,7 @@ const state = {
   subs: new Map(),
   health: new Map(),
   subsOk: false,
+  releasesOk: false,
   seq: 0,
   bootId: null,
   caps: null,
@@ -438,7 +441,7 @@ function rowFor(id) {
     '<div class="row-main">' +
       `<button class="chev" type="button" aria-expanded="false" hidden>${icon('right', 12, 2.5)}</button>` +
       '<div class="disc"></div>' +
-      '<div class="row-body"><div class="row-title"></div><div class="row-sub"><span class="st"></span><span class="rest"></span></div></div>' +
+      '<div class="row-body"><div class="row-title"></div><div class="row-sub"><span class="st"></span><span class="rest"></span></div><div class="row-origin" hidden></div></div>' +
       '<div class="row-acts"></div>' +
     '</div>' +
     '<div class="bars" hidden><div class="bar"><div class="fill"></div></div><div class="bar ph" hidden><div class="fill phase"></div></div></div>' +
@@ -449,6 +452,7 @@ function rowFor(id) {
     title: el.querySelector('.row-title'),
     st: el.querySelector('.st'),
     rest: el.querySelector('.rest'),
+    origin: el.querySelector('.row-origin'),
     acts: el.querySelector('.row-acts'),
     bars: el.querySelector('.bars'),
     fill: el.querySelector('.bar .fill'),
@@ -479,6 +483,12 @@ function patchRow(r, it) {
 
   if (v.title !== it.title) { refs.title.textContent = it.title || it.url || ''; v.title = it.title; }
 
+  if (v.createdAt !== it.created_at) {
+    v.createdAt = it.created_at;
+    v.addedDate = it.created_at ? `Added ${addedDateFormat.format(new Date(it.created_at))}` : '';
+  }
+  const origin = [v.addedDate, it.source?.kind === 'subscription' ? `From ${it.source.name || state.subs.get(it.source.ref)?.name || 'Subscription'}` : ''].filter(Boolean).join(' · ');
+  if (v.origin !== origin) { refs.origin.textContent = origin; refs.origin.hidden = !origin; v.origin = origin; }
   const sub = subFor(it);
   if (v.word !== sub.word || v.wordCls !== sub.cls) {
     refs.st.textContent = sub.word;
@@ -1101,6 +1111,7 @@ function subRowFor(id) {
       '<div class="row-acts">' +
         '<button class="sw sw-sm" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button>' +
         `<button class="iconbtn" type="button" data-sact="check" aria-label="Check now" title="Check now">${icon('retry', 16, 2.2)}</button>` +
+        `<button class="iconbtn" type="button" data-sact="releases" aria-label="Browse releases" title="Browse releases">${icon('list', 18)}</button>` +
         `<button class="iconbtn" type="button" data-sact="edit" aria-label="Edit" title="Edit">${icon('edit', 16, 2)}</button>` +
         `<button class="iconbtn danger" type="button" data-sact="delete" aria-label="Delete" title="Delete">${icon('trash', 16, 2)}</button>` +
       '</div>' +
@@ -1128,6 +1139,7 @@ function subRowFor(id) {
   };
   refs.sw.addEventListener('click', () => subToggle(id));
   refs.check.addEventListener('click', () => subCheck(id));
+  el.querySelector('[data-sact="releases"]').addEventListener('click', () => openReleases(state.subs.get(id)));
   el.querySelector('[data-sact="edit"]').addEventListener('click', () => subEdit(id, true));
   el.querySelector('[data-sact="delete"]').addEventListener('click', () => subDelete(id));
   el.querySelector('.e-cancel').addEventListener('click', () => subEdit(id, false));
@@ -1139,6 +1151,7 @@ function subRowFor(id) {
 
 function patchSub(r, s) {
   const { refs, v } = r;
+  r.el.querySelector('[data-sact="releases"]').hidden = !state.releasesOk;
 
   const title = s.name || subHost(s.url);
   if (v.title !== title) { refs.title.textContent = title; v.title = title; }
@@ -1304,12 +1317,118 @@ async function submitSub() {
     $('sub-name').value = '';
     subFormOpen(false);
     subUpsert(s);
+    if (state.releasesOk) openReleases(s);
   } catch (e) {
     // §9: a single-video URL is `400 validation_failed` and an existing one `409 conflict`; both
     // carry the sentence to show, so show it rather than inventing one.
     if (e.code !== 'unauthorized') subErr(e.message);
   } finally { btn.disabled = false; }
 }
+
+/* Existing releases. A preview is read-only until the user submits a choice. */
+let releases = null;
+function closeReleases() {
+  if (releases?.submitting) return;
+  releases = null;
+  closeOverlay($('releases-sheet'));
+}
+async function openReleases(sub) {
+  releases = { sub, selected: new Set(), data: null, busy: false };
+  $('releases-sub').textContent = sub.name;
+  $('releases-show').checked = false;
+  openOverlay($('releases-sheet'), $('releases-close'));
+  await loadReleases(100);
+}
+async function loadReleases(limit) {
+  const current = releases;
+  current.busy = true;
+  $('releases-error').hidden = true;
+  $('releases-status').textContent = 'Resolving existing releases…';
+  renderReleases();
+  try {
+    const data = await api(`${subPath(current.sub.id)}/releases?limit=${limit}`);
+    if (releases !== current) return;
+    current.data = data;
+    const available = new Set(data.items.filter((x) => !x.queued_item_id).map((x) => x.id));
+    current.selected = new Set([...current.selected].filter((id) => available.has(id)));
+  } catch (e) { if (releases === current) releaseError(e.message); }
+  finally { if (releases === current) { current.busy = false; renderReleases(); } }
+}
+function releaseError(message) {
+  $('releases-error').textContent = message;
+  $('releases-error').hidden = false;
+}
+function visibleReleases() {
+  return (releases?.data?.items || []).filter((x) => $('releases-show').checked || !x.downloaded_at);
+}
+function renderReleases() {
+  if (!releases) return;
+  const { data, selected, busy } = releases;
+  const list = $('releases-list');
+  const focused = document.activeElement?.dataset.release;
+  list.replaceChildren();
+  for (const entry of visibleReleases()) {
+    const row = document.createElement('label');
+    row.className = 'release-row';
+    const check = document.createElement('input');
+    check.type = 'checkbox'; check.dataset.release = entry.id; check.checked = selected.has(entry.id);
+    check.disabled = busy || !!entry.queued_item_id;
+    check.addEventListener('change', () => { if (check.checked) selected.add(entry.id); else selected.delete(entry.id); renderReleases(); });
+    const body = document.createElement('span'); body.className = 'release-body';
+    const title = document.createElement('strong'); title.textContent = entry.title;
+    const meta = document.createElement('span'); meta.className = 'note';
+    const date = entry.published_date && /^\d{4}-\d{2}-\d{2}$/.test(entry.published_date) ? new Date(`${entry.published_date}T00:00:00Z`) : null;
+    const published = date && Number.isFinite(date.getTime()) ? `${entry.waiting_for_release ? 'Scheduled' : 'Published'} ${publishedDateFormat.format(date)}` : '';
+    meta.textContent = [entry.channel, dur(entry.duration), published, entry.waiting_for_release && !published ? 'Upcoming' : ''].filter(Boolean).join(' · ');
+    body.append(title, meta);
+    const status = document.createElement('span'); status.className = 'release-badge';
+    status.textContent = entry.queued_item_id ? 'In queue' : entry.downloaded_at ? 'Downloaded' : 'Available';
+    if (entry.downloaded_at) status.classList.add('downloaded');
+    row.append(check, body, status); list.appendChild(row);
+    if (entry.id === focused) check.focus();
+  }
+  const hidden = data?.items.filter((x) => x.downloaded_at).length || 0;
+  if (!busy) $('releases-status').textContent = data ? `${data.items.length} releases${hidden && !$('releases-show').checked ? ` · ${hidden} downloaded hidden` : ''}${data.has_more ? ' · More available' : ''}` : 'Could not load releases.';
+  $('releases-more').hidden = !data?.has_more;
+  $('releases-more').textContent = data?.limit >= 1000 ? 'Showing the first 1,000 releases' : 'Load more';
+  $('releases-more').disabled = busy || data?.limit >= 1000;
+  $('releases-select').disabled = busy || !data;
+  $('releases-show').disabled = busy;
+  $('releases-future').disabled = busy || !data;
+  $('releases-close').disabled = !!releases.submitting;
+  $('releases-reload').hidden = !!data || busy;
+  $('releases-download').disabled = busy || !selected.size;
+  const again = data?.items.some((x) => selected.has(x.id) && x.downloaded_at);
+  $('releases-download').textContent = selected.size ? `${again ? 'Download again' : 'Download selected'} (${selected.size})` : 'Download selected';
+}
+async function submitReleases(futureOnly = false) {
+  const current = releases;
+  if (!current?.data || current.busy) return;
+  const ids = futureOnly ? [] : [...current.selected];
+  const force = current.data.items.some((x) => ids.includes(x.id) && x.downloaded_at);
+  current.busy = true; current.submitting = true; renderReleases();
+  try {
+    const result = await api(`${subPath(current.sub.id)}/releases`, { method: 'POST', body: { preview_id: current.data.preview_id, ids, force } });
+    current.busy = false; current.submitting = false;
+    for (const id of [...result.queued, ...result.skipped.map((x) => x.id)]) current.selected.delete(id);
+    if (result.errors.length) { await loadReleases(current.data.limit); releaseError(result.errors.join(' ')); return; }
+    closeReleases();
+    toast('info', futureOnly ? 'Watching for future releases.' : `${result.queued.length} added to the queue${result.skipped.length ? ` · ${result.skipped.length} already queued or downloaded` : ''}.`);
+  } catch (e) { current.busy = false; current.submitting = false; releaseError(e.message); renderReleases(); }
+}
+$('releases-close').addEventListener('click', closeReleases);
+$('releases-reload').addEventListener('click', () => loadReleases(100));
+$('releases-show').addEventListener('change', () => {
+  if (!$('releases-show').checked) for (const x of releases.data?.items || []) if (x.downloaded_at) releases.selected.delete(x.id);
+  renderReleases();
+});
+$('releases-select').addEventListener('click', () => {
+  for (const x of visibleReleases()) if (!x.queued_item_id && !x.downloaded_at) releases.selected.add(x.id);
+  renderReleases();
+});
+$('releases-more').addEventListener('click', () => loadReleases(Math.min(1000, releases.data.limit + 100)));
+$('releases-download').addEventListener('click', () => submitReleases());
+$('releases-future').addEventListener('click', () => submitReleases(true));
 
 /* ------------------------------------------------------------ 11. chrome */
 
@@ -1408,7 +1527,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
 let sheetReturn = null;
 
 /** The sheet on top (the token sheet stacks over the add sheet), or null. */
-const topSheet = () => ['token-sheet', 'confirm-sheet', 'about-sheet', 'sheet'].map($).find((el) => !el.hidden);
+const topSheet = () => ['token-sheet', 'confirm-sheet', 'about-sheet', 'releases-sheet', 'sheet'].map($).find((el) => !el.hidden);
 
 let confirmResolve = null;
 
@@ -1497,6 +1616,7 @@ async function loadCapabilities() {
   // `features` is the authority on whether the surface exists at all (§4.7); an older server that
   // does not list it gets no panel rather than four routes that 404.
   state.subsOk = !caps.features || caps.features.includes('subscriptions');
+  state.releasesOk = caps.features?.includes('subscription_releases') || false;
   picker = pickerFromCapabilities(caps);
   subPicker = pickerFromCapabilities(caps);
   syncPicker();
@@ -1532,7 +1652,7 @@ function wire() {
   $('add-btn').addEventListener('click', () => { if (isPhone()) openSheet(); else submitAdd(); });
   $('sheet-add').addEventListener('click', submitAdd);
   $('sheet-cancel').addEventListener('click', closeSheet);
-  $('scrim').addEventListener('click', () => { closeConfirm(); closeSheet(); closeToken(); closeAbout(); });
+  $('scrim').addEventListener('click', () => { closeConfirm(); closeSheet(); closeToken(); closeAbout(); closeReleases(); });
   $('confirm-cancel').addEventListener('click', () => closeConfirm());
   $('confirm-accept').addEventListener('click', () => closeConfirm(true));
 
@@ -1629,6 +1749,7 @@ function wire() {
     if (!$('token-sheet').hidden) closeToken();
     else if (!$('confirm-sheet').hidden) closeConfirm();
     else if (!$('about-sheet').hidden) closeAbout();
+    else if (!$('releases-sheet').hidden) closeReleases();
     else if (!$('sheet').hidden) closeSheet();
   });
 

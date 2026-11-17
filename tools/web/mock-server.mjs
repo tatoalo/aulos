@@ -203,6 +203,18 @@ function seedSubs() {
   }));
 }
 seedSubs();
+if (flag('release-preview')) {
+  items.clear();
+  items.set(IDS.fin, item({ id: IDS.fin, ord: 90, title: 'Lecture 1: What Are Agents?',
+    status: 'finished', percent: 100, size: 284164096, filename: 'Lecture 1.mp4',
+    download_url: 'download/Lecture1.mp4', finished_at: now - 86400000,
+    source: { kind: 'subscription', ref: SUB_IDS.a, name: 'CMU AI Agents (Fall 2026)' } }));
+  subs.clear();
+  subs.set(SUB_IDS.a, sub({ id: SUB_IDS.a, name: 'CMU AI Agents (Fall 2026)',
+    url: 'https://www.youtube.com/playlist?list=sample', last_checked: now - 300000,
+    next_due: now + 3300000, seen_count: 4 }));
+}
+
 
 const hostOf = (u) => String(u).replace(/^https?:\/\/(www\.)?/i, '').split('/')[0];
 
@@ -220,7 +232,7 @@ const CAPABILITIES = {
     batch_ms: 250, urgent_ms: 25, delta_semantics: 'absent-key-means-unchanged',
   },
   features: ['async_add', 'stable_ids', 'deltas', 'since_resume', 'etag', 'retry', 'cancel',
-    'cancel_resolve', 'groups', 'subscriptions', 'file_serving', 'batch_add',
+    'cancel_resolve', 'groups', 'subscriptions', 'subscription_releases', 'file_serving', 'batch_add',
     'postprocessing_status', 'per_url_catalog'],
   actions: ['start', 'pause', 'cancel', 'retry', 'delete'],
   formats: [
@@ -686,6 +698,23 @@ const server = createServer(async (req, res) => {
     for (const id of removed) items.delete(id);
     if (removed.length) send({ t: 'removed', ids: removed, reason: 'cleared' });
     json(res, 200, { removed, seq, warnings: [] });
+    return;
+  }
+
+  const releaseMatch = /^api\/v2\/subscriptions\/([^/]+)\/releases$/.exec(path);
+  if (releaseMatch) {
+    const id = releaseMatch[1];
+    if (req.method === 'GET') {
+      const titles = ['Lecture 4: Planning and Reasoning', 'Lecture 3: Tools and Function Calling', 'Lecture 2: Building an Agent', 'Lecture 1: What Are Agents?'];
+      json(res, 200, { preview_id: 'preview-1', subscription_id: id, limit: 100, has_more: false,
+        items: titles.map((title, i) => ({ id: `lecture-${i + 1}`, title, url: `https://example.test/lecture-${i + 1}`,
+          duration: [4260, 3840, 4020, 3720][i], published_date: ['2026-11-16', '2026-11-12', '2026-11-09', '2026-11-05'][i], channel: 'CMU AI Agents', waiting_for_release: false,
+          downloaded_at: i === 3 ? now - 86400000 : null, queued_item_id: i === 2 ? ULID('Q') : null })) });
+    } else {
+      const body = await readBody(req);
+      log.push({ method: 'POST', path, body });
+      json(res, 200, { queued: body.ids || [], skipped: [], errors: [] });
+    }
     return;
   }
 
