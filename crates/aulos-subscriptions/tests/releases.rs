@@ -208,3 +208,110 @@ async fn preview_ids_and_selected_ids_are_validated_and_limits_are_reported() {
     ));
     assert!(h.items().await.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_titles_are_resolved_without_changing_identity_or_seen_state() {
+    let mut missing = entry("missing");
+    missing.title = missing.url.as_str().into();
+    let mut known = entry("known");
+    known.title = "Lecture: Functions".into();
+    let (h, provider, id) = setup(vec![missing.clone(), known]).await;
+    let mut detailed = entry("provider-id");
+    detailed.title = "A real lecture title".into();
+    detailed.hints.duration = Some(123.0);
+    provider.set_details(missing.url.as_str(), Ok(detailed));
+    let seen = h.seen(&id).await;
+    let before = provider.resolve_count();
+    let listing = browse(&h, &id, 100).await;
+    assert_eq!(provider.resolve_count() - before, 2); // Feed plus the one missing title.
+    assert_eq!(listing.items[0].id.as_ref(), "missing");
+    assert_eq!(listing.items[0].url.as_ref(), missing.url.as_str());
+    assert_eq!(listing.items[0].title.as_ref(), "A real lecture title");
+    assert_eq!(listing.items[0].duration, Some(123.0));
+    assert_eq!(
+        (listing.unavailable_count, listing.unresolved_count),
+        (0, 0)
+    );
+    assert_eq!(h.seen(&id).await, seen);
+    assert!(h.items().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_and_deleted_releases_are_hidden_but_upcoming_releases_remain() {
+    let mut private = entry("private");
+    private.title = private.url.as_str().into();
+    let mut deleted = entry("deleted");
+    deleted.title = "[Deleted video]".into();
+    let mut upcoming = entry("upcoming");
+    upcoming.live = aulos_provider::LiveStatus::IsUpcoming { at: None };
+    let (h, provider, id) = setup(vec![private.clone(), deleted.clone(), upcoming]).await;
+    provider.set_details(
+        private.url.as_str(),
+        Err(aulos_core::ErrorCode::AuthRequired),
+    );
+    provider.set_details(
+        deleted.url.as_str(),
+        Err(aulos_core::ErrorCode::Unavailable),
+    );
+    let listing = browse(&h, &id, 2).await;
+    assert!(listing.items.is_empty());
+    assert!(listing.has_more); // Hidden entries must not hide the rest of the playlist.
+    assert_eq!(
+        (listing.unavailable_count, listing.unresolved_count),
+        (2, 0)
+    );
+    let listing = browse(&h, &id, 100).await;
+    assert_eq!(listing.items.len(), 1);
+    assert_eq!(listing.items[0].id.as_ref(), "upcoming");
+    assert!(listing.items[0].waiting_for_release);
+    assert!(submit(&h, &listing, &["private"], true).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn temporary_failures_and_placeholder_titles_stay_hidden_until_resolved() {
+    let mut missing = entry("missing");
+    missing.title = "youtube video #missing".into();
+    let (h, provider, id) = setup(vec![missing.clone()]).await;
+    provider.set_details(missing.url.as_str(), Err(aulos_core::ErrorCode::Network));
+    let failed = browse(&h, &id, 100).await;
+    assert!(failed.items.is_empty());
+    assert_eq!((failed.unavailable_count, failed.unresolved_count), (0, 1));
+    provider.set_details(missing.url.as_str(), Ok(missing.clone()));
+    assert_eq!(browse(&h, &id, 100).await.unresolved_count, 1);
+    provider.set_details(missing.url.as_str(), Ok(entry("missing")));
+    let recovered = browse(&h, &id, 100).await;
+    assert_eq!(recovered.items[0].title.as_ref(), "Video missing");
+    assert_eq!(recovered.unresolved_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_title_lookups_share_a_deadline_and_start_at_most_four_at_once() {
+    let provider = ScriptProvider::new();
+    let entries = (0..6)
+        .map(|i| {
+            let mut video = entry(&i.to_string());
+            video.title = video.url.as_str().into();
+            video
+        })
+        .collect();
+    provider.set_feed(&feed_url("slow"), entries);
+    let h = Harness::builder()
+        .env("AULOS_RESOLVE_TIMEOUT_SECS", "1")
+        .provider(provider.clone())
+        .build()
+        .await;
+    let mut request = DownloadRequest::new(feed_url("slow").parse().unwrap(), selection());
+    request.auto_start = false;
+    let sub = h
+        .subscribe_with(request, None, Some("Slow feed"))
+        .await
+        .unwrap();
+    provider.slow(std::time::Duration::from_secs(2));
+    let before = provider.resolve_count();
+    let listing = tokio::time::timeout(std::time::Duration::from_secs(5), browse(&h, &sub.id, 100))
+        .await
+        .unwrap();
+    assert!(listing.items.is_empty());
+    assert_eq!(listing.unresolved_count, 6);
+    assert_eq!(provider.resolve_count() - before, 5); // Feed plus four concurrent lookups.
+}

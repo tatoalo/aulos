@@ -780,6 +780,8 @@ impl SubsFake {
                         items: vec![],
                         limit,
                         has_more: false,
+                        unavailable_count: 0,
+                        unresolved_count: 0,
                     })
                 } else {
                     Err(SubError::NotFound(id))

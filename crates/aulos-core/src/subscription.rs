@@ -348,6 +348,12 @@ pub struct SubscriptionReleases {
     pub limit: u32,
     /// The scan reached its limit; more entries may exist.
     pub has_more: bool,
+    /// Entries the source reported as inaccessible, omitted from `items`.
+    #[serde(default)]
+    pub unavailable_count: u32,
+    /// Entries whose details could not be loaded, omitted from `items` until a retry.
+    #[serde(default)]
+    pub unresolved_count: u32,
 }
 
 /// A release not queued by a selection request.

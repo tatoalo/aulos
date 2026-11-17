@@ -764,6 +764,12 @@ resolves the current feed without changing the queue or seen state. Limits are c
 `has_more`. Increase the limit to load more. `has_more` means the scan reached its limit;
 it is not an exact total.
 
+Missing titles are resolved individually, with at most four lookups at once and a 20-second
+total deadline. Private, deleted and inaccessible entries are omitted and counted in
+`unavailable_count`. Temporary lookup failures are omitted and counted in `unresolved_count`;
+reload the list to retry. Both counts default to zero when absent. Hidden entries cannot be
+selected and browsing does not mark them seen. Upcoming broadcasts remain visible.
+
 Each release has `id` (provider media ID), `url`, `title`, nullable `duration` in seconds,
 nullable `channel`, nullable `published_date` (YYYY-MM-DD, as reported by the source),
 `waiting_for_release`, nullable `downloaded_at` in Unix milliseconds and

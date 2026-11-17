@@ -79,6 +79,8 @@ impl Checker {
         feed.entries
             .retain(|entry| unique.insert(media_id_of(entry)));
         feed.entries.truncate(limit as usize);
+        let (unavailable_count, unresolved_count) =
+            self.resolve_release_titles(record, &mut feed.entries).await;
         let states = self.states_for(record, &feed.entries).await?;
         let items = feed
             .entries
@@ -129,6 +131,8 @@ impl Checker {
             items,
             limit,
             has_more: feed.limit_reached,
+            unavailable_count,
+            unresolved_count,
         })
     }
 

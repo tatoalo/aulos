@@ -1388,7 +1388,7 @@ function renderReleases() {
     if (entry.id === focused) check.focus();
   }
   const hidden = data?.items.filter((x) => x.downloaded_at).length || 0;
-  if (!busy) $('releases-status').textContent = data ? `${data.items.length} releases${hidden && !$('releases-show').checked ? ` · ${hidden} downloaded hidden` : ''}${data.has_more ? ' · More available' : ''}` : 'Could not load releases.';
+  if (!busy) $('releases-status').textContent = data ? `${data.items.length} releases${hidden && !$('releases-show').checked ? ` · ${hidden} downloaded hidden` : ''}${data.unavailable_count ? ` · ${data.unavailable_count} unavailable hidden` : ''}${data.unresolved_count ? ` · ${data.unresolved_count} could not be resolved` : ''}${data.has_more ? ' · More available' : ''}` : 'Could not load releases.';
   $('releases-more').hidden = !data?.has_more;
   $('releases-more').textContent = data?.limit >= 1000 ? 'Showing the first 1,000 releases' : 'Load more';
   $('releases-more').disabled = busy || data?.limit >= 1000;
@@ -1396,7 +1396,7 @@ function renderReleases() {
   $('releases-show').disabled = busy;
   $('releases-future').disabled = busy || !data;
   $('releases-close').disabled = !!releases.submitting;
-  $('releases-reload').hidden = !!data || busy;
+  $('releases-reload').hidden = busy || (!!data && !data.unresolved_count);
   $('releases-download').disabled = busy || !selected.size;
   const again = data?.items.some((x) => selected.has(x.id) && x.downloaded_at);
   $('releases-download').textContent = selected.size ? `${again ? 'Download again' : 'Download selected'} (${selected.size})` : 'Download selected';

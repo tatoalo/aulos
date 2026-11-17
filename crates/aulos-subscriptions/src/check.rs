@@ -36,6 +36,9 @@ use crate::model::{CheckFailure, CheckReport};
 #[path = "releases.rs"]
 mod releases;
 
+#[path = "release_metadata.rs"]
+mod release_metadata;
+
 /// The throwaway selection a *metadata-only* resolution borrows.
 ///
 /// `flat: true` extraction never looks at the format picker, so this only has to be a valid
