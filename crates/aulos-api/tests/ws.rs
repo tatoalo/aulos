@@ -759,52 +759,61 @@ async fn an_oversized_client_frame_closes_the_socket() {
 #[tokio::test]
 async fn a_client_that_never_reads_is_disconnected_and_counted() {
     for_each_prefix(|prefix| async move {
-        // A 50 ms send budget and a big burst: the socket's buffer fills, the send blocks past the
-        // budget, and the session closes it with `1013` rather than holding memory in the hub
-        // (DESIGN §15.4 step 6).
         let rig = Rig::builder(prefix)
             .env("AULOS_WS_SEND_TIMEOUT_MS", "50")
             .start()
             .await;
         let mut fast = connect(&rig, "ws").await;
         assert_eq!(next_frame(&mut fast).await["t"], "snapshot");
-        let slow = connect(&rig, "ws").await;
 
-        // 4 MB of frames, published straight onto the bus.
-        let filler = "x".repeat(32 * 1024);
-        for _ in 0..128 {
+        // Set the receive window before connecting so OS autotuning cannot absorb the burst.
+        let tcp = tokio::net::TcpSocket::new_v4().unwrap();
+        tcp.set_recv_buffer_size(1024).unwrap();
+        let stream = tcp.connect(rig.addr).await.unwrap();
+        let (mut slow, _) = tokio_tungstenite::client_async(
+            rig.ws_url("ws"),
+            tokio_tungstenite::MaybeTlsStream::Plain(stream),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next_frame(&mut slow).await["t"], "snapshot");
+
+        // Keep the fast client reading each frame while the slow one stops reading.
+        // Cap both traffic and waiting so a broken timeout fails instead of hanging the suite.
+        let filler = "x".repeat(64 * 1024);
+        for n in 0..512 {
             rig.hub.publish(
                 FrameKind::Notice,
                 json!({ "level": "info", "code": "plugin_note", "id": null, "message": filler }),
             );
+            assert_eq!(next_frame(&mut fast).await["t"], "notice");
+            if n % 8 == 0 {
+                let (_, health) = rig.get("healthz").await;
+                if health["ws"]["slow_disconnects"].as_u64().unwrap() >= 1 {
+                    break;
+                }
+            }
         }
 
-        // The fast reader is unaffected: it still receives frames.
-        let mut fast_frames = 0;
-        while try_next_frame(&mut fast, Duration::from_millis(400))
-            .await
-            .is_some()
-        {
-            fast_frames += 1;
-            if fast_frames > 4 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (_, health) = rig.get("healthz").await;
+            if health["ws"]["slow_disconnects"].as_u64().unwrap() == 1
+                && health["ws"]["clients"].as_u64().unwrap() == 1
+            {
                 break;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the slow client must be disconnected by the server: {health}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(fast_frames > 0, "the fast reader kept receiving");
 
-        // The slow one is gone, and `healthz` says why.
+        send_frame(&mut fast, &json!({"t": "ping", "c": "still reading"})).await;
+        assert_eq!(next_frame_of(&mut fast, "pong").await["c"], "still reading");
+        // Keep the slow client alive until after the server has closed its session.
         drop(slow);
-        for _ in 0..40 {
-            let (_, health) = rig.get("healthz").await;
-            let disconnects = health["ws"]["slow_disconnects"].as_u64().unwrap();
-            let lagged = health["ws"]["lagged_total"].as_u64().unwrap();
-            if disconnects >= 1 || lagged >= 1 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let (_, health) = rig.get("healthz").await;
-        panic!("the slow client was neither lagged nor disconnected: {health}");
     })
     .await;
 }
