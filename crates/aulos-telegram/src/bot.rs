@@ -51,6 +51,9 @@ pub const TICK: Duration = Duration::from_secs(1);
 /// sixty seconds after it appeared read as the bot losing track of the job.
 pub const RETIRE_AFTER: Duration = Duration::from_secs(60);
 
+const SEND_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_SEND_BACKOFF: Duration = Duration::from_secs(30 * 60);
+
 /// The `Incoming` channel depth. A full queue means the actor is busy, and Telegram will redeliver.
 pub const INCOMING_CAPACITY: usize = 256;
 
@@ -239,9 +242,14 @@ struct ChatBoard {
     /// board that never reached a tick retires silently (DESIGN §12.4), whereas one whose message
     /// died mid-flight is still owed its closing layout.
     drawn: bool,
+    send_backoff: Option<(Instant, Duration)>,
 }
 
 impl ChatBoard {
+    fn send_due(&self, now: Instant) -> bool {
+        self.send_backoff.is_none_or(|(due, _)| now >= due)
+    }
+
     fn start_new_message(&mut self) {
         let Some(message) = self.message.take() else {
             return;
@@ -955,6 +963,9 @@ impl TelegramActor {
             return;
         }
         let text = render::render_board(&lines, now_ms);
+        if board.message.is_none() && !board.send_due(self.clock.instant()) {
+            return;
+        }
         if let Err(reason) = self.limiter.acquire(chat) {
             tracing::trace!("board edit for {chat} deferred: {reason:?}");
             return;
@@ -966,18 +977,43 @@ impl TelegramActor {
                     self.mark_rendered(chat, body);
                 }
             }
-            None => match self.transport.send_message(chat, &text, None).await {
-                Ok(id) => {
-                    self.limiter.record_sent(chat);
-                    if let Some(board) = self.boards.get_mut(&chat) {
-                        board.message = Some(id);
-                        board.last_rendered = body;
-                        board.dirty = false;
-                        board.drawn = true;
-                    }
+            None => {
+                if let Some(id) = self.send_board(chat, &text).await
+                    && let Some(board) = self.boards.get_mut(&chat)
+                {
+                    board.message = Some(id);
+                    board.last_rendered = body;
+                    board.dirty = false;
+                    board.drawn = true;
                 }
-                Err(e) => self.after_failure(chat, &e).await,
-            },
+            }
+        }
+    }
+
+    async fn send_board(&mut self, chat: i64, text: &str) -> Option<MessageId> {
+        match self.transport.send_message(chat, text, None).await {
+            Ok(id) => {
+                self.limiter.record_sent(chat);
+                if let Some(board) = self.boards.get_mut(&chat) {
+                    board.send_backoff = None;
+                }
+                Some(id)
+            }
+            Err(e) => {
+                if !matches!(e, TgError::RetryAfter(_))
+                    && let Some(board) = self.boards.get_mut(&chat)
+                {
+                    let delay = board.send_backoff.map_or(SEND_BACKOFF, |(_, last)| {
+                        last.saturating_mul(2).min(MAX_SEND_BACKOFF)
+                    });
+                    board.send_backoff = Some((self.clock.instant() + delay, delay));
+                    tracing::warn!(
+                        "Telegram board message for chat {chat} not sent, next attempt in {delay:?}: {e}"
+                    );
+                }
+                self.after_failure(chat, &e).await;
+                None
+            }
         }
     }
 
@@ -1034,13 +1070,7 @@ impl TelegramActor {
                     attempt += 1;
                 }
                 Err(e) => {
-                    // A non-retryable rejection of an *edit* means this message id is unusable —
-                    // the user deleted the board, or the chat lost it — and Telegram maps that to
-                    // `TgError::Api` (see `transport::map_error`). Board mode sends no ✅/❌ text
-                    // of its own (DESIGN §12.5), so holding on to a dead id would mean re-editing
-                    // it every tick and losing every completion in the burst. Forget it and let
-                    // the next redraw open a fresh message with the same rows.
-                    if matches!(e, TgError::Api(_))
+                    if message_is_gone(&e)
                         && self
                             .boards
                             .get(&chat)
@@ -1098,6 +1128,9 @@ impl TelegramActor {
         // board that says "0 active" under a frozen `updated` clock for ever, because the actor
         // had already forgotten it. So the board is dropped only once the edit lands; otherwise it
         // stays and the next tick — its `idle_since` is still past `RETIRE_AFTER` — tries again.
+        if message.is_none() && !board.send_due(self.clock.instant()) {
+            return;
+        }
         if let Err(reason) = self.limiter.acquire(chat) {
             tracing::trace!("board retirement for {chat} deferred: {reason:?}");
             return;
@@ -1106,16 +1139,7 @@ impl TelegramActor {
             Some(id) => self.edit(chat, id, &text).await.is_ok(),
             // The board message was refused mid-flight (see `edit`) and its rows never reached the
             // user in their final shape; the receipt is still owed, so post it as a new message.
-            None => match self.transport.send_message(chat, &text, None).await {
-                Ok(_) => {
-                    self.limiter.record_sent(chat);
-                    true
-                }
-                Err(e) => {
-                    self.after_failure(chat, &e).await;
-                    false
-                }
-            },
+            None => self.send_board(chat, &text).await.is_some(),
         };
         if closed {
             self.boards.remove(&chat);
@@ -1220,6 +1244,19 @@ fn failure_reason(view: &ItemView) -> Option<Arc<str>> {
         .or_else(|| view.error.as_ref().map(|e| Arc::clone(&e.message)))
 }
 
+fn message_is_gone(error: &TgError) -> bool {
+    let TgError::Api(text) = error else {
+        return false;
+    };
+    [
+        "message to edit not found",
+        "message can't be edited",
+        "MESSAGE_ID_INVALID",
+    ]
+    .iter()
+    .any(|gone| text.contains(gone))
+}
+
 /// A no-token actor for a caller that only needs the types (the `doctor` CLI, a smoke test).
 ///
 /// Kept next to the actor so the `MockTransport` re-export has an obvious home.
@@ -1266,5 +1303,34 @@ mod tests {
         assert_eq!(&*d.quality, "best");
         assert_eq!(d.playlist_item_limit, 5);
         assert_eq!(&*d.chapter_template, "%(title)s.%(ext)s");
+    }
+
+    #[test]
+    fn only_a_message_telegram_can_no_longer_edit_counts_as_gone() {
+        use teloxide::{ApiError, RequestError};
+
+        let mapped = |api| crate::transport::map_error(&RequestError::Api(api));
+        for gone in [
+            ApiError::MessageToEditNotFound,
+            ApiError::MessageCantBeEdited,
+            ApiError::MessageIdInvalid,
+            ApiError::Unknown("Bad Request: message to edit not found".to_owned()),
+        ] {
+            assert!(message_is_gone(&mapped(gone.clone())), "{gone}");
+        }
+        let bad_gateway = mapped(ApiError::Unknown("Bad Gateway".to_owned()));
+        assert_eq!(
+            bad_gateway,
+            TgError::Api("Unknown error: \"Bad Gateway\"".into())
+        );
+        for kept in [
+            bad_gateway,
+            mapped(ApiError::BotBlocked),
+            mapped(ApiError::MessageNotModified),
+            TgError::Network("message to edit not found".into()),
+            TgError::RetryAfter(Duration::from_secs(5)),
+        ] {
+            assert!(!message_is_gone(&kept), "{kept}");
+        }
     }
 }
