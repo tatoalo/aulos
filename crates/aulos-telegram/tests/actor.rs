@@ -630,7 +630,9 @@ async fn a_failed_fresh_send_keeps_the_receipt_pending_until_delivery() {
 
     h.advance(Duration::from_secs(3)).await;
     assert_eq!(h.transport.count(), 0);
-    h.tick().await;
+    h.advance(Duration::from_secs(29)).await;
+    assert_eq!(h.transport.count(), 0);
+    h.advance(Duration::from_secs(1)).await;
     assert_eq!(h.transport.count(), 1);
     assert!(matches!(h.transport.calls()[0], Call::Send { .. }));
     assert!(h.transport.texts()[0].contains("Carried clip"));
@@ -1138,6 +1140,112 @@ async fn a_failed_retirement_keeps_the_board_and_is_retried() {
         "expected the closing layout, got {:?}",
         h.transport.texts()
     );
+    assert_eq!(h.actor.health().boards, 0, "now it is forgotten");
+}
+
+#[tokio::test]
+async fn a_bad_gateway_on_a_board_edit_keeps_the_message_and_later_ticks_edit_it_in_place() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "A clip", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    assert_eq!(h.transport.count(), 1, "the board was drawn");
+    h.transport.clear();
+
+    h.transport
+        .fail_next(vec![TgError::Api("Unknown error: \"Bad Gateway\"".into())]);
+    v.status = Status::Finished;
+    v.percent = 100.0;
+    h.observe(&completed(&v)).await;
+    h.advance(Duration::from_millis(3_100)).await;
+    assert_eq!(h.transport.count(), 0, "the edit was refused");
+
+    h.advance(Duration::from_millis(3_100)).await;
+    h.advance(Duration::from_secs(61)).await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls.iter().all(|call| matches!(
+            call,
+            Call::Edit {
+                message: MessageId(1001),
+                ..
+            }
+        )),
+        "every later call edits the original message: {calls:?}"
+    );
+    assert!(calls[0].text().contains("✅  A clip"), "{calls:?}");
+    assert_eq!(calls[1].text(), "✅ All done — 1 finished\n\n✅  A clip");
+    assert_eq!(h.actor.health().boards, 0);
+}
+
+#[tokio::test]
+async fn a_board_send_that_keeps_failing_waits_30_then_60_then_120_seconds_between_attempts() {
+    for (failures, lands_after) in [(1_usize, 30_u64), (2, 90), (3, 210)] {
+        let mut h = Harness::new().await;
+        let id = ItemId::new();
+        h.observe(&added(&tg_view(id, "Resolving", Status::Queued, CHAT)))
+            .await;
+        h.transport.fail_next(
+            (0..failures)
+                .map(|_| TgError::Network("operation timed out".into()))
+                .collect(),
+        );
+        h.tick().await;
+        let renamed = tg_view(id, "A clip", Status::Queued, CHAT);
+        h.observe(&changed(&renamed, Status::Queued)).await;
+
+        for _ in 1..lands_after {
+            h.advance(Duration::from_secs(1)).await;
+        }
+        assert_eq!(
+            h.transport.count(),
+            0,
+            "{failures} failure(s): nothing lands before {lands_after} s"
+        );
+        assert_eq!(h.actor.health().boards, 1);
+
+        h.advance(Duration::from_secs(1)).await;
+        let calls = h.transport.calls();
+        assert_eq!(calls.len(), 1, "{failures} failure(s): {calls:?}");
+        assert!(matches!(calls[0], Call::Send { .. }), "{calls:?}");
+        assert!(calls[0].text().contains("A clip"), "{calls:?}");
+        assert!(!calls[0].text().contains("Resolving"), "{calls:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_closing_layout_of_a_board_whose_message_is_gone_waits_out_the_send_backoff() {
+    let mut h = Harness::new().await;
+    let mut v = tg_view(ItemId::new(), "Good", Status::Downloading, CHAT);
+    h.observe(&added(&v)).await;
+    h.tick().await;
+    v.status = Status::Finished;
+    v.percent = 100.0;
+    h.observe(&completed(&v)).await;
+    h.transport.clear();
+    h.transport.fail_next(vec![
+        TgError::Api("Bad Request: message to edit not found".into()),
+        TgError::Network("operation timed out".into()),
+        TgError::Network("operation timed out".into()),
+    ]);
+
+    h.advance(Duration::from_secs(60)).await;
+    for _ in 61..151 {
+        h.advance(Duration::from_secs(1)).await;
+    }
+    assert_eq!(h.transport.count(), 0, "{:?}", h.transport.calls());
+    assert_eq!(
+        h.actor.health().boards,
+        1,
+        "the board is kept until its closing layout lands"
+    );
+
+    h.advance(Duration::from_secs(1)).await;
+    let calls = h.transport.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(matches!(calls[0], Call::Send { .. }), "{calls:?}");
+    assert_eq!(calls[0].text(), "✅ All done — 1 finished\n\n✅  Good");
     assert_eq!(h.actor.health().boards, 0, "now it is forgotten");
 }
 
