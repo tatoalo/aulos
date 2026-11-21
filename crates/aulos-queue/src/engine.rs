@@ -1194,12 +1194,16 @@ impl Engine {
             if status == Status::Error
                 && let Some(error) = item.error.as_ref()
             {
+                // The URL and the message make this line enough on its own: it is the one line
+                // every failure produces, and often the only one a bug report quotes.
                 tracing::warn!(
                     item = %id,
                     provider = error.provider.as_deref()
                         .or_else(|| item.provider.as_ref().map(aulos_core::ProviderId::as_str))
                         .unwrap_or("unknown"),
                     code = %error.code,
+                    url = %item.url,
+                    error = %error.message,
                     "provider job failed"
                 );
             }

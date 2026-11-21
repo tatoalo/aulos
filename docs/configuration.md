@@ -123,7 +123,7 @@ ownership changes. The mounted directories must already be writable.
 | `BASE_DIR` | empty | Base directory for `ROBOTS_TXT`. Does not set a web asset directory. |
 | `DEFAULT_THEME` | `auto` | Initial UI theme: `auto`, `light` or `dark`. Browser preferences can override it. |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Global download slots; at least 1. |
-| `LOGLEVEL` | `INFO` | Base log level. Invalid values fall back to `INFO` with a warning. |
+| `LOGLEVEL` | `INFO` | Base log level: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (logged as `ERROR`). Invalid values fall back to `INFO` with a warning. |
 | `ENABLE_ACCESSLOG` | `false` | Log requests at INFO instead of DEBUG. |
 
 ## StreamingCommunity

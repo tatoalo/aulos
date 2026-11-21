@@ -101,6 +101,35 @@ pub fn load_config(env: &RawEnv) -> Result<(Config, Vec<String>), String> {
     Ok((cfg, warnings))
 }
 
+/// The `tracing` level a `LOGLEVEL` value stands for.
+///
+/// `LOGLEVEL` keeps legacy's Python level names, and two of them are not `tracing` levels.
+/// `EnvFilter` reads a bare word it cannot parse as a level as a *target* name, so passing
+/// `warning` or `critical` through unchanged enabled a target nobody logs to and left every
+/// other event without a directive: the server ran with no log output at all, errors included.
+/// `CRITICAL` has no counterpart above `error`, so it maps there.
+#[must_use]
+pub fn tracing_level(loglevel: &str) -> &'static str {
+    match loglevel.trim().to_ascii_uppercase().as_str() {
+        "TRACE" => "trace",
+        "DEBUG" => "debug",
+        "WARNING" | "WARN" => "warn",
+        "ERROR" | "CRITICAL" => "error",
+        _ => "info",
+    }
+}
+
+/// The filter used when `RUST_LOG` is unset: the dampening, then the `LOGLEVEL` base level.
+#[must_use]
+pub fn default_directives(loglevel: &str) -> String {
+    let mut directives = THIRD_PARTY_DAMPENING.join(",");
+    // The bare level goes last so it applies to everything the dampening did not name;
+    // `EnvFilter` resolves the most specific target, not the last directive.
+    directives.push(',');
+    directives.push_str(tracing_level(loglevel));
+    directives
+}
+
 /// Installs the `tracing` subscriber (DESIGN §16.5).
 ///
 /// `RUST_LOG` overrides everything — a documented escape hatch — and otherwise the base level is
@@ -110,15 +139,7 @@ pub fn init_tracing(cfg: &Config) {
 
     let filter = match std::env::var("RUST_LOG") {
         Ok(explicit) if !explicit.trim().is_empty() => explicit,
-        _ => {
-            let base = cfg.loglevel.to_lowercase();
-            let mut directives = THIRD_PARTY_DAMPENING.join(",");
-            // The bare level goes last so it applies to everything the dampening did not name;
-            // `EnvFilter` resolves the most specific target, not the last directive.
-            directives.push(',');
-            directives.push_str(&base);
-            directives
-        }
+        _ => default_directives(&cfg.loglevel),
     };
     let filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info"));
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
@@ -484,6 +505,31 @@ mod tests {
             assert!(
                 THIRD_PARTY_DAMPENING.contains(&format!("{name}=warn").as_str()),
                 "{name} must be dampened"
+            );
+        }
+    }
+
+    #[test]
+    fn every_accepted_loglevel_becomes_a_level_directive_not_a_target() {
+        use tracing::level_filters::LevelFilter;
+
+        for (loglevel, expected) in [
+            ("TRACE", LevelFilter::TRACE),
+            ("DEBUG", LevelFilter::DEBUG),
+            ("INFO", LevelFilter::INFO),
+            ("WARNING", LevelFilter::WARN),
+            ("ERROR", LevelFilter::ERROR),
+            ("CRITICAL", LevelFilter::ERROR),
+        ] {
+            let cfg = config::load(&env(&[("LOGLEVEL", loglevel)])).unwrap();
+            let directives = default_directives(&cfg.loglevel);
+            let base = directives.rsplit(',').next().unwrap();
+            // A word `EnvFilter` cannot parse as a level is silently taken as a target name,
+            // which is how `LOGLEVEL=WARNING` used to switch every log line off.
+            assert_eq!(
+                base.parse::<LevelFilter>().ok(),
+                Some(expected),
+                "LOGLEVEL={loglevel} produced the directive {base:?}"
             );
         }
     }

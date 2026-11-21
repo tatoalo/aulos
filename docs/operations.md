@@ -138,6 +138,16 @@ not be found or executed and requires a restart after correction. `doctor` perfo
 For download failures, collect the item error, server version, provider status and relevant logs.
 Remove tokens, cookies and proxy credentials before sharing them.
 
+The server writes its log to stderr. Only the entrypoint messages and the `listening on` line go
+to stdout, so a plain `>` redirect saves a file with no diagnostics in it. Redirect both streams:
+
+```sh
+docker logs aulos > aulos.log 2>&1
+```
+
+Each failed download logs one `provider job failed` line with the item, URL, error code and
+message. For a report, reproduce the failure with `LOGLEVEL=DEBUG`, which adds the yt-dlp output.
+
 - **Wrong format or quality:** check `format` and `merge_output_format` in your
   [yt-dlp options](configuration.md#yt-dlp-options).
 - **Extractor redirect limit:** `AULOS_RESOLVE_MAX_DEPTH` defaults to 3. Increase it only for a
