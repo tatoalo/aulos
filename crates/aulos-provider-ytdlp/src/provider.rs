@@ -213,10 +213,13 @@ impl YtdlpProvider {
     /// forward `log` frames through. The receiver is dropped immediately: [`ProgressSink`]
     /// documents a closed channel as a no-op rather than an error, precisely so a provider does
     /// not need two code paths.
-    fn detached_sink() -> ProgressSink {
+    ///
+    /// `id` is what the forwarded lines are tagged with. A resolution passes its item's id, so
+    /// yt-dlp's own account of a failed resolution carries the same `item=` as the engine's.
+    fn detached_sink(id: ItemId) -> ProgressSink {
         let (factory, rx) = ProgressSinkFactory::channel();
         drop(rx);
-        factory.for_item(ItemId::new())
+        factory.for_item(id)
     }
 }
 
@@ -265,7 +268,7 @@ impl Provider for YtdlpProvider {
             .runner
             .clone()
             .with_timeout((!remaining.is_zero()).then_some(remaining));
-        let sink = Self::detached_sink();
+        let sink = Self::detached_sink(ctx.item_id);
 
         match runner.run(&job, &sink, &ctx.cancel).await? {
             RunnerOutcome::Extracted { entries, truncated } => {
@@ -338,7 +341,8 @@ impl Provider for YtdlpProvider {
     async fn probe(&self) -> ProviderHealth {
         let job = Job::selftest("probe");
         let runner = self.runner.clone().with_timeout(Some(PROBE_TIMEOUT));
-        let sink = Self::detached_sink();
+        // A probe has no item, so its lines get an id of their own.
+        let sink = Self::detached_sink(ItemId::new());
         match runner.run(&job, &sink, &CancellationToken::new()).await {
             Ok(RunnerOutcome::Selftest(identity)) => match identity.yt_dlp {
                 Some(_) => ProviderHealth::Ok,
