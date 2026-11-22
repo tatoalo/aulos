@@ -72,10 +72,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # extractor fixes, and update-yt-dlp.yml's smoke job is what makes running canary acceptable.
 # Master builds are release assets, never PyPI, so the pin is a tag and the install is that tag's
 # source tarball. The pin lives in exactly ONE place in the repo (this ARG) — CI asserts that.
-RUN pip3 install --break-system-packages --no-cache-dir --no-deps \
-      "yt-dlp @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz"
 RUN pip3 install --break-system-packages --no-cache-dir \
-      "requests>=2.32.2,<3" "urllib3>=2.0.2,<3" \
+      "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz" \
  && pip3 check
 
 # deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)

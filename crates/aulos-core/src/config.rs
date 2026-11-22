@@ -1094,7 +1094,7 @@ fn load_inner(env: &RawEnv) -> (Result<Config, Vec<ConfigError>>, Vec<ConfigWarn
         sc_max_concurrent_downloads: g.fatal_u32_min("SC_MAX_CONCURRENT_DOWNLOADS", 1),
         sc_http: g.choice("AULOS_SC_HTTP", ScHttpMode::parse, ScHttpMode::Auto),
         sc_meta_concurrency: g.u32("AULOS_SC_META_CONCURRENCY"),
-        sc_extra_hosts: comma_list(g.str("AULOS_SC_EXTRA_HOSTS")),
+        sc_extra_hosts: host_list(g.str("AULOS_SC_EXTRA_HOSTS")),
         sc_use_output_template: g.bool("AULOS_SC_USE_OUTPUT_TEMPLATE"),
 
         jellyfin_sync_enabled: g.bool("JELLYFIN_SYNC_ENABLED"),
@@ -1292,6 +1292,24 @@ fn comma_list(raw: &str) -> Vec<Box<str>> {
         .filter(|s| !s.is_empty())
         .map(Into::into)
         .collect()
+}
+
+/// A comma list of hosts; an entry may be a host, a `host:port` pair or a URL.
+fn host_list(raw: &str) -> Vec<Box<str>> {
+    raw.split(',').filter_map(host_part).collect()
+}
+
+fn host_part(entry: &str) -> Option<Box<str>> {
+    let rest = entry.trim();
+    let rest = rest.split_once("://").map_or(rest, |(_, rest)| rest);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let host = if rest.starts_with('[') {
+        rest.find(']').map_or(rest, |end| &rest[..=end])
+    } else {
+        rest.split(':').next().unwrap_or(rest)
+    };
+    (!host.is_empty()).then(|| host.to_lowercase().into_boxed_str())
 }
 
 /// Python's `Path(p).resolve()` on a possibly non-existent path: absolutise against the current
@@ -2135,6 +2153,32 @@ mod tests {
                 .count();
             assert_eq!(reported, 1, "{key} reported {reported} times: {errs:?}");
         }
+    }
+
+    #[rstest]
+    #[case("mirror.example", "mirror.example")]
+    #[case(" Mirror.Example ", "mirror.example")]
+    #[case("https://mirror.example", "mirror.example")]
+    #[case("https://mirror.example/it/watch/5?e=1", "mirror.example")]
+    #[case("mirror.example/", "mirror.example")]
+    #[case("mirror.example:8443", "mirror.example")]
+    #[case("http://user:pw@mirror.example:8080/it", "mirror.example")]
+    #[case("http://[::1]:8080/it", "[::1]")]
+    fn sc_extra_hosts_entries_are_reduced_to_their_host(
+        #[case] entry: &str,
+        #[case] expected: &str,
+    ) {
+        let c = ok(&[("AULOS_SC_EXTRA_HOSTS", entry)]);
+        assert_eq!(c.sc_extra_hosts, vec![Box::<str>::from(expected)]);
+    }
+
+    #[test]
+    fn sc_extra_hosts_drops_empty_entries() {
+        let c = ok(&[("AULOS_SC_EXTRA_HOSTS", "a.test, ,https://,b.test")]);
+        assert_eq!(
+            c.sc_extra_hosts,
+            vec![Box::<str>::from("a.test"), Box::<str>::from("b.test")]
+        );
     }
 
     #[test]

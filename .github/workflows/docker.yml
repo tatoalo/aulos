@@ -150,6 +150,8 @@ jobs:
           docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" | grep -Fx "AULOS_VERSION=$IMAGE_VERSION"
           docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" | grep -Fx "METUBE_VERSION=$IMAGE_VERSION"
           docker run --rm "$img" doctor
+          docker run --rm --entrypoint python3 "$img" \
+            -c 'import brotli, Cryptodome, mutagen, websockets, yt_dlp_ejs, yt_dlp.networking._curlcffi'
           docker run --rm --network none \
             --mount "type=bind,source=$PWD/tests/e2e/redirect_smoke.py,target=/redirect_smoke.py,readonly" \
             --entrypoint python3 "$img" /redirect_smoke.py
