@@ -32,8 +32,9 @@ with open(pid_file, "w", encoding="utf-8") as handle:
 
 os.makedirs(out_dir, exist_ok=True)
 partial = os.path.join(out_dir, "hanging.mp4.part")
-with open(partial, "w", encoding="utf-8") as handle:
-    handle.write("partial bytes")
+for path in (partial, partial + "-Frag2", partial + "-Frag3.part"):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("partial bytes")
 
 channel = os.fdopen(3, "w", encoding="utf-8")
 

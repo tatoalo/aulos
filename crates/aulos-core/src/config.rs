@@ -1306,6 +1306,8 @@ fn host_part(entry: &str) -> Option<Box<str>> {
     let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
     let host = if rest.starts_with('[') {
         rest.find(']').map_or(rest, |end| &rest[..=end])
+    } else if rest.matches(':').count() > 1 {
+        rest
     } else {
         rest.split(':').next().unwrap_or(rest)
     };
@@ -2164,6 +2166,7 @@ mod tests {
     #[case("mirror.example:8443", "mirror.example")]
     #[case("http://user:pw@mirror.example:8080/it", "mirror.example")]
     #[case("http://[::1]:8080/it", "[::1]")]
+    #[case("::1", "::1")]
     fn sc_extra_hosts_entries_are_reduced_to_their_host(
         #[case] entry: &str,
         #[case] expected: &str,
