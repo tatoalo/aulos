@@ -39,10 +39,10 @@ RUN set -eux; case "$TARGETPLATFORM" in \
     if [ "$TARGETPLATFORM" != "${BUILDPLATFORM:-$TARGETPLATFORM}" ]; then \
       apt-get update && apt-get install -y --no-install-recommends "$CC_PKG" "$CXX_PKG" \
         && rm -rf /var/lib/apt/lists/*; \
-      V="$(echo "$T" | tr 'a-z-' 'A-Z_')"; \
+      U="$(echo "$T" | tr '-' '_')"; V="$(echo "$U" | tr 'a-z' 'A-Z')"; \
       { echo "CARGO_TARGET_${V}_LINKER=${TRIPLE}-gcc"; \
-        echo "CC_${T}=${TRIPLE}-gcc"; \
-        echo "CXX_${T}=${TRIPLE}-g++"; } > /cargo-env; \
+        echo "CC_${U}=${TRIPLE}-gcc"; \
+        echo "CXX_${U}=${TRIPLE}-g++"; } > /cargo-env; \
     fi
 COPY --from=planner /src/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
