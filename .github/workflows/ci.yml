@@ -85,6 +85,7 @@ jobs:
         run: |
           shellcheck --severity=warning \
             docker/entrypoint.sh \
+            docker/deno-lock.sh \
             tests/e2e/run.sh \
             crates/aulos-provider-ytdlp/tests/smoke_extract.sh
       - name: docker.yml builds linux/amd64 only

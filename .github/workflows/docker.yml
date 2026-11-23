@@ -152,6 +152,11 @@ jobs:
           docker run --rm "$img" doctor
           docker run --rm --entrypoint python3 "$img" \
             -c 'import brotli, Cryptodome, mutagen, websockets, yt_dlp_ejs, yt_dlp.networking._curlcffi'
+          # `deno run` waits for the solver lock; a second one must not start while it is held.
+          docker run --rm --network none --entrypoint sh "$img" -c \
+            'set -e; flock /usr/local/lib/deno/lock sleep 4 & sleep 1; s=$(date +%s)
+             echo "console.log(6 * 7)" | deno run - | grep -Fx 42
+             test $(( $(date +%s) - s )) -ge 2'
           docker run --rm --network none \
             --mount "type=bind,source=$PWD/tests/e2e/redirect_smoke.py,target=/redirect_smoke.py,readonly" \
             --entrypoint python3 "$img" /redirect_smoke.py

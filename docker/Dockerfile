@@ -76,8 +76,9 @@ RUN pip3 install --break-system-packages --no-cache-dir \
       "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz" \
  && pip3 check
 
-# deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y
+# deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver), off PATH: `deno` is docker/deno-lock.sh
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local/lib/deno sh -s -- -y \
+ && : > /usr/local/lib/deno/lock
 
 # BgUtils POT: sidecar binary + yt-dlp plugin into site-packages
 RUN set -eux; case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; \
@@ -98,7 +99,9 @@ RUN set -eux; A=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64); \
 COPY --from=builder /aulos-server /usr/local/bin/aulos-server
 COPY crates/aulos-provider-ytdlp/python/ /app/python/
 COPY docker/entrypoint.sh /usr/local/bin/aulos-entrypoint
-RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint && chmod +x /usr/local/bin/aulos-entrypoint
+COPY docker/deno-lock.sh /usr/local/bin/deno
+RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint /usr/local/bin/deno \
+ && chmod +x /usr/local/bin/aulos-entrypoint /usr/local/bin/deno
 COPY plugins/examples /opt/aulos/plugins-examples
 
 ENV PUID=1000 PGID=1000 UMASK=022 \
