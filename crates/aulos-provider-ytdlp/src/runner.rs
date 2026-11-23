@@ -506,7 +506,7 @@ fn log_child_line(pid: u32, line: &str) {
 /// Removes the partial files a killed job left behind (Δ C18).
 ///
 /// Only paths inside the job's own output or scratch directory are touched, and only the
-/// `.part` / `.ytdl` pair yt-dlp actually writes. Legacy deleted at most one `.part` — and
+/// `.part` / `.ytdl` pair and the fragment files yt-dlp actually writes. Legacy deleted at most one `.part` — and
 /// usually none, because its `tmpfilename` had been cleared by the next frame.
 fn cleanup_partials(job: &Job, partials: &[Box<str>]) {
     let roots: Vec<&Path> = [
@@ -525,7 +525,10 @@ fn cleanup_partials(job: &Job, partials: &[Box<str>]) {
             tracing::debug!(path = %path.display(), "partial is outside every known root; left alone");
             continue;
         }
-        for candidate in [path.to_path_buf(), path.with_extension("ytdl")] {
+        for candidate in [path.to_path_buf(), path.with_extension("ytdl")]
+            .into_iter()
+            .chain(fragments_of(path))
+        {
             match std::fs::remove_file(&candidate) {
                 Ok(()) => tracing::debug!(path = %candidate.display(), "removed a partial file"),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -535,6 +538,22 @@ fn cleanup_partials(job: &Job, partials: &[Box<str>]) {
             }
         }
     }
+}
+
+/// The `<partial>-Frag<N>` and `<partial>-Frag<N>.part` files of a fragmented download.
+fn fragments_of(partial: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (partial.parent(), partial.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}-Frag", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// Which terminator the transcript carried.

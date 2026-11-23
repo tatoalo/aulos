@@ -302,6 +302,11 @@ async fn cancelling_kills_the_whole_group_and_cleans_the_partials() {
         !partial.exists(),
         "the partial file must be cleaned up (Δ C18)"
     );
+    let left: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "fragment files must go too: {left:?}");
 
     // The grandchild ignores SIGTERM too, so only a `killpg` + SIGKILL reaches it. This is the
     // legacy bug: `proc.kill()` left ffmpeg writing into a cancelled item's `.part`.

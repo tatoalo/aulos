@@ -135,7 +135,7 @@ ownership changes. The mounted directories must already be writable.
 | `SC_MAX_CONCURRENT_DOWNLOADS` | `1` | StreamingCommunity slots, independent of global slots; at least 1. |
 | `AULOS_SC_HTTP` | `auto` | `auto`, `impersonate` or `plain`. Impersonation requires the default `sc-impersonate` build feature. |
 | `AULOS_SC_META_CONCURRENCY` | `4` | Concurrent season metadata fetches. |
-| `AULOS_SC_EXTRA_HOSTS` | empty | Comma-separated additional StreamingCommunity host match strings. |
+| `AULOS_SC_EXTRA_HOSTS` | empty | Comma-separated additional StreamingCommunity hosts, for mirrors whose domain does not contain `streamingcommunity`. An entry may be a host or a URL; only its host is used. |
 | `AULOS_SC_USE_OUTPUT_TEMPLATE` | `false` | Use configured output templates for StreamingCommunity naming. |
 
 ## Jellyfin

@@ -39,10 +39,10 @@ RUN set -eux; case "$TARGETPLATFORM" in \
     if [ "$TARGETPLATFORM" != "${BUILDPLATFORM:-$TARGETPLATFORM}" ]; then \
       apt-get update && apt-get install -y --no-install-recommends "$CC_PKG" "$CXX_PKG" \
         && rm -rf /var/lib/apt/lists/*; \
-      V="$(echo "$T" | tr 'a-z-' 'A-Z_')"; \
+      U="$(echo "$T" | tr '-' '_')"; V="$(echo "$U" | tr 'a-z' 'A-Z')"; \
       { echo "CARGO_TARGET_${V}_LINKER=${TRIPLE}-gcc"; \
-        echo "CC_${T}=${TRIPLE}-gcc"; \
-        echo "CXX_${T}=${TRIPLE}-g++"; } > /cargo-env; \
+        echo "CC_${U}=${TRIPLE}-gcc"; \
+        echo "CXX_${U}=${TRIPLE}-g++"; } > /cargo-env; \
     fi
 COPY --from=planner /src/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -72,14 +72,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # extractor fixes, and update-yt-dlp.yml's smoke job is what makes running canary acceptable.
 # Master builds are release assets, never PyPI, so the pin is a tag and the install is that tag's
 # source tarball. The pin lives in exactly ONE place in the repo (this ARG) — CI asserts that.
-RUN pip3 install --break-system-packages --no-cache-dir --no-deps \
-      "yt-dlp @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz"
 RUN pip3 install --break-system-packages --no-cache-dir \
-      "requests>=2.32.2,<3" "urllib3>=2.0.2,<3" \
+      "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp-master-builds/releases/download/${YTDLP_VERSION}/yt-dlp.tar.gz" \
  && pip3 check
 
-# deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver)
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y
+# deno (yt-dlp[deno] / yt-dlp-ejs JS challenge solver), off PATH: `deno` is docker/deno-lock.sh
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local/lib/deno sh -s -- -y \
+ && : > /usr/local/lib/deno/lock
 
 # BgUtils POT: sidecar binary + yt-dlp plugin into site-packages
 RUN set -eux; case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; \
@@ -100,7 +99,9 @@ RUN set -eux; A=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64); \
 COPY --from=builder /aulos-server /usr/local/bin/aulos-server
 COPY crates/aulos-provider-ytdlp/python/ /app/python/
 COPY docker/entrypoint.sh /usr/local/bin/aulos-entrypoint
-RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint && chmod +x /usr/local/bin/aulos-entrypoint
+COPY docker/deno-lock.sh /usr/local/bin/deno
+RUN sed -i 's/\r$//' /usr/local/bin/aulos-entrypoint /usr/local/bin/deno \
+ && chmod +x /usr/local/bin/aulos-entrypoint /usr/local/bin/deno
 COPY plugins/examples /opt/aulos/plugins-examples
 
 ENV PUID=1000 PGID=1000 UMASK=022 \
